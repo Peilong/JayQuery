@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install ruff
+      - run: ruff check . --select E,F,I,UP
+
+  test:
+    name: Tests (pytest)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install CPU-only PyTorch (CI — no GPU)
+        run: |
+          pip install torch==2.2.2+cpu torchvision==0.17.2+cpu \
+            --index-url https://download.pytorch.org/whl/cpu
+      - name: Install remaining dependencies
+        run: |
+          pip install flwr opacus autodp numpy pandas scikit-learn \
+            xgboost imbalanced-learn cryptography pycryptodome \
+            grpcio protobuf wandb omegaconf pyyaml tqdm \
+            pytest pytest-cov python-dotenv rich
+      - name: Run unit tests (skip slow / integration)
+        env:
+          WANDB_MODE: offline
+        run: pytest tests/ -v -m "not slow and not integration" --cov=. --cov-report=xml
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          file: coverage.xml
+          fail_ci_if_error: false

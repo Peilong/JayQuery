@@ -1,0 +1,47 @@
+experiment:
+  id: 3
+  name: dp_epsilon_grid
+  week: 7
+  description: "VFL+DP at epsilon in {0.1, 0.5, 1.0, 2.0, 5.0, 10.0}. Core privacy-utility experiment."
+  owner: both
+
+server:
+  host: localhost
+  port: 8080
+
+data:
+  module: BBB_2013J
+  processed_dir: data/processed
+  seed: 42
+
+training:
+  num_rounds: 50
+  batch_size: 64
+  learning_rate: 1e-3
+  dropout_rate: 0.3
+  embedding_dim: 32
+  early_stopping_patience: 10
+
+model:
+  input_dim_a: 12
+  input_dim_b: 22
+  embedding_dim: 32
+  top_model_dropout: 0.2
+
+privacy:
+  dp_enabled: true
+  # epsilon is overridden by --epsilon CLI argument
+  epsilon: 1.0
+  delta: 1.0e-5
+  max_grad_norm: 1.0
+  noise_type: gaussian
+
+# Run this config for each epsilon in: [0.1, 0.5, 1.0, 2.0, 5.0, 10.0]
+# Example: python -m fl_server.server --config experiments/configs/exp03_dp_epsilon_grid.yaml --epsilon 1.0
+epsilon_grid: [0.1, 0.5, 1.0, 2.0, 5.0, 10.0]
+
+logging:
+  wandb_project: jayquery
+  log_every_n_rounds: 1
+  save_checkpoint: true
+  checkpoint_dir: experiments/checkpoints

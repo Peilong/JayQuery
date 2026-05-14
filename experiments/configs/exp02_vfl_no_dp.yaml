@@ -1,0 +1,40 @@
+experiment:
+  id: 2
+  name: vfl_no_dp
+  week: 5
+  description: "Full VFL (SplitNN) without Differential Privacy. Upper bound for VFL performance."
+  owner: alex
+
+server:
+  host: localhost
+  port: 8080
+
+data:
+  module: BBB_2013J
+  processed_dir: data/processed
+  seed: 42
+
+training:
+  num_rounds: 50
+  batch_size: 64
+  learning_rate: 1e-3
+  dropout_rate: 0.3
+  embedding_dim: 32
+  early_stopping_patience: 10
+  lr_scheduler: reduce_on_plateau
+
+model:
+  input_dim_a: 12
+  input_dim_b: 22
+  embedding_dim: 32
+  top_model_dropout: 0.2
+
+privacy:
+  dp_enabled: false
+  epsilon: .inf
+  delta: 1.0e-5
+  max_grad_norm: 1.0
+
+logging:
+  wandb_project: jayquery
+  log_every_n_rounds: 1

@@ -1,0 +1,67 @@
+# ── Python ───────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+*.whl
+
+# ── Virtual environments ─────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+.conda/
+
+# ── Data (never commit raw student data) ─────────────────────────
+data/raw/
+data/processed/
+*.pkl
+*.csv
+*.parquet
+!experiments/configs/*.yaml
+!docs/*.md
+
+# ── Model checkpoints ────────────────────────────────────────────
+experiments/checkpoints/
+*.pt
+*.pth
+*.ckpt
+
+# ── Environment & secrets ─────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# ── wandb ────────────────────────────────────────────────────────
+wandb/
+.wandb/
+
+# ── Jupyter ──────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ── IDEs ─────────────────────────────────────────────────────────
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# ── Testing & coverage ───────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# ── Logs ─────────────────────────────────────────────────────────
+*.log
+logs/

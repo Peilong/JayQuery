@@ -1,0 +1,26 @@
+syntax = "proto3";
+package jayquery.vfl;
+
+// Messages exchanged between Silo clients and the FL server at the cut layer.
+// Owner: Alex Pellet (server-side); Wyatt uses the generated Python stubs only.
+
+// Sent by each Silo client to the server each round.
+message EmbeddingRequest {
+  string silo_id = 1;         // "silo_a" or "silo_b"
+  int32  round   = 2;         // Current Flower round number
+  bytes  embedding = 3;       // Serialized (batch_size x embedding_dim) float32 tensor
+  bytes  labels    = 4;       // Serialized (batch_size,) float32 label tensor (silo_b only)
+}
+
+// Sent by the server back to each Silo client.
+message GradientResponse {
+  string silo_id    = 1;      // Which silo this gradient is for
+  int32  round      = 2;
+  bytes  gradient   = 3;      // dL/d_emb serialized float32 tensor
+  float  loss       = 4;      // Scalar loss for logging
+  float  epsilon    = 5;      // Current privacy budget spent
+}
+
+service VFLService {
+  rpc SendEmbedding(EmbeddingRequest) returns (GradientResponse);
+}
