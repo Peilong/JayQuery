@@ -49,8 +49,8 @@ collaborate to train a dropout-risk predictor *without ever sharing raw records*
 
 ```bash
 # 1. Clone and set up environment
-git clone https://github.com/etown-cs/jayquery
-cd jayquery
+git clone https://github.com/Peilong/JayQuery.git
+cd JayQuery
 conda create -n jayquery python=3.11 && conda activate jayquery
 pip install -r requirements.txt
 
@@ -103,7 +103,7 @@ jayquery/
 ## Research Plan
 
 The full 10-week plan (reading lists, software specs, model architectures, and
-week-by-week deliverables) is in `docs/JayQuery_Research_Plan_v2.docx`.
+week-by-week deliverables) is in `docs/JayQuery_Research_Plan.docx`.
 
 ---
 
