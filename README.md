@@ -41,7 +41,7 @@ collaborate to train a dropout-risk predictor *without ever sharing raw records*
 | Privacy-preserving record alignment | ECDH-based Private Set Intersection (PSI) |
 | Privacy guarantee | Differential Privacy via Opacus 1.4 (DP-SGD) |
 | Red Team evaluation | Model Inversion Attack (iDLG / gradient-matching) |
-| Dataset | [OULAD](https://analyse.kmi.open.ac.uk/open_dataset) |
+| Dataset | [OULAD](https://analyse.kmi.open.ac.uk/open-dataset) |
 
 ---
 

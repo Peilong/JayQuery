@@ -8,27 +8,25 @@ set -euo pipefail
 RAW_DIR="${OULAD_RAW_DIR:-data/raw}"
 mkdir -p "$RAW_DIR"
 
-BASE_URL="https://analyse.kmi.open.ac.uk/open_dataset/download"
+ZIP_URL="https://analyse.kmi.open.ac.uk/open-dataset/download"
+ZIP_FILE="$RAW_DIR/oulad.zip"
 
-FILES=(
-  "studentInfo.csv"
-  "studentRegistration.csv"
-  "studentAssessment.csv"
-  "studentVle.csv"
-  "assessments.csv"
-  "vle.csv"
-  "courses.csv"
-)
+# One file we expect after extraction
+CHECK_FILE="$RAW_DIR/studentInfo.csv"
 
-echo "[OULAD] Downloading dataset to $RAW_DIR ..."
-for f in "${FILES[@]}"; do
-  if [ -f "$RAW_DIR/$f" ]; then
-    echo "  [SKIP] $f already exists"
-  else
-    echo "  [DOWNLOAD] $f"
-    curl -L -o "$RAW_DIR/$f" "$BASE_URL/$f" --progress-bar
-  fi
-done
+if [ -f "$CHECK_FILE" ]; then
+  echo "[OULAD] Dataset already extracted in $RAW_DIR"
+  exit 0
+fi
+
+echo "[OULAD] Downloading dataset archive..."
+curl -L "$ZIP_URL" -o "$ZIP_FILE" --progress-bar
+
+echo "[OULAD] Extracting archive..."
+unzip -o "$ZIP_FILE" -d "$RAW_DIR"
+
+# Optional cleanup
+rm -f "$ZIP_FILE"
 
 echo "[OULAD] Done. Files in $RAW_DIR:"
 ls -lh "$RAW_DIR"
