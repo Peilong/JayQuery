@@ -1,14 +1,15 @@
+#18-05-26 [AMXP] : Cutting anything that is not necessary at this initial point in the project.
 # ── Core ML ──────────────────────────────────────────────────────
 torch==2.2.2
-torchvision==0.17.2
-torchaudio==2.2.2
+#torchvision==0.17.2
+#torchaudio==2.2.2
 
 # ── Federated Learning ───────────────────────────────────────────
 flwr==1.8.0
 
 # ── Differential Privacy ─────────────────────────────────────────
 opacus==1.4.1
-autodp==0.2
+#autodp==0.2
 
 # ── Data & ML ────────────────────────────────────────────────────
 numpy==1.26.4
@@ -23,9 +24,9 @@ cryptography==42.0.7
 pycryptodome==3.20.0
 
 # ── Networking ───────────────────────────────────────────────────
-grpcio==1.63.0
-grpcio-tools==1.63.0
-protobuf==4.25.3
+#grpcio==1.63.0
+#grpcio-tools==1.63.0
+#protobuf==4.25.3
 
 # ── Experiment Tracking ──────────────────────────────────────────
 wandb==0.17.0
@@ -38,9 +39,10 @@ seaborn==0.13.2
 plotly==5.20.0
 
 # ── Notebooks ────────────────────────────────────────────────────
-jupyter==1.0.0
-ipywidgets==8.1.2
-nbconvert==7.16.3
+#Jupyter and notebooks should probably be installed separately
+#jupyter==1.0.0
+#ipywidgets==8.1.2
+#nbconvert==7.16.3
 
 # ── Testing & Quality ────────────────────────────────────────────
 pytest==8.2.0
@@ -51,5 +53,5 @@ mypy==1.10.0
 # ── Utilities ────────────────────────────────────────────────────
 tqdm==4.66.4
 python-dotenv==1.0.1
-typer==0.12.3
+typer==0.9.4 #latest compatible with flwr v1.8.0
 rich==13.7.1
