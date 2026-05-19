@@ -15,14 +15,14 @@
 3. Relates to: This project uses VFL, the paper provides good detail on various parts of VFL and some security/encryption methods.
 
 ### Vepakomma et al. 2018 (SplitNN)
-1. 
-2. 
-3. 
+1. What it does: 
+2. Surprising: 
+3. Relates to: SplitNN is an example of what we aim to do with JayQuery, being a program that takes information from separate silos and combines the data into one.
 
 ### Kuzilek et al. 2017 (OULAD)
-1. 
-2. 
-3. 
+1. What it does: 
+2. Surprising: 
+3. Relates to: 
 
 ---
 > Continue adding one entry per paper each week. Share with Dr. Li before Monday meeting.
