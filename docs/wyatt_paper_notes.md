@@ -20,9 +20,9 @@
 3. Relates to: SplitNN is an example of what we aim to do with JayQuery, being a program that takes information from separate silos and combines the data into one, while still being legal.
 
 ### Kuzilek et al. 2017 (OULAD)
-1. What it does: 
-2. Surprising: 
-3. Relates to: 
+1. What it does: This paper explains the dataset of OULAD, explaining a little on how OU operates as an online university. It also provides the methodology for going from raw student data to the data given in OULAD. It also proceeds to explain how the data is presented for use.
+2. Surprising: With over 32 thousand students, the option to opt-out for data-collection not being present really reminded me that 2017 was before all the companies turned to LLMs and the sort, even before the LLMs were able to do what they are able to now.
+3. Relates to: This is our testing dataset to make sure JayQuery is functional.
 
 ---
 > Continue adding one entry per paper each week. Share with Dr. Li before Monday meeting.
