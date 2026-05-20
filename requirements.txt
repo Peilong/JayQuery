@@ -29,7 +29,7 @@ pycryptodome==3.20.0
 #protobuf==4.25.3
 
 # ── Experiment Tracking ──────────────────────────────────────────
-wandb==0.17.0
+wandb==0.27.0 #upgraded because of issues with the API key.
 omegaconf==2.3.0
 pyyaml==6.0.1
 
