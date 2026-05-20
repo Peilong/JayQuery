@@ -15,9 +15,9 @@
 3. Relates to: This project uses VFL, the paper provides good detail on various parts of VFL and some security/encryption methods.
 
 ### Vepakomma et al. 2018 (SplitNN)
-1. What it does: 
-2. Surprising: 
-3. Relates to: SplitNN is an example of what we aim to do with JayQuery, being a program that takes information from separate silos and combines the data into one.
+1. What it does: This paper is on SplitNN, a deep learning method. It specifically goes into configurations useful for a medical setting, being able to help diagnose patients by merging data from different areas, mentioning radiology and pathology as the concrete examples. It intends to do this without sharing raw data on the patient, which could result in HIPAA non-compliance. With SplitNN, it showed that in between it, federated averaging, and large batch SGD, SplitNN was among the best, especially with a large amount of clients (500).
+2. Surprising: In the case of computational power at 500 clients, I found it surprising that SplitNN was little more than a half of a percent of the other two methods, at 0.03 TFlops compared to 5.89 TFlops.
+3. Relates to: SplitNN is an example of what we aim to do with JayQuery, being a program that takes information from separate silos and combines the data into one, while still being legal.
 
 ### Kuzilek et al. 2017 (OULAD)
 1. What it does: 
