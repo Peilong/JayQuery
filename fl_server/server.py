@@ -1,3 +1,8 @@
+"""
+----- MARKED FOR DELETION 22-05-26 : AMXP
+-- Using server_app.py instead.
+"""
+
 """Flower server entry point for JayQuery VFL training.
 
 Owner: Alex Pellet
