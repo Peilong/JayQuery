@@ -24,5 +24,71 @@
 2. Surprising: With over 32 thousand students, the option to opt-out for data-collection not being present really reminded me that 2017 was before all the companies turned to LLMs and the sort, even before the LLMs were able to do what they are able to now.
 3. Relates to: This is our testing dataset to make sure JayQuery is functional.
 
+## Week 2
+
+### Kairouz et al. 2021 (FnTML)
+NOT FULL READING
+1. What it does: 
+2. Surprising: 
+3. Relates to: 
+
+### Pinkas et al. 2018 (ACM CCS)
+1. What it does: 
+2. Surprising: 
+3. Relates to: 
+
+### Dwork & Roth 2014 (FnTCS)
+(Chapters 1-4)
+1. What it does: 
+2. Surprising: 
+3. Relates to: 
+
+## Week 3
+
+### Abadi et al. 2016 (ACM CCS)
+1. What it does: 
+2. Surprising: 
+3. Relates to: 
+
+### Huang et al. 2012 (NDSS)
+NOT FULL READING (Sections 1-2)
+1. What it does: 
+2. Surprising: 
+3. Relates to: 
+
+## Week 4
+
+### Mironov 2017 (IEEE CSP)
+NOT FULL READING (Sections 1-3)
+1. What it does: 
+2. Surprising: 
+3. Relates to: 
+
+## Week 7
+
+### Fredrikson et al. 2015 (ACM CCS)
+1. What it does: 
+2. Surprising: 
+3. Relates to: 
+
+### Zhao et al. 2020 (NeurIPS)
+1. What it does: 
+2. Surprising: 
+3. Relates to: 
+
+## Week 8
+
+### Jin et al. 2021 (NeurIPS)
+NOT FULL READING (Sections 1-4)
+1. What it does: 
+2. Surprising: 
+3. Relates to: 
+
+### Li et al. 2022 (ICLR)
+NOT FULL READING
+1. What it does: 
+2. Surprising: 
+3. Relates to: 
+
 ---
 > Continue adding one entry per paper each week. Share with Dr. Li before Monday meeting.
