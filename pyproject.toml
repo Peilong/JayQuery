@@ -44,3 +44,19 @@ markers = [
 [tool.coverage.run]
 source = ["."]
 omit = ["tests/*", "notebooks/*", "scripts/*", "experiments/*"]
+
+# ── Flower federation config ──────────────────────────────────────
+[tool.flwr.app]
+publisher = "jayquery"
+
+[tool.flwr.app.components]
+serverapp = "fl_server.server_app:app"
+clientapp = "fl_client.client_app:app"
+
+[tool.flwr.app.config]
+num-server-rounds = 50
+learning-rate = 1e-3
+embedding-dim = 32
+input-dim-a = 12
+input-dim-b = 22
+processed-dir = "data/processed"
