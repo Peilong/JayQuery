@@ -1,3 +1,8 @@
+"""
+----- MARKED FOR DELETION 22-05-26 : AMXP
+-- Replaced with the newer API of flwr
+"""
+
 """Flower Strategy for Vertical Federated Learning.
 
 Owner: Alex Pellet

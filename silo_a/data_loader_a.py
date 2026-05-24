@@ -84,6 +84,45 @@ def load_silo_a(
     return train_loader, val_loader, test_loader
 
 
+def make_synthetic_loader_a(
+    n_train: int = 800,
+    n_val: int = 100,
+    n_test: int = 100,
+    batch_size: int = 64,
+    seed: int = 42,
+) -> tuple[DataLoader, DataLoader, DataLoader]:
+    """Generate synthetic Silo A data for development (no OULAD required).
+
+    Feature seed and label seed are fixed so that make_synthetic_loader_b produces
+    identical labels (same seed + 100), ensuring row alignment across silos.
+
+    Args:
+        n_train: Number of training samples.
+        n_val: Number of validation samples.
+        n_test: Number of test samples.
+        batch_size: Mini-batch size.
+        seed: Base random seed. Labels use seed+100 (shared with Silo B).
+
+    Returns:
+        Tuple of (train_loader, val_loader, test_loader).
+    """
+    n_total = n_train + n_val + n_test
+    X = np.random.default_rng(seed).standard_normal((n_total, 12)).astype(np.float32)
+    y = np.random.default_rng(seed + 100).binomial(1, 0.3, n_total).astype(np.float32)
+
+    g = torch.Generator().manual_seed(seed)
+    return (
+        DataLoader(
+            SiloADataset(X[:n_train], y[:n_train]),
+            batch_size=batch_size,
+            shuffle=True,
+            generator=g,
+        ),
+        DataLoader(SiloADataset(X[n_train : n_train + n_val], y[n_train : n_train + n_val]), batch_size=batch_size, shuffle=False),
+        DataLoader(SiloADataset(X[n_train + n_val :], y[n_train + n_val :]), batch_size=batch_size, shuffle=False),
+    )
+
+
 def validate_alignment(loader_a: DataLoader, loader_b: DataLoader, n_check: int = 10) -> bool:
     """Verify that Silo A and Silo B loaders contain the same students in the same order.
 
