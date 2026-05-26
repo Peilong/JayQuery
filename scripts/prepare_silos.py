@@ -29,6 +29,46 @@ from utils.reproducibility import seed_everything
 RAW_DIR = Path("data/raw")
 PROCESSED_DIR = Path("data/processed")
 
+def prepare_silo_a_data(
+    student_info: pd.DataFrame
+) -> pd.DataFrame:
+    """Prepares the data from the raw csv file for usage in Silo A. 
+    Encodes & Normalizes the features.
+
+    Args:
+        student_info: Raw studentInfo DataFrame.
+
+    Returns:
+        Dataframe of the prepared data
+    """
+    df = student_info.copy()
+    df["label"] = df["final_result"].isin(["Withdrawn", "Fail"]).astype(int)
+    df['cohort'] = df['code_module'].astype(str)+'_'+df['code_presentation'].astype(str)
+    df.drop(aixs=1,inplace=True,labels=['code_module','code_presentation','final_result'])
+    
+    #Ordinal encoding
+    enc = OrdinalEncoder()
+    df['imd_band_enc'] = enc.fit_transform(df[['imd_band']])
+    df['highest_education_enc'] = df['highest_education'].map({'No Formal quals':0,'Lower Than A Level':1,'A Level or Equivalent':2,'HE Qualification':3,'Post Graduate Qualification':4})
+    df['age_band_enc'] = enc.fit_transform(df['age_band'])
+    df.drop(axis=1,inplace=True,labels=['imd_band','highest_education','age_band'])
+    
+    #Binary Encoding
+    df["gender_enc"] = (df["gender"] == "F").astype(int)
+    df["disability_enc"] = (df["disability"] == "Y").astype(int)
+    
+    #One Hot Encoding
+    ohe = OneHotEncoder(drop='first',sparse_output=False)
+    region_encoded = ohe.fit_transform(df[['region']])
+    region_encoded = pd.DataFrame(region_encoded, columns=ohe.get_feature_names_out(['region']))
+    df = pd.concat([df.reset_index(drop=True),region_encoded.reset_index(drop=True)],axis=1)
+    df.drop(axis=1,inplace=True,labels=['region'])
+    
+    #Normalization
+    scaler = StandardScaler()
+    df['studied_credits_norm'] = scaler.fit_transform(df[['studied_credits']].fillna(0))
+    df.drop(axis=1,inplace=True,labels=['studied_credits'])
+    return df
 
 def build_silo_a(
     student_info: pd.DataFrame,
@@ -43,6 +83,9 @@ def build_silo_a(
     Returns:
         Tuple of (X, y) arrays aligned to intersection_ids order.
     """
+    
+    """
+    Moved to new method.
     df = student_info[student_info["id_student"].astype(str).isin(set(intersection_ids))].copy()
     df["id_student"] = df["id_student"].astype(str)
     df = df.set_index("id_student").reindex(intersection_ids)
@@ -64,7 +107,9 @@ def build_silo_a(
 
     # Normalize studied_credits
     scaler = StandardScaler()
-    df["studied_credits_norm"] = scaler.fit_transform(df[["studied_credits"]].fillna(0))
+    df["studied_credits_norm"] = scaler.fit_transform(df[["studied_credits"]].fillna(0))"""
+
+
 
     feature_cols = (
         ["imd_band_enc", "highest_education_enc", "age_band_enc",
@@ -112,6 +157,10 @@ def main() -> None:
     student_vle  = pd.read_csv(RAW_DIR / "studentVle.csv")
     student_ass  = pd.read_csv(RAW_DIR / "studentAssessment.csv")
     assessments  = pd.read_csv(RAW_DIR / "assessments.csv")
+
+    # Prepare Data for each silo before creation.
+    prepare_silo_a_data()
+    prepare_silo_b_data()
 
     # Filter to target module
     module_code, pres_code = args.module.split("_")
