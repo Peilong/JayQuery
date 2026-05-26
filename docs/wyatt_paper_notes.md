@@ -35,7 +35,7 @@ NOT FULL READING
 ### Pinkas et al. 2018 (ACM CCS)
 1. What it does: 
 2. Surprising: 
-3. Relates to: 
+3. Relates to: PSI protocols for adoption into the project.
 
 ### Dwork & Roth 2014 (FnTCS)
 (Chapters 1-4)
