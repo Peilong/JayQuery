@@ -25,3 +25,13 @@
 ### Thapa et al. 2022 (SplitFed)
 - Design choice: This paper focus on a hybrid architecture of Federated Learning and Split Learning, called SplitFed (SFL). The core problem this solves is the slowness of SL with many clients, along with better privacy and resource usage of FL. 
 - Implementation note: This is almost precisely aligned with what we are looking to implement with JayQuery. The difference in implementation will lie in the federated learning design, as this paper only explores horizontal federated learning. We will not be using FedAvg either, but this type of architecture is exactly what we are trying to achieve with our project.
+
+### Romero et al. 2010
+- Design choice: 
+- Implementation note: 
+
+### Kairouz et al. 2021
+- Design choice: 
+- Implementation note: 
+
+---
