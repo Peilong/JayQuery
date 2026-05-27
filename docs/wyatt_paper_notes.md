@@ -33,8 +33,8 @@ NOT FULL READING
 3. Relates to: 
 
 ### Pinkas et al. 2018 (ACM CCS)
-1. What it does: 
-2. Surprising: 
+1. What it does: This entire paper details various PSI protocols and their efficiency, correctness, and security. This leads to a final evaluation of the different protocols with different settings, showing how each protocol reacts to the different inputs.
+2. Surprising: The main thing I found surprising was just the sheer volume of different methods and protocols to get, what I consider to be, the same outcome.
 3. Relates to: PSI protocols for adoption into the project.
 
 ### Dwork & Roth 2014 (FnTCS)
