@@ -28,6 +28,7 @@
 | 4 | end_date | Last day of activity recorded with VLE | |
 | 5 | active_days | Count of distinct days with VLE activity | |
 | 6-25 | vle_click_[activity_type] | Sum of sum_click per activity_type | |
+> Removed the return of the mirrored label array in prepare_silos.py#build_silo_b(), as it was redundant and unused.
 
 ## Missing Value Strategy
 
@@ -42,5 +43,7 @@
 - Split: 80% train / 10% val / 10% test
 - Stratified on label to preserve class balance
 - SMOTE applied to training set ONLY (Silo A and Silo B separately)
+> SMOTE & train_test_split was originally planned for data/data_utils.py, but currently I don't see any justification to move it from scripts/prepare_silos.py. (possibly move it later if need be, but seems to just add bloat with the current implementation)
+
 
 > Fill in actual counts after running prepare_silos.py: train=___, val=___, test=___

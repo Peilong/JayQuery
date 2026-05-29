@@ -22,7 +22,7 @@ import numpy as np
 import pandas as pd
 from imblearn.over_sampling import SMOTE
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import OrdinalEncoder, StandardScaler
+from sklearn.preprocessing import OrdinalEncoder, StandardScaler, OneHotEncoder
 
 from utils.reproducibility import seed_everything
 
@@ -54,7 +54,7 @@ def prepare_silo_a_data(
     enc = OrdinalEncoder()
     df['imd_band_enc'] = enc.fit_transform(df[['imd_band']])
     df['highest_education_enc'] = df['highest_education'].map({'No Formal quals':0,'Lower Than A Level':1,'A Level or Equivalent':2,'HE Qualification':3,'Post Graduate Qualification':4})
-    df['age_band_enc'] = enc.fit_transform(df['age_band'])
+    df['age_band_enc'] = enc.fit_transform(df[['age_band']])
     df.drop(axis=1,inplace=True,labels=['imd_band','highest_education','age_band'])
     
     #Binary Encoding
@@ -72,7 +72,7 @@ def prepare_silo_a_data(
     scaler = StandardScaler()
     df['studied_credits_norm'] = scaler.fit_transform(df[['studied_credits']].fillna(0))
     df.drop(axis=1,inplace=True,labels=['studied_credits'])
-    return df
+    return df.set_index("id_student")
 
 def prepare_silo_b_data(
     module: str,
@@ -157,42 +157,58 @@ def build_silo_a(
     prepared_silo_a: pd.DataFrame,
     intersection_ids: list[str],
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Build Silo A feature matrix from studentInfo.csv (demographics).
+    """Build Silo A feature matrix from prepared_silo_a DataFrame created in prepare_silo_a_data().
 
     Args:
-        student_info: Raw studentInfo DataFrame.
+        prepared_silo_a: The prepared Silo A DataFrame.
         intersection_ids: Ordered list of student IDs from PSI output.
 
     Returns:
         Tuple of (X, y) arrays aligned to intersection_ids order.
     """
+    df = prepared_silo_a.reindex(intersection_ids)
 
+    feature_cols = [
+        "imd_band_enc", "highest_education_enc", "age_band_enc",
+        "gender_enc", "disability_enc", "studied_credits_norm"
+    ]
+    region_cols = [col for col in df.columns if col.startswith("region_")]
 
-    feature_cols = (
-        ["imd_band_enc", "highest_education_enc", "age_band_enc",
-         "gender_enc", "disability_enc", "studied_credits_norm"]
-    )
-    X_base = df[feature_cols].fillna(0).values
-    X_region = region_dummies.reindex(intersection_ids).fillna(0).values
-    X = np.hstack([X_base, X_region]).astype(np.float32)
+    X = df[feature_cols + region_cols].fillna(0).values.astype(np.float32)
     y = df["label"].fillna(0).values.astype(np.float32)
     return X, y
-
 
 def build_silo_b(
     prepared_silo_b: pd.DataFrame,
     intersection_ids: list[str],
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Build Silo B feature matrix from VLE + assessment data.
+    """Build Silo B feature matrix from prepared_silo_b DataFrame created in prepare_silo_b_data().
 
-    Returns: (X, y, label_array) where label_array mirrors silo_a labels.
+    Args:
+        prepared_silo_b: The prepared Silo B DataFrame.
+        intersection_ids: Ordered list of student IDs from PSI output.
+
+    Returns:
+        X an array of the Silo B features aligned to intersection_ids order.
     """
-    # TODO (Alex, Week 2): implement full Silo B feature engineering
-    # Placeholder — returns zeros until Week 2 implementation
-    n = len(intersection_ids)
-    X_placeholder = np.zeros((n, 22), dtype=np.float32)
-    y_placeholder = np.zeros(n, dtype=np.float32)
-    return X_placeholder, y_placeholder
+    intersection_ids = [int(i) for i in intersection_ids]
+    df = (
+        prepared_silo_b
+        .dropna(subset=["id_student"])
+        .assign(id_student=lambda x: x["id_student"].astype(int))
+        .set_index("id_student")
+        .reindex(intersection_ids)
+    )
+
+    vle_cols = [col for col in df.columns if col.startswith("vle_clicks_")]
+    feature_cols = [
+        "weighted_score_pct", "participation_rate", "num_assessments",
+        "start_date", "end_date", "active_days", "sum_click",
+        *vle_cols,
+    ]
+
+    X = df[feature_cols].fillna(0).values.astype(np.float32)
+    return X
 
 
 def main() -> None:
@@ -227,12 +243,12 @@ def main() -> None:
         print(f"[Silo Prep] Using PSI intersection: {len(intersection_ids)} students")
     else:
         # Fallback: use all student IDs (run PSI first in production)
-        intersection_ids = student_info["id_student"].astype(str).tolist()
+        intersection_ids = silo_a_prep.index.tolist()
         print("[Silo Prep] WARNING: ordered_id_list.json not found — using all IDs (no PSI)")
 
     # Build feature matrices
     X_a, y_a = build_silo_a(silo_a_prep, intersection_ids)
-    X_b, y_b = build_silo_b(silo_b_prep, intersection_ids)
+    X_b      = build_silo_b(silo_b_prep, intersection_ids)
 
     # Train/val/test split (same indices for both silos)
     idx = np.arange(len(intersection_ids))
@@ -241,6 +257,8 @@ def main() -> None:
                                           random_state=args.seed, stratify=y_a[idx_tv])
 
     # Apply SMOTE to training set only (Silo A)
+    print(y_a[:5])
+    print(np.unique(y_a))
     smote = SMOTE(random_state=args.seed)
     X_a_train_res, y_a_train_res = smote.fit_resample(X_a[idx_train], y_a[idx_train])
     X_b_train_res, _             = smote.fit_resample(X_b[idx_train], y_a[idx_train])
