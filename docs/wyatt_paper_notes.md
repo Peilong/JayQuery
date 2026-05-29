@@ -28,9 +28,9 @@
 
 ### Kairouz et al. 2021 (FnTML)
 NOT FULL READING
-1. What it does: 
-2. Surprising: 
-3. Relates to: 
+1. What it does: Very simply, it is an overview of federated learning, with different problems and challenges yet to be solved with how much research had been done on FL up to that point. As it should, it rattles off a definition for FL for those who were unaware of it.
+2. Surprising: I'm glad to see such a thorough exploration of FL going from basics and slowly getting up to speed, when there could have been practically nothing like this until farther down the line.
+3. Relates to: This is all federated learning related.
 
 ### Pinkas et al. 2018 (ACM CCS)
 1. What it does: This entire paper details various PSI protocols and their efficiency, correctness, and security. This leads to a final evaluation of the different protocols with different settings, showing how each protocol reacts to the different inputs.
@@ -39,9 +39,9 @@ NOT FULL READING
 
 ### Dwork & Roth 2014 (FnTCS)
 (Chapters 1-4)
-1. What it does: 
-2. Surprising: 
-3. Relates to: 
+1. What it does: These chapters are very focused on privacy and how to protect it by using differential privacy. It also explains a lot of the ups and downs for differential privacy, showcasing some of the downfalls. Chapter 3 goes into techniques and thorems for a whole host of different things from randomization to composition. The fourth chapter prioritizes handling queries and keeping some privacy while doing so. It has some more theorems and thoughts put into it, though as a chapter is heavy on the theorems and explaining them.
+2. Surprising: It's surprising just how good the examples are for explaining the different techniques and such in a simple way to help people with practically no experience understand generally what is going on.
+3. Relates to: This has a high chance of coming back for PSI or frankly just getting me up to speed on some security things.
 
 ## Week 3
 
