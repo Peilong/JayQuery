@@ -60,6 +60,7 @@ def prepare_silo_a_data(
     #Binary Encoding
     df["gender_enc"] = (df["gender"] == "F").astype(int)
     df["disability_enc"] = (df["disability"] == "Y").astype(int)
+    df.drop(axis=1,inplace=True,labels=['gender','disability'])
     
     #One Hot Encoding
     ohe = OneHotEncoder(drop='first',sparse_output=False)
