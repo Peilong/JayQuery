@@ -17,16 +17,12 @@ References:
   - CLAUDE.md "Implementing the Model Inversion Attack" step-by-step box
 """
 
-import csv
 from pathlib import Path
-from typing import Optional
 
 import torch
-import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from silo_a.bottom_model_a import BottomModelA
-
 
 # Column index of imd_band in the 12-dim Silo A feature vector (see data_loader_a.py)
 IMD_BAND_COL_IDX = 0

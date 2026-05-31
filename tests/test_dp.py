@@ -92,6 +92,7 @@ def test_accountant_budget_exceeded() -> None:
     NOTE: This test mocks get_epsilon() to force a budget exceeded condition.
     """
     from unittest.mock import patch
+
     from privacy.dp_wrapper import PrivacyBudgetExceededError
     from privacy.privacy_accountant import PrivacyBudgetTracker
 

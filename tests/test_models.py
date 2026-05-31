@@ -79,6 +79,7 @@ def test_bottom_model_a_get_embedding_matches_forward() -> None:
 def test_eval_utils_metrics_keys() -> None:
     """compute_metrics() returns all expected metric keys."""
     import numpy as np
+
     from baselines.eval_utils import compute_metrics
     y_true = np.array([0, 1, 0, 1, 1, 0])
     y_prob  = np.array([0.1, 0.9, 0.2, 0.8, 0.7, 0.3])

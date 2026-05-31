@@ -13,7 +13,6 @@ References:
 """
 
 import hashlib
-from typing import Any
 
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.asymmetric.ec import (

@@ -100,6 +100,14 @@ def make_synthetic_loader_b(
             shuffle=True,
             generator=g,
         ),
-        DataLoader(SiloBDataset(X[n_train : n_train + n_val], y[n_train : n_train + n_val]), batch_size=batch_size, shuffle=False),
-        DataLoader(SiloBDataset(X[n_train + n_val :], y[n_train + n_val :]), batch_size=batch_size, shuffle=False),
+        DataLoader(
+            SiloBDataset(X[n_train : n_train + n_val], y[n_train : n_train + n_val]),
+            batch_size=batch_size,
+            shuffle=False,
+        ),
+        DataLoader(
+            SiloBDataset(X[n_train + n_val :], y[n_train + n_val :]),
+            batch_size=batch_size,
+            shuffle=False,
+        ),
     )

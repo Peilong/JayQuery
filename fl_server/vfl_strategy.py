@@ -1,7 +1,5 @@
-"""
------ MARKED FOR DELETION 22-05-26 : AMXP
--- Replaced with the newer API of flwr
-"""
+# ----- MARKED FOR DELETION 22-05-26 : AMXP
+# -- Replaced with the newer API of flwr
 
 """Flower Strategy for Vertical Federated Learning.
 
@@ -12,8 +10,6 @@ Custom Strategy that orchestrates the VFL training loop:
   3. Both silo clients apply received gradients to their Bottom Models.
 """
 
-from logging import WARNING
-from typing import Optional
 
 import flwr as fl
 from flwr.common import FitRes, Parameters, Scalar
@@ -33,7 +29,7 @@ class VFLStrategy(fl.server.strategy.FedAvg):
     - Track val AUC and epsilon budget per round
     """
 
-    def __init__(self, top_model_state_dict: Optional[dict] = None) -> None:
+    def __init__(self, top_model_state_dict: dict | None = None) -> None:
         super().__init__()
         # TODO (Alex, Week 4): Initialize TopModel here
         self.top_model_state = top_model_state_dict
@@ -44,7 +40,7 @@ class VFLStrategy(fl.server.strategy.FedAvg):
         server_round: int,
         results: list[tuple[ClientProxy, FitRes]],
         failures: list[tuple[ClientProxy, FitRes] | BaseException],
-    ) -> tuple[Optional[Parameters], dict[str, Scalar]]:
+    ) -> tuple[Parameters | None, dict[str, Scalar]]:
         """TODO (Alex, Week 5): Implement VFL aggregation logic."""
         # Placeholder — calls FedAvg aggregation for scaffolding purposes
         return super().aggregate_fit(server_round, results, failures)

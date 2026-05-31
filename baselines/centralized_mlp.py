@@ -11,7 +11,6 @@ Usage:
 import numpy as np
 import torch
 import torch.nn as nn
-import wandb
 from torch.utils.data import DataLoader, TensorDataset
 
 from baselines.eval_utils import compute_metrics, print_metrics_table

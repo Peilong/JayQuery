@@ -3,11 +3,11 @@
 Run: pytest tests/test_loaders.py -v
 """
 
-import pytest
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
-from sklearn.preprocessing import OrdinalEncoder, StandardScaler, OneHotEncoder
-from pathlib import Path
+import pytest
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -42,7 +42,9 @@ def prepared_silo_a(raw_student_info):
 @pytest.fixture(scope="module")
 def prepared_silo_b(raw_student_vle, raw_vle, raw_assessments, raw_student_assessment):
     from scripts.prepare_silos import prepare_silo_b_data
-    return prepare_silo_b_data(MODULE, raw_student_vle, raw_vle, raw_assessments, raw_student_assessment)
+    return prepare_silo_b_data(
+        MODULE, raw_student_vle, raw_vle, raw_assessments, raw_student_assessment
+    )
 
 @pytest.fixture(scope="module")
 def intersection_ids(prepared_silo_a, prepared_silo_b):

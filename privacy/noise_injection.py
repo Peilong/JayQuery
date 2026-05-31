@@ -50,7 +50,6 @@ def add_dp_noise_to_embedding(
         4. Return embedding + noise.
         Remember: do NOT modify embedding in-place (return a new tensor).
     """
-    import math
 
     if epsilon <= 0:
         raise ValueError(f"epsilon must be > 0, got {epsilon}")

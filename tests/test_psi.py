@@ -21,7 +21,10 @@ def test_ecdh_basic() -> None:
     from psi.ecdh_utils import generate_keypair
     private_key, public_key = generate_keypair()
 
-    from cryptography.hazmat.primitives.asymmetric.ec import EllipticCurvePrivateKey, EllipticCurvePublicKey
+    from cryptography.hazmat.primitives.asymmetric.ec import (
+        EllipticCurvePrivateKey,
+        EllipticCurvePublicKey,
+    )
     assert isinstance(private_key, EllipticCurvePrivateKey), "private_key must be EllipticCurvePrivateKey"
     assert isinstance(public_key, EllipticCurvePublicKey), "public_key must be EllipticCurvePublicKey"
 
@@ -80,8 +83,9 @@ def test_psi_correctness() -> None:
     NOTE: This test starts a background server process — it may take 5–10 seconds.
     """
     import multiprocessing
-    from psi.psi_server import run_server
+
     from psi.psi_client import run_psi
+    from psi.psi_server import run_server
 
     # Build ID sets with known intersection
     client_ids = [str(i) for i in range(1000)]       # IDs 0–999
@@ -97,7 +101,8 @@ def test_psi_correctness() -> None:
     )
     server_proc.start()
 
-    import time; time.sleep(0.5)  # give server time to bind
+    import time
+    time.sleep(0.5)  # give server time to bind
 
     try:
         result = run_psi(client_ids, server_host="localhost", server_port=TEST_PORT)
@@ -110,7 +115,8 @@ def test_psi_correctness() -> None:
             f"  Missing: {true_intersection - result_set}\n"
             f"  Extra:   {result_set - true_intersection}"
         )
-        print(f"\n✅  PSI CORRECT — {len(result)} IDs in intersection (expected {len(true_intersection)})")
+        n_expected = len(true_intersection)
+        print(f"\n✅  PSI CORRECT — {len(result)} IDs in intersection (expected {n_expected})")
 
     finally:
         server_proc.terminate()
@@ -124,8 +130,9 @@ def test_psi_no_false_positives() -> None:
     Expected: PASSES after Week 3.
     """
     import multiprocessing
-    from psi.psi_server import run_server
+
     from psi.psi_client import run_psi
+    from psi.psi_server import run_server
 
     client_ids = [str(i) for i in range(500)]
     server_ids  = [str(i) for i in range(300, 800)]
@@ -136,7 +143,8 @@ def test_psi_no_false_positives() -> None:
         target=run_server, args=(server_ids, "localhost", TEST_PORT)
     )
     server_proc.start()
-    import time; time.sleep(0.5)
+    import time
+    time.sleep(0.5)
 
     try:
         result = run_psi(client_ids, server_host="localhost", server_port=TEST_PORT)

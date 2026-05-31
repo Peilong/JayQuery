@@ -9,11 +9,9 @@ Handles the Silo A side of the VFL training loop:
 """
 
 from collections import OrderedDict
-from typing import Optional
 
 import flwr as fl
 import torch
-import torch.nn as nn
 from flwr.common import NDArrays, Scalar
 
 from silo_a.bottom_model_a import BottomModelA

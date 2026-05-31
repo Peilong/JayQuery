@@ -13,14 +13,8 @@ Run:
     python -m psi.psi_server          # listens on PSI_SERVER_PORT (default 50051)
 """
 
-import json
 import os
 import socket
-import struct
-from pathlib import Path
-
-from psi.ecdh_utils import blind_id, generate_keypair
-
 
 PSI_SERVER_HOST = os.getenv("PSI_SERVER_HOST", "localhost")
 PSI_SERVER_PORT = int(os.getenv("PSI_SERVER_PORT", "50051"))
@@ -37,7 +31,9 @@ def _recv_all(conn: socket.socket, n: int) -> bytes:
     return data
 
 
-def run_server(server_ids: list[str], host: str = PSI_SERVER_HOST, port: int = PSI_SERVER_PORT) -> None:
+def run_server(
+    server_ids: list[str], host: str = PSI_SERVER_HOST, port: int = PSI_SERVER_PORT
+) -> None:
     """Start the PSI server, process one client connection, then exit.
 
     Args:

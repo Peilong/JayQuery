@@ -4,12 +4,10 @@ Owner: Alex Pellet
 Loads data/processed/silo_a.pkl and aligns rows to ordered_id_list.json.
 """
 
-import json
 import pickle
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 import torch
 from torch.utils.data import DataLoader, Dataset
 
@@ -118,8 +116,16 @@ def make_synthetic_loader_a(
             shuffle=True,
             generator=g,
         ),
-        DataLoader(SiloADataset(X[n_train : n_train + n_val], y[n_train : n_train + n_val]), batch_size=batch_size, shuffle=False),
-        DataLoader(SiloADataset(X[n_train + n_val :], y[n_train + n_val :]), batch_size=batch_size, shuffle=False),
+        DataLoader(
+            SiloADataset(X[n_train : n_train + n_val], y[n_train : n_train + n_val]),
+            batch_size=batch_size,
+            shuffle=False,
+        ),
+        DataLoader(
+            SiloADataset(X[n_train + n_val :], y[n_train + n_val :]),
+            batch_size=batch_size,
+            shuffle=False,
+        ),
     )
 
 

@@ -11,13 +11,8 @@ Run:
     python -m psi.psi_client
 """
 
-import json
 import os
-import socket
 from pathlib import Path
-
-from psi.ecdh_utils import blind_id, generate_keypair
-
 
 PSI_SERVER_HOST = os.getenv("PSI_SERVER_HOST", "localhost")
 PSI_SERVER_PORT = int(os.getenv("PSI_SERVER_PORT", "50051"))
@@ -49,7 +44,8 @@ def run_psi(
         4. Send blinded_client_ids as length-prefixed JSON.
         5. Receive (blinded_server_set, doubly_blinded_client_set) from server.
         6. Blind blinded_server_set with client_private_key → doubly_blinded_server.
-        7. Intersection = {id for id in local_ids if blind_id(id)^both_keys in doubly_blinded_server}
+        7. Intersection = {id for id in local_ids
+               if blind_id(id)^both_keys in doubly_blinded_server}
            IMPORTANT: Sort the result before returning.
         8. Write sorted intersection to OUTPUT_PATH as JSON.
         9. Return sorted intersection list.

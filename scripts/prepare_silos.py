@@ -22,7 +22,7 @@ import numpy as np
 import pandas as pd
 from imblearn.over_sampling import SMOTE
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import OrdinalEncoder, StandardScaler, OneHotEncoder
+from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder, StandardScaler
 
 from utils.reproducibility import seed_everything
 
@@ -45,7 +45,9 @@ def prepare_silo_a_data(
     df = student_info.copy()
     df["label"] = df["final_result"].isin(["Withdrawn", "Fail"]).astype(int)
     m_code, p_code = module.split("_")
-    df = df.query("code_module == @m_code and code_presentation == @p_code").drop(columns=['code_module', 'code_presentation','final_result'])
+    df = df.query("code_module == @m_code and code_presentation == @p_code").drop(
+        columns=['code_module', 'code_presentation', 'final_result']
+    )
     
     #impute null imd_band with mode of the region
     df['imd_band'] = df.groupby('region')['imd_band'].transform(lambda x: x.fillna(x.mode()[0]))    
@@ -53,7 +55,13 @@ def prepare_silo_a_data(
     #Ordinal encoding
     enc = OrdinalEncoder()
     df['imd_band_enc'] = enc.fit_transform(df[['imd_band']])
-    df['highest_education_enc'] = df['highest_education'].map({'No Formal quals':0,'Lower Than A Level':1,'A Level or Equivalent':2,'HE Qualification':3,'Post Graduate Qualification':4})
+    df['highest_education_enc'] = df['highest_education'].map({
+        'No Formal quals': 0,
+        'Lower Than A Level': 1,
+        'A Level or Equivalent': 2,
+        'HE Qualification': 3,
+        'Post Graduate Qualification': 4,
+    })
     df['age_band_enc'] = enc.fit_transform(df[['age_band']])
     df.drop(axis=1,inplace=True,labels=['imd_band','highest_education','age_band'])
     
@@ -103,7 +111,11 @@ def prepare_silo_b_data(
 
     merged = (
         student_vle
-        .merge(vle.drop(columns=['week_from', 'week_to','code_module','code_presentation']), on='id_site', how='left')
+        .merge(
+            vle.drop(columns=['week_from', 'week_to', 'code_module', 'code_presentation']),
+            on='id_site',
+            how='left',
+        )
         .query("code_module == @m_code and code_presentation == @p_code")
         .drop(columns=['code_module', 'code_presentation'])
     )

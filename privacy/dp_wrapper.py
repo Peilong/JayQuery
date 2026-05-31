@@ -12,11 +12,9 @@ References:
   - CLAUDE.md DP Wrapper Contract (Section "Key Interfaces")
 """
 
-from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
-from opacus import PrivacyEngine
 from opacus.grad_sample import GradSampleModule
 from opacus.optimizers import DPOptimizer
 from torch.utils.data import DataLoader

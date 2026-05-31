@@ -1,7 +1,5 @@
-"""
------ MARKED FOR DELETION 22-05-26 : AMXP
--- Using server_app.py instead.
-"""
+# ----- MARKED FOR DELETION 22-05-26 : AMXP
+# -- Using server_app.py instead.
 
 """Flower server entry point for JayQuery VFL training.
 
@@ -19,7 +17,7 @@ import flwr as fl
 import wandb
 
 from fl_server.vfl_strategy import VFLStrategy
-from utils.config import load_config, config_to_dict
+from utils.config import config_to_dict, load_config
 from utils.reproducibility import seed_everything
 
 
@@ -38,7 +36,7 @@ def main() -> None:
     seed_everything(args.seed)
 
     # Initialize wandb
-    run = wandb.init(
+    wandb.init(
         project="jayquery",
         name=f"exp{cfg.experiment.id:02d}_{cfg.experiment.name}_eps{cfg.privacy.epsilon}",
         tags=[f"week{cfg.experiment.week}", "alex", f"eps_{cfg.privacy.epsilon}"],

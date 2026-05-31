@@ -88,8 +88,8 @@ def main(grid: Grid, context: Context) -> None:
 
     log(INFO, "")
     log(INFO, "=== Training Complete ===")
-    for r, l in losses:
-        log(INFO, "  Round %3d — loss: %.4f", r, l)
+    for r, loss_val in losses:
+        log(INFO, "  Round %3d — loss: %.4f", r, loss_val)
 
 
 def _get_embeddings(
