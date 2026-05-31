@@ -21,6 +21,7 @@ from cryptography.hazmat.primitives.asymmetric.ec import (
     SECP256R1,
     EllipticCurvePrivateKey,
     EllipticCurvePublicKey,
+    derive_private_key,
     generate_private_key,
 )
 from cryptography.hazmat.primitives.serialization import (
@@ -42,7 +43,8 @@ def generate_keypair() -> tuple[EllipticCurvePrivateKey, EllipticCurvePublicKey]
         Implement this function using generate_private_key(SECP256R1(), default_backend()).
         Return (private_key, private_key.public_key()).
     """
-    raise NotImplementedError("TODO (Wyatt, Week 2): implement generate_keypair()")
+    private_key = generate_private_key(SECP256R1(), default_backend())
+    return (private_key, private_key.public_key())
 
 
 def blind_id(id_string: str, private_key: EllipticCurvePrivateKey) -> bytes:
@@ -66,6 +68,13 @@ def blind_id(id_string: str, private_key: EllipticCurvePrivateKey) -> bytes:
         3. Perform ECDH exchange: shared = private_key.exchange(ECDH(), derived_pubkey)
         4. Return the shared secret bytes (64 bytes).
     """
+    h_id = hash_id(id_string)
+    scale = int.from_bytes(h_id, byteorder="big")
+    scale = (scale % SECP256R1().group_order - 1) + 1
+    derived_privkey = derive_private_key(scale, SECP256R1())
+    derived_pubkey = derived_privkey.public_key()
+    shared = private_key.exchange(ECDH(), derived_pubkey)
+    return shared
     raise NotImplementedError("TODO (Wyatt, Week 2): implement blind_id()")
 
 
