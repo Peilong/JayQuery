@@ -25,8 +25,12 @@ def test_ecdh_basic() -> None:
         EllipticCurvePrivateKey,
         EllipticCurvePublicKey,
     )
-    assert isinstance(private_key, EllipticCurvePrivateKey), "private_key must be EllipticCurvePrivateKey"
-    assert isinstance(public_key, EllipticCurvePublicKey), "public_key must be EllipticCurvePublicKey"
+    assert isinstance(private_key, EllipticCurvePrivateKey), (
+        "private_key must be EllipticCurvePrivateKey"
+    )
+    assert isinstance(public_key, EllipticCurvePublicKey), (
+        "public_key must be EllipticCurvePublicKey"
+    )
 
 
 @pytest.mark.psi

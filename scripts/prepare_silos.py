@@ -156,8 +156,8 @@ def prepare_silo_b_data(
             num_assessments=('id_assessment', 'nunique')
         )
         .assign(
-            participation_rate=lambda x: x['total_weight'] / 200, #200 is the maximum of the total_weight column
-            weighted_score_pct=lambda x: x['weighted_score'] / 200 #200 is the theoretical maximum of the weight_score column
+            participation_rate=lambda x: x['total_weight'] / 200,
+            weighted_score_pct=lambda x: x['weighted_score'] / 200
         )
         .drop(columns=['total_weight','weighted_score'])
     )
@@ -265,7 +265,9 @@ def main() -> None:
 
     # Train/val/test split (same indices for both silos)
     idx = np.arange(len(intersection_ids))
-    idx_tv, idx_test = train_test_split(idx, test_size=args.test_size, random_state=args.seed, stratify=y_a)
+    idx_tv, idx_test = train_test_split(
+        idx, test_size=args.test_size, random_state=args.seed, stratify=y_a
+    )
     idx_train, idx_val = train_test_split(idx_tv, test_size=args.val_size/(1-args.test_size),
                                           random_state=args.seed, stratify=y_a[idx_tv])
 
@@ -292,7 +294,8 @@ def main() -> None:
         out_path = PROCESSED_DIR / f"{name}.pkl"
         with open(out_path, "wb") as f:
             pickle.dump(data, f)
-        print(f"[Silo Prep] Saved {out_path} — train={len(y_train)}, val={len(y_a[idx_val])}, test={len(y_a[idx_test])}")
+        n_val, n_test = len(y_a[idx_val]), len(y_a[idx_test])
+        print(f"[Silo Prep] Saved {out_path} — train={len(y_train)}, val={n_val}, test={n_test}")
 
 
 if __name__ == "__main__":

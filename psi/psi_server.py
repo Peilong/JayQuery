@@ -43,7 +43,8 @@ def run_server(
 
     TODO (Wyatt, Week 3 — Steps 5 in CLAUDE.md):
         1. Generate server keypair: server_private, server_public = generate_keypair()
-        2. Blind all server IDs: blinded_server = [blind_id(id, server_private) for id in server_ids]
+        2. Blind all server IDs:
+               blinded_server = [blind_id(id, server_private) for id in server_ids]
         3. Accept one TCP connection from the client.
         4. Receive the client's blinded ID list (length-prefixed JSON of hex strings).
         5. Re-blind each received item with server_private to get doubly-blinded client set.
