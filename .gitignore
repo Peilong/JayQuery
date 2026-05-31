@@ -17,6 +17,7 @@ venv/
 env/
 ENV/
 .conda/
+environment.yml
 
 # ── Data (never commit raw student data) ─────────────────────────
 data/raw/
@@ -54,6 +55,7 @@ wandb/
 *.swp
 *.swo
 .DS_Store
+
 
 # ── Testing & coverage ───────────────────────────────────────────
 .pytest_cache/

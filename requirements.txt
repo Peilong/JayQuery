@@ -1,5 +1,9 @@
 # 22-05-26 [AMXP] - Updated requirements with new versions of the packages.
 
+# ── Build ────────────────────────────────────────────────────────
+setuptools>=77
+wheel
+
 # ── Core ML ──────────────────────────────────────────────────────
 torch==2.4.1 
 #torchvision==0.19.1

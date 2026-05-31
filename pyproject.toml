@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "jayquery"
@@ -8,11 +8,15 @@ version = "0.1.0"
 description = "Privacy-Preserving Student Success Prediction with Vertical Federated Learning"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
 authors = [
     { name = "Alex Pellet", email = "pellet@etown.edu" },
     { name = "Wyatt Wilfong", email = "wilfong@etown.edu" },
 ]
+
+[tool.setuptools.packages.find]
+include = ["utils*", "psi*", "silo_a*", "silo_b*", "fl_client*", "fl_server*", "privacy*", "proto*"]
+exclude = ["data*", "notebooks*", "scripts*", "experiments*", "baselines*", "attack*"]
 
 [tool.ruff]
 line-length = 100

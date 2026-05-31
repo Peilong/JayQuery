@@ -19,3 +19,19 @@
 - Implementation note: When I first read this paper, I was under the impression that VFL and SplitNN were somehow different architectures. It was reinforced when reading the experiments section and the authors compared the efficiency of "Federated Learning" and "SplitNN". Upon further consideration and research, it has become more evident that VFL and SplitNN address different aspects of distributed learning. After clearing this confusion, I was able to much more clearly understand the direction of the project, and how I will go about implementing these DDL models. At this point, SplitNN seems to align closely with my intuition for how model partitioning could be used in a distributed learning format. I have no comments yet about changing these architectures to better suit the project.
 
 ---
+
+## Week 2
+
+### Thapa et al. 2022 (SplitFed)
+- Design choice: This paper focus on a hybrid architecture of Federated Learning and Split Learning, called SplitFed (SFL). The core problem this solves is the slowness of SL with many clients, along with better privacy and resource usage of FL. 
+- Implementation note: This is almost precisely aligned with what we are looking to implement with JayQuery. The difference in implementation will lie in the federated learning design, as this paper only explores horizontal federated learning. We will not be using FedAvg either, but this type of architecture is exactly what we are trying to achieve with our project.
+
+### Romero et al. 2010
+- Design choice: This paper focuses on data mining in relation to educational institutions. While it is a bit older (2010), and the machine learning algorithms are somewhat outdated, there is good information on the data collection and concerns with this type of project.
+- Implementation note: There is no real implementation techniques to take from this paper in regards to our VFL or SplitNN model. However there are some considerations on how this type of project could be used and directed for an educational institution. The student success could be just the first iteration of use for a prediction model like this one.
+
+### Kairouz et al. 2021
+- Design choice: This paper focuses on pretty much every topic I have explored so far. This is a good aggregation of the different papers and concepts that have been introduced thus far. This is also the first paper I have seen to specifically mention using SplitNN with a VFL data architecture.
+- Implementation note: This is an extremely useful resource, as it functions as a sort of generic lookup of where to find more detailed information relating to SpliNN and Federated Learning. Nothing specifically seems worth seeking to implement at this current point in the project, but useful notes to have on hand as we go further into the project.
+
+---
