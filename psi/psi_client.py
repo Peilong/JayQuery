@@ -11,8 +11,13 @@ Run:
     python -m psi.psi_client
 """
 
+import json
 import os
 from pathlib import Path
+import socket
+
+from psi.ecdh_utils import blind_id, generate_keypair
+from psi.psi_server import _recv_all
 
 PSI_SERVER_HOST = os.getenv("PSI_SERVER_HOST", "localhost")
 PSI_SERVER_PORT = int(os.getenv("PSI_SERVER_PORT", "50051"))
@@ -53,6 +58,26 @@ def run_psi(
     Common mistake (see CLAUDE.md):
         Always sort() both sets before comparing — Python sets are unordered.
     """
+    client_private, client_public = generate_keypair()
+    blinded_client_set = [blind_id(id, client_private) for id in local_ids]
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_socket:
+        client_socket.connect((server_host, server_port))
+        send_data = b"".join(blinded_client_set)  # TODO: convert to length-prefixed JSON
+        client_socket.sendall(send_data)
+
+        data = _recv_all(client_socket, 4096)  # TODO: receive length-prefixed JSON response
+        blinded_server_set, doubly_blinded_client_set = json.loads(data)
+        doubly_blinded_server = [blind_id(id, client_private) for id in blinded_server_set]
+        intersection = sorted(
+            id
+            for id in local_ids
+            if blind_id(id, client_private) in doubly_blinded_server
+        )
+        with open(OUTPUT_PATH, "w") as f:
+            json.dump(intersection, f)
+        return intersection
+    
     raise NotImplementedError("TODO (Wyatt, Week 3): implement run_psi()")
 
 

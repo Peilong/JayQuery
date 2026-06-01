@@ -16,6 +16,8 @@ Run:
 import os
 import socket
 
+from psi.ecdh_utils import blind_id, generate_keypair
+
 PSI_SERVER_HOST = os.getenv("PSI_SERVER_HOST", "localhost")
 PSI_SERVER_PORT = int(os.getenv("PSI_SERVER_PORT", "50051"))
 
@@ -51,6 +53,24 @@ def run_server(
         6. Send back: (blinded_server_set, doubly_blinded_client_set) as JSON.
         7. Close connection.
     """
+    server_private, server_public = generate_keypair()
+    blinded_server_set = [blind_id(id, server_private) for id in server_ids]
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
+        server_socket.bind((host, port))
+        server_socket.listen()
+        print(f"[PSI Server] Listening on {host}:{port}...")
+        conn, addr = server_socket.accept()
+        with conn:
+            print(f"[PSI Server] Connected by {addr}")
+
+        client_data = _recv_all(conn)
+        doubly_blinded_client_set = [blind_id(id, server_private) for id in client_data]
+
+        server_socket.sendall(blinded_server_set, doubly_blinded_client_set)  # Simplified send
+
+        server_socket.close()
+
     raise NotImplementedError("TODO (Wyatt, Week 3): implement run_server()")
 
 
