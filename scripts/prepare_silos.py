@@ -226,7 +226,7 @@ def build_silo_b(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--module", default="BBB_2013J", help="OULAD module presentation code")
+    parser.add_argument("--module", default="CCC_2014J", help="OULAD module presentation code")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--val_size", type=float, default=0.1)
     parser.add_argument("--test_size", type=float, default=0.1)
@@ -246,7 +246,7 @@ def main() -> None:
     # Prepare Data for each silo before creation.
     silo_a_prep = prepare_silo_a_data(args.module, student_info)
     silo_b_prep = prepare_silo_b_data(args.module, student_vle, vle, student_ass, assessments)
-    print(f"[Silo Prep] Module {args.module}: {len(student_info)} students")
+    print(f"[Silo Prep] Module {args.module}: {len(silo_a_prep)} students")
 
     # Load PSI intersection order (written by psi_client.py)
     id_list_path = PROCESSED_DIR / "ordered_id_list.json"
@@ -272,8 +272,6 @@ def main() -> None:
                                           random_state=args.seed, stratify=y_a[idx_tv])
 
     # Apply SMOTE to training set only (Silo A)
-    print(y_a[:5])
-    print(np.unique(y_a))
     smote = SMOTE(random_state=args.seed)
     X_a_train_res, y_a_train_res = smote.fit_resample(X_a[idx_train], y_a[idx_train])
     X_b_train_res, _             = smote.fit_resample(X_b[idx_train], y_a[idx_train])

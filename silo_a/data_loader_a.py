@@ -16,7 +16,7 @@ class SiloADataset(Dataset):
     """PyTorch Dataset for Silo A demographic features.
 
     Args:
-        features: NumPy array of shape (N, 12).
+        features: NumPy array of shape (N, 18).
         labels: NumPy array of shape (N,) — binary {0, 1}.
     """
 

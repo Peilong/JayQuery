@@ -35,3 +35,19 @@
 - Implementation note: This is an extremely useful resource, as it functions as a sort of generic lookup of where to find more detailed information relating to SpliNN and Federated Learning. Nothing specifically seems worth seeking to implement at this current point in the project, but useful notes to have on hand as we go further into the project.
 
 ---
+
+## Week 3
+
+### Kotsiantis et al. 2010
+- Design choice: This paper covers the usage of an ensemble model with three classifiers to predict student success. This doesn't introduce really all that much for the concepts they use, but rather show that this format is better than a traditional batch-ensemble because it can accomodate new features mid-stream.
+- Implementation note: This paper shows that what we are trying to achieve as a final outcome is possible and useful, but the architectures discussed here are not really anything we would want to implement on our end. It is interesting reading if only for the sake of understanding how others have attempted this problem in the past, but not much for how we are going to implement any piece of our architecture.
+
+### Chawla et al. 2002 
+- Design choice:
+- Implementation note:
+
+### Xu et al. 2021
+- Design choice:
+- Implementation note:
+
+---
