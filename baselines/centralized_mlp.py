@@ -19,14 +19,14 @@ from utils.reproducibility import seed_everything
 
 
 class CentralizedMLP(nn.Module):
-    """Full MLP trained on all 34 features (Silo A + Silo B concatenated).
+    """Full MLP trained on all 45 features (Silo A + Silo B concatenated).
 
     Args:
-        input_dim: Total number of features (12 + 22 = 34).
+        input_dim: Total number of features (18 + 27 = 45).
         dropout_rate: Dropout probability. Default 0.2.
     """
 
-    def __init__(self, input_dim: int = 34, dropout_rate: float = 0.2) -> None:
+    def __init__(self, input_dim: int = 45, dropout_rate: float = 0.2) -> None:
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(input_dim, 64),
@@ -49,11 +49,12 @@ def train_and_evaluate(
     X_test: np.ndarray,
     y_test: np.ndarray,
     config: dict | None = None,
+    run = None,
 ) -> dict[str, float]:
     """Train CentralizedMLP and return test metrics.
 
     Args:
-        X_train/val/test: Feature arrays of shape (N, 34).
+        X_train/val/test: Feature arrays of shape (N, 45).
         y_train/val/test: Label arrays of shape (N,).
         config: Optional hyperparameter dict (overrides defaults).
 
@@ -97,6 +98,14 @@ def train_and_evaluate(
             ).squeeze(1).cpu().numpy()
         val_metrics = compute_metrics(y_val, val_prob)
         scheduler.step(val_metrics["auc_roc"])
+        
+        if run is not None:
+            from utils.wandb_utils import log_extra
+            log_extra({
+                "val/auc_roc": val_metrics["auc_roc"],
+                "val/f1":      val_metrics["f1_binary"],
+            }, run=run, step=epoch)
+        
         if val_metrics["auc_roc"] > best_val_auc:
             best_val_auc = val_metrics["auc_roc"]
             best_state = {k: v.clone() for k, v in model.state_dict().items()}

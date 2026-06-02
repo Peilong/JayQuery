@@ -8,9 +8,10 @@ git clone https://github.com/Peilong/JayQuery.git
 cd JayQuery
 conda create -n jayquery python=3.11 && conda activate jayquery
 pip install -r requirements.txt
+pip install -e .
 
 # 2. Copy and configure environment variables
-cp .env.example .env        # fill in WANDB_API_KEY
+cp .env.example .env # fill in WANDB_API_KEY
 
 # 3. Download OULAD dataset
 bash scripts/download_oulad.sh

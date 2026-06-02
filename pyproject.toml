@@ -15,8 +15,8 @@ authors = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["utils*", "psi*", "silo_a*", "silo_b*", "fl_client*", "fl_server*", "privacy*", "proto*"]
-exclude = ["data*", "notebooks*", "scripts*", "experiments*", "baselines*", "attack*"]
+include = ["utils*", "psi*", "silo_a*", "silo_b*", "baselines*", "fl_client*", "fl_server*", "privacy*", "proto*"]
+exclude = ["data*", "notebooks*", "scripts*", "experiments*", "attack*"]
 
 [tool.ruff]
 line-length = 100

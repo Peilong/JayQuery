@@ -21,11 +21,12 @@ def train_and_evaluate(
     X_test: np.ndarray,
     y_test: np.ndarray,
     config: dict | None = None,
+    run=None,
 ) -> dict[str, float]:
     """Train XGBoost classifier and return test metrics.
 
     Args:
-        X_train/val/test: Feature arrays of shape (N, 34).
+        X_train/val/test: Feature arrays of shape (N, # Features).
         y_train/val/test: Label arrays of shape (N,).
         config: Optional hyperparameter overrides.
 
@@ -55,14 +56,19 @@ def train_and_evaluate(
         eval_metric="auc",
         random_state=cfg["seed"],
         verbosity=0,
+        early_stopping_rounds=20,
     )
 
     model.fit(
         X_train, y_train,
         eval_set=[(X_val, y_val)],
-        early_stopping_rounds=20,
         verbose=False,
     )
+
+    if run is not None:
+        from utils.wandb_utils import log_extra
+        for tree_idx, auc in enumerate(model.evals_result()["validation_0"]["auc"]):
+            log_extra({"val/auc_per_tree": auc}, run=run, step=tree_idx)
 
     test_prob = model.predict_proba(X_test)[:, 1]
     test_metrics = compute_metrics(y_test, test_prob)

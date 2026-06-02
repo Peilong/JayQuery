@@ -35,6 +35,7 @@ def load_silo_a(
     processed_dir: str | Path = "data/processed",
     batch_size: int = 64,
     seed: int = 42,
+    bypass_psi: bool = False,
 ) -> tuple[DataLoader, DataLoader, DataLoader]:
     """Load Silo A data and return train/val/test DataLoaders.
 
@@ -45,6 +46,7 @@ def load_silo_a(
         processed_dir: Directory containing silo_a.pkl and ordered_id_list.json.
         batch_size: Mini-batch size. Default 64.
         seed: Random seed for DataLoader worker init. Default 42.
+        bypass_psi: Flag to skip the check for the psi id list. Default False.
 
     Returns:
         Tuple of (train_loader, val_loader, test_loader).
@@ -60,10 +62,11 @@ def load_silo_a(
         raise FileNotFoundError(
             f"{silo_path} not found. Run: python scripts/prepare_silos.py"
         )
-    if not id_list_path.exists():
-        raise FileNotFoundError(
-            f"{id_list_path} not found. Run: python -m psi.psi_client"
-        )
+    if not bypass_psi:
+        if not id_list_path.exists():
+            raise FileNotFoundError(
+                f"{id_list_path} not found. Run: python -m psi.psi_client"
+            )
 
     with open(silo_path, "rb") as f:
         data: dict = pickle.load(f)
