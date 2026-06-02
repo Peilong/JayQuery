@@ -1,7 +1,7 @@
 """ECDH utility functions for the PSI protocol.
 
 Owner: Wyatt Wilfong
-Status: SCAFFOLD — implement the TODO sections following CLAUDE.md Step-by-Step guide.
+Status: COMPLETE
 
 This module provides the low-level cryptographic building blocks used by
 psi_client.py and psi_server.py. All functions use the SECP256R1 elliptic curve
@@ -74,7 +74,6 @@ def blind_id(id_string: str, private_key: EllipticCurvePrivateKey) -> bytes:
     derived_pubkey = derived_privkey.public_key()
     shared = private_key.exchange(ECDH(), derived_pubkey)
     return shared
-    raise NotImplementedError("TODO (Wyatt, Week 2): implement blind_id()")
 
 
 def hash_id(id_string: str) -> bytes:

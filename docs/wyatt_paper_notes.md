@@ -46,6 +46,7 @@ NOT FULL READING
 ## Week 3
 
 ### Abadi et al. 2016 (ACM CCS)
+NOT FULL READING (Abstract + Sections 1-3)
 1. What it does: 
 2. Surprising: 
 3. Relates to: 

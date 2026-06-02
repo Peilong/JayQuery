@@ -17,7 +17,6 @@ from pathlib import Path
 import socket
 
 from psi.ecdh_utils import blind_id, generate_keypair
-from psi.psi_server import _recv_all
 
 PSI_SERVER_HOST = os.getenv("PSI_SERVER_HOST", "localhost")
 PSI_SERVER_PORT = int(os.getenv("PSI_SERVER_PORT", "50051"))
@@ -66,12 +65,12 @@ def run_psi(
         send_data = b"".join(blinded_client_set)  # TODO: convert to length-prefixed JSON
         client_socket.sendall(send_data)
 
-        data = _recv_all(client_socket, 4096)  # TODO: receive length-prefixed JSON response
+        data = client_socket.recv(4096)  # TODO: receive length-prefixed JSON response
         blinded_server_set, doubly_blinded_client_set = json.loads(data)
         doubly_blinded_server = [blind_id(id, client_private) for id in blinded_server_set]
         intersection = sorted(
             id
-            for id in local_ids
+            for id in doubly_blinded_client_set
             if blind_id(id, client_private) in doubly_blinded_server
         )
         with open(OUTPUT_PATH, "w") as f:
