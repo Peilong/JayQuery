@@ -28,3 +28,13 @@ flwr run .
 #This doesn't show much, but it is functional for starting the flwr environment.
 ```
 
+## Run Model Baselines
+```bash
+#Wandb login, enter the API key you saved to the env variables if asked.
+wandb login
+
+#Can replace the --run all with --run x, where x is the model you want to run. The model names are defined in the baselines/run_baselines file.
+#Also can replace any model parameters in exp01 with any that you want the baselines to use.
+python -m baselines.run_baselines --config experiments/configs/exp01_centralized_baselines.yaml --run all
+
+```

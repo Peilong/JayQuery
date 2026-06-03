@@ -3,10 +3,6 @@
 Owner: Alex Pellet
 Architecture mirrors the TopModel but with raw 34-dim input.
 This sets the performance ceiling for VFL comparisons.
-
-Usage:
-    python -m baselines.centralized_mlp \
-        --config experiments/configs/exp01_centralized_baselines.yaml
 """
 
 import numpy as np

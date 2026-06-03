@@ -2,9 +2,6 @@
 
 Owner: Alex Pellet
 Typically the strongest centralized baseline on tabular data.
-
-Usage:
-    python -m baselines.centralized_xgb
 """
 
 import numpy as np
