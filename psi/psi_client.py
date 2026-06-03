@@ -65,17 +65,20 @@ def run_psi(
         send_data = b"".join(blinded_client_set)  # TODO: convert to length-prefixed JSON
         client_socket.sendall(send_data)
 
-        data = client_socket.recv(4096)  # TODO: receive length-prefixed JSON response
+        data = client_socket.recv(64)  # TODO: receive length-prefixed JSON response
         blinded_server_set, doubly_blinded_client_set = json.loads(data)
         doubly_blinded_server = [blind_id(id, client_private) for id in blinded_server_set]
+        sorted_client = sorted(doubly_blinded_client_set)
+        sorted_server = sorted(doubly_blinded_server)
         intersection = sorted(
             id
             for id in doubly_blinded_client_set
-            if blind_id(id, client_private) in doubly_blinded_server
+            if blind_id(id, sorted_client) in doubly_blinded_server
         )
         with open(OUTPUT_PATH, "w") as f:
             json.dump(intersection, f)
-        return intersection
+        client_socket.close()
+    return intersection
     
     raise NotImplementedError("TODO (Wyatt, Week 3): implement run_psi()")
 
