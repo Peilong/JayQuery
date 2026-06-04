@@ -15,6 +15,7 @@ Run:
 
 import os
 import socket
+import json
 
 from psi.ecdh_utils import blind_id, generate_keypair
 
@@ -64,12 +65,17 @@ def run_server(
         with conn:
             print(f"[PSI Server] Connected by {addr}")
 
-        client_data = _recv_all(conn)
-        doubly_blinded_client_set = [blind_id(id, server_private) for id in client_data]
+            client_data = _recv_all(conn, 4096)
+            doubly_blinded_client_set = [blind_id(id, server_private) for id in client_data]
+                
+            payload = {
+            "server_set": blinded_server_set,
+            "client_set": doubly_blinded_client_set
+            }
+            response_bytes = json.dumps(payload).encode('utf-8')
 
-        server_socket.sendall(blinded_server_set, doubly_blinded_client_set)  # Simplified send
-
-        server_socket.close()
+            conn.sendall(response_bytes)
+            conn.close()
 
     raise NotImplementedError("TODO (Wyatt, Week 3): implement run_server()")
 

@@ -62,22 +62,26 @@ def run_psi(
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_socket:
         client_socket.connect((server_host, server_port))
+
         send_data = b"".join(blinded_client_set)  # TODO: convert to length-prefixed JSON
         client_socket.sendall(send_data)
 
-        data = client_socket.recv(64)  # TODO: receive length-prefixed JSON response
-        blinded_server_set, doubly_blinded_client_set = json.loads(data)
-        doubly_blinded_server = [blind_id(id, client_private) for id in blinded_server_set]
-        sorted_client = sorted(doubly_blinded_client_set)
-        sorted_server = sorted(doubly_blinded_server)
-        intersection = sorted(
-            id
-            for id in doubly_blinded_client_set
-            if blind_id(id, sorted_client) in doubly_blinded_server
-        )
-        with open(OUTPUT_PATH, "w") as f:
-            json.dump(intersection, f)
+        data = client_socket.recv(1024)  # TODO: receive length-prefixed JSON response
+
         client_socket.close()
+
+    blinded_server_set, doubly_blinded_client_set = json.loads(data)
+    doubly_blinded_server = [blind_id(id, client_private) for id in blinded_server_set]
+    sorted_client = sorted(doubly_blinded_client_set)
+    sorted_server = sorted(doubly_blinded_server)
+    intersection = sorted(
+        id
+        for id in doubly_blinded_client_set
+        if blind_id(id, sorted_client) in sorted_server
+    )
+    with open(OUTPUT_PATH, "w") as f:
+        json.dump(intersection, f)
+    OUTPUT_PATH.write_bytes(json.dumps(intersection).encode())
     return intersection
     
     raise NotImplementedError("TODO (Wyatt, Week 3): implement run_psi()")
