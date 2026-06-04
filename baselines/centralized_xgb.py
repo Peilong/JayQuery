@@ -18,7 +18,7 @@ def train_and_evaluate(
     X_test: np.ndarray,
     y_test: np.ndarray,
     config: dict | None = None,
-    run=None,
+    run: any | None = None,
 ) -> dict[str, float]:
     """Train XGBoost classifier and return test metrics.
 
@@ -57,13 +57,15 @@ def train_and_evaluate(
     )
 
     model.fit(
-        X_train, y_train,
+        X_train,
+        y_train,
         eval_set=[(X_val, y_val)],
         verbose=False,
     )
 
     if run is not None:
         from utils.wandb_utils import log_extra
+
         for tree_idx, auc in enumerate(model.evals_result()["validation_0"]["auc"]):
             log_extra({"val/auc_per_tree": auc}, run=run, step=tree_idx)
 

@@ -38,20 +38,19 @@ def train_and_evaluate(
         "seed": 42,
         **(config or {}),
     }
-
-    scale_pos_weight = (y_train == 0).sum() / max((y_train == 1).sum(), 1)
-
+    
     model = LogisticRegression(
         random_state=cfg["seed"],
         C=cfg["C"],
         penalty=cfg["penalty"],
-        solver=cfg['solver'],
+        solver=cfg["solver"],
         max_iter=cfg["maxiter"],
         class_weight="balanced",
     )
 
     model.fit(
-        X_train, y_train,
+        X_train,
+        y_train,
     )
 
     test_prob = model.predict_proba(X_test)[:, 1]

@@ -29,11 +29,9 @@ from utils.reproducibility import seed_everything
 RAW_DIR = Path("data/raw")
 PROCESSED_DIR = Path("data/processed")
 
-def prepare_silo_a_data(
-    module: str,
-    student_info: pd.DataFrame
-) -> pd.DataFrame:
-    """Prepares the data from the raw csv file for usage in Silo A. 
+
+def prepare_silo_a_data(module: str, student_info: pd.DataFrame) -> pd.DataFrame:
+    """Prepares the data from the raw csv file for usage in Silo A.
     Encodes & Normalizes the features.
 
     Args:
@@ -46,51 +44,54 @@ def prepare_silo_a_data(
     df["label"] = df["final_result"].isin(["Withdrawn", "Fail"]).astype(int)
     m_code, p_code = module.split("_")
     df = df.query("code_module == @m_code and code_presentation == @p_code").drop(
-        columns=['code_module', 'code_presentation', 'final_result']
+        columns=["code_module", "code_presentation", "final_result"]
     )
-    
-    #impute null imd_band with mode of the region
-    df['imd_band'] = df.groupby('region')['imd_band'].transform(lambda x: x.fillna(x.mode()[0]))    
-    
-    #Ordinal encoding
+
+    # impute null imd_band with mode of the region
+    df["imd_band"] = df.groupby("region")["imd_band"].transform(lambda x: x.fillna(x.mode()[0]))
+
+    # Ordinal encoding
     enc = OrdinalEncoder()
-    df['imd_band_enc'] = enc.fit_transform(df[['imd_band']])
-    df['highest_education_enc'] = df['highest_education'].map({
-        'No Formal quals': 0,
-        'Lower Than A Level': 1,
-        'A Level or Equivalent': 2,
-        'HE Qualification': 3,
-        'Post Graduate Qualification': 4,
-    })
-    df['age_band_enc'] = enc.fit_transform(df[['age_band']])
-    df.drop(axis=1,inplace=True,labels=['imd_band','highest_education','age_band'])
-    
-    #Binary Encoding
+    df["imd_band_enc"] = enc.fit_transform(df[["imd_band"]])
+    df["highest_education_enc"] = df["highest_education"].map(
+        {
+            "No Formal quals": 0,
+            "Lower Than A Level": 1,
+            "A Level or Equivalent": 2,
+            "HE Qualification": 3,
+            "Post Graduate Qualification": 4,
+        }
+    )
+    df["age_band_enc"] = enc.fit_transform(df[["age_band"]])
+    df.drop(axis=1, inplace=True, labels=["imd_band", "highest_education", "age_band"])
+
+    # Binary Encoding
     df["gender_enc"] = (df["gender"] == "F").astype(int)
     df["disability_enc"] = (df["disability"] == "Y").astype(int)
-    df.drop(axis=1,inplace=True,labels=['gender','disability'])
-    
-    #One Hot Encoding
-    ohe = OneHotEncoder(drop='first',sparse_output=False)
-    region_encoded = ohe.fit_transform(df[['region']])
-    region_encoded = pd.DataFrame(region_encoded, columns=ohe.get_feature_names_out(['region']))
-    df = pd.concat([df.reset_index(drop=True),region_encoded.reset_index(drop=True)],axis=1)
-    df.drop(axis=1,inplace=True,labels=['region'])
-    
-    #Normalization
+    df.drop(axis=1, inplace=True, labels=["gender", "disability"])
+
+    # One Hot Encoding
+    ohe = OneHotEncoder(drop="first", sparse_output=False)
+    region_encoded = ohe.fit_transform(df[["region"]])
+    region_encoded = pd.DataFrame(region_encoded, columns=ohe.get_feature_names_out(["region"]))
+    df = pd.concat([df.reset_index(drop=True), region_encoded.reset_index(drop=True)], axis=1)
+    df.drop(axis=1, inplace=True, labels=["region"])
+
+    # Normalization
     scaler = StandardScaler()
-    df['studied_credits_norm'] = scaler.fit_transform(df[['studied_credits']].fillna(0))
-    df.drop(axis=1,inplace=True,labels=['studied_credits'])
+    df["studied_credits_norm"] = scaler.fit_transform(df[["studied_credits"]].fillna(0))
+    df.drop(axis=1, inplace=True, labels=["studied_credits"])
     return df.set_index("id_student")
+
 
 def prepare_silo_b_data(
     module: str,
     student_vle: pd.DataFrame,
-    vle:pd.DataFrame,
+    vle: pd.DataFrame,
     assessments: pd.DataFrame,
-    student_assessment: pd.DataFrame
+    student_assessment: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Prepares the data from the raw csv file for usage in Silo B. 
+    """Prepares the data from the raw csv file for usage in Silo B.
     Does Cleaning, Feature Engineering, and Merging of datasets.
 
     Args:
@@ -106,65 +107,59 @@ def prepare_silo_b_data(
     m_code, p_code = module.split("_")
 
     # Get the full list of activity types across ALL modules
-    all_activity_types = vle['activity_type'].unique()
-    all_vle_cols = [f'vle_clicks_{a}' for a in all_activity_types]
+    all_activity_types = vle["activity_type"].unique()
+    all_vle_cols = [f"vle_clicks_{a}" for a in all_activity_types]
 
     merged = (
-        student_vle
-        .merge(
-            vle.drop(columns=['week_from', 'week_to', 'code_module', 'code_presentation']),
-            on='id_site',
-            how='left',
+        student_vle.merge(
+            vle.drop(columns=["week_from", "week_to", "code_module", "code_presentation"]),
+            on="id_site",
+            how="left",
         )
         .query("code_module == @m_code and code_presentation == @p_code")
-        .drop(columns=['code_module', 'code_presentation'])
+        .drop(columns=["code_module", "code_presentation"])
     )
 
     activity_clicks = (
-        merged
-        .groupby(['id_student', 'activity_type'], as_index=False)
-        .agg(sum_click=('sum_click', 'sum'))
-        .pivot_table(index='id_student', columns='activity_type', values='sum_click', fill_value=0)
-        .rename(columns=lambda x: f'vle_clicks_{x}')
+        merged.groupby(["id_student", "activity_type"], as_index=False)
+        .agg(sum_click=("sum_click", "sum"))
+        .pivot_table(index="id_student", columns="activity_type", values="sum_click", fill_value=0)
+        .rename(columns=lambda x: f"vle_clicks_{x}")
         .reindex(columns=all_vle_cols, fill_value=0)  # enforce all columns
         .reset_index()
     )
 
-    student_stats = (
-        merged
-        .groupby('id_student', as_index=False)
-        .agg(
-            start_date=('date', 'min'),
-            end_date=('date', 'max'),
-            active_days=('date', 'nunique'),
-            sum_click=('sum_click', 'sum')
-        )
+    student_stats = merged.groupby("id_student", as_index=False).agg(
+        start_date=("date", "min"),
+        end_date=("date", "max"),
+        active_days=("date", "nunique"),
+        sum_click=("sum_click", "sum"),
     )
 
-    vle_df = student_stats.merge(activity_clicks, on='id_student', how='left')
-    
+    vle_df = student_stats.merge(activity_clicks, on="id_student", how="left")
+
     assessment_df = (
-        student_assessment
-        .merge(assessments, on='id_assessment', how='left')
+        student_assessment.merge(assessments, on="id_assessment", how="left")
         .query("code_module == @m_code and code_presentation == @p_code")
-        .drop(columns=['is_banked', 'code_module', 'code_presentation', 'date'])
-        .assign(weighted_score=lambda x: (x['score'] * x['weight']) / 100)
-        .groupby('id_student', as_index=False)
+        .drop(columns=["is_banked", "code_module", "code_presentation", "date"])
+        .assign(weighted_score=lambda x: (x["score"] * x["weight"]) / 100)
+        .groupby("id_student", as_index=False)
         .agg(
-            weighted_score=('weighted_score', 'sum'),
-            total_weight=('weight', 'sum'),
-            num_assessments=('id_assessment', 'nunique')
+            weighted_score=("weighted_score", "sum"),
+            total_weight=("weight", "sum"),
+            num_assessments=("id_assessment", "nunique"),
         )
         .assign(
-            participation_rate=lambda x: x['total_weight'] / 200,
-            weighted_score_pct=lambda x: x['weighted_score'] / 200
+            participation_rate=lambda x: x["total_weight"] / 200,
+            weighted_score_pct=lambda x: x["weighted_score"] / 200,
         )
-        .drop(columns=['total_weight','weighted_score'])
+        .drop(columns=["total_weight", "weighted_score"])
     )
-    
-    silo_b = assessment_df.merge(vle_df, on='id_student', how='left')
-    
+
+    silo_b = assessment_df.merge(vle_df, on="id_student", how="left")
+
     return silo_b
+
 
 def build_silo_a(
     prepared_silo_a: pd.DataFrame,
@@ -182,14 +177,19 @@ def build_silo_a(
     df = prepared_silo_a.reindex(intersection_ids)
 
     feature_cols = [
-        "imd_band_enc", "highest_education_enc", "age_band_enc",
-        "gender_enc", "disability_enc", "studied_credits_norm"
+        "imd_band_enc",
+        "highest_education_enc",
+        "age_band_enc",
+        "gender_enc",
+        "disability_enc",
+        "studied_credits_norm",
     ]
     region_cols = [col for col in df.columns if col.startswith("region_")]
 
     X = df[feature_cols + region_cols].fillna(0).values.astype(np.float32)
     y = df["label"].fillna(0).values.astype(np.float32)
     return X, y
+
 
 def build_silo_b(
     prepared_silo_b: pd.DataFrame,
@@ -206,8 +206,7 @@ def build_silo_b(
     """
     intersection_ids = [int(i) for i in intersection_ids]
     df = (
-        prepared_silo_b
-        .dropna(subset=["id_student"])
+        prepared_silo_b.dropna(subset=["id_student"])
         .assign(id_student=lambda x: x["id_student"].astype(int))
         .set_index("id_student")
         .reindex(intersection_ids)
@@ -215,8 +214,13 @@ def build_silo_b(
 
     vle_cols = [col for col in df.columns if col.startswith("vle_clicks_")]
     feature_cols = [
-        "weighted_score_pct", "participation_rate", "num_assessments",
-        "start_date", "end_date", "active_days", "sum_click",
+        "weighted_score_pct",
+        "participation_rate",
+        "num_assessments",
+        "start_date",
+        "end_date",
+        "active_days",
+        "sum_click",
         *vle_cols,
     ]
 
@@ -238,10 +242,10 @@ def main() -> None:
     # Load OULAD CSVs
     print("[Silo Prep] Loading raw OULAD CSVs ...")
     student_info = pd.read_csv(RAW_DIR / "studentInfo.csv")
-    student_vle  = pd.read_csv(RAW_DIR / "studentVle.csv")
-    vle          = pd.read_csv(RAW_DIR / "vle.csv")
-    student_ass  = pd.read_csv(RAW_DIR / "studentAssessment.csv")
-    assessments  = pd.read_csv(RAW_DIR / "assessments.csv")
+    student_vle = pd.read_csv(RAW_DIR / "studentVle.csv")
+    vle = pd.read_csv(RAW_DIR / "vle.csv")
+    student_ass = pd.read_csv(RAW_DIR / "studentAssessment.csv")
+    assessments = pd.read_csv(RAW_DIR / "assessments.csv")
 
     # Prepare Data for each silo before creation.
     silo_a_prep = prepare_silo_a_data(args.module, student_info)
@@ -261,20 +265,24 @@ def main() -> None:
 
     # Build feature matrices
     X_a, y_a = build_silo_a(silo_a_prep, intersection_ids)
-    X_b      = build_silo_b(silo_b_prep, intersection_ids)
+    X_b = build_silo_b(silo_b_prep, intersection_ids)
 
     # Train/val/test split (same indices for both silos)
     idx = np.arange(len(intersection_ids))
     idx_tv, idx_test = train_test_split(
         idx, test_size=args.test_size, random_state=args.seed, stratify=y_a
     )
-    idx_train, idx_val = train_test_split(idx_tv, test_size=args.val_size/(1-args.test_size),
-                                          random_state=args.seed, stratify=y_a[idx_tv])
+    idx_train, idx_val = train_test_split(
+        idx_tv,
+        test_size=args.val_size / (1 - args.test_size),
+        random_state=args.seed,
+        stratify=y_a[idx_tv],
+    )
 
     # Apply SMOTE to training set only (Silo A)
     smote = SMOTE(random_state=args.seed)
     X_a_train_res, y_a_train_res = smote.fit_resample(X_a[idx_train], y_a[idx_train])
-    X_b_train_res, _             = smote.fit_resample(X_b[idx_train], y_a[idx_train])
+    X_b_train_res, _ = smote.fit_resample(X_b[idx_train], y_a[idx_train])
 
     # Save pickles
     for name, X_train, y_train, X_idx in [
@@ -282,11 +290,12 @@ def main() -> None:
         ("silo_b", X_b_train_res, y_a_train_res, X_b),
     ]:
         data = {
-            "X_train": X_train, "y_train": y_train,
-            "X_val":   X_a[idx_val] if name == "silo_a" else X_b[idx_val],
-            "y_val":   y_a[idx_val],
-            "X_test":  X_a[idx_test] if name == "silo_a" else X_b[idx_test],
-            "y_test":  y_a[idx_test],
+            "X_train": X_train,
+            "y_train": y_train,
+            "X_val": X_a[idx_val] if name == "silo_a" else X_b[idx_val],
+            "y_val": y_a[idx_val],
+            "X_test": X_a[idx_test] if name == "silo_a" else X_b[idx_test],
+            "y_test": y_a[idx_test],
             "intersection_ids": intersection_ids,
         }
         out_path = PROCESSED_DIR / f"{name}.pkl"

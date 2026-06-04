@@ -62,20 +62,28 @@ Parallel multi-run usage (concurrent.futures):
 from __future__ import annotations
 
 import functools
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 # Scalar metric keys safe to log directly.
 # Confusion-matrix integers are handled separately as a wandb.Table.
 _SCALAR_METRIC_KEYS = [
-    "auc_roc", "accuracy", "f1_macro", "f1_binary",
-    "precision", "recall", "brier_score", "avg_precision",
+    "auc_roc",
+    "accuracy",
+    "f1_macro",
+    "f1_binary",
+    "precision",
+    "recall",
+    "brier_score",
+    "avg_precision",
 ]
 
 
-def _require_wandb():
+def _require_wandb()->any:
     """Import and return the wandb module, raising clearly if not installed."""
     try:
         import wandb
+
         return wandb
     except ImportError:
         raise ImportError(
@@ -84,7 +92,7 @@ def _require_wandb():
         )
 
 
-def _resolve_run(wandb, run):
+def _resolve_run(wandb:any, run:any)->any:
     """Return `run` if provided, else fall back to wandb.run (the global singleton).
 
     Raises if neither is available, with a message that distinguishes the
@@ -100,7 +108,7 @@ def _resolve_run(wandb, run):
     )
 
 
-def _build_confusion_table(metrics: dict[str, Any], wandb):
+def _build_confusion_table(metrics: dict[str, Any], wandb: any)->any:
     """Build a labelled 2x2 wandb.Table from confusion matrix values."""
     return wandb.Table(
         columns=["", "Predicted negative", "Predicted positive"],
@@ -113,6 +121,7 @@ def _build_confusion_table(metrics: dict[str, Any], wandb):
 
 # ── public API ─────────────────────────────────────────────────────────────────
 
+
 def init_run(
     project: str,
     name: str | None = None,
@@ -121,8 +130,8 @@ def init_run(
     entity: str | None = "jayquery",
     config: dict | None = None,
     group: str | None = None,
-    **wandb_kwargs,
-):
+    **wandb_kwargs: dict,
+)->any:
     """Initialize a wandb run and return the Run object.
 
     Each call returns an independent Run object. Multiple calls can be active
@@ -157,7 +166,7 @@ def init_run(
     )
 
 
-def finish_run(run=None) -> None:
+def finish_run(run: any | None = None) -> None:
     """Cleanly close a wandb run.
 
     Args:
@@ -172,7 +181,7 @@ def finish_run(run=None) -> None:
 
 def log_params(
     params: dict[str, Any],
-    run=None,
+    run: any | None = None,
 ) -> None:
     """Update a run's config (hyperparameters).
 
@@ -189,7 +198,7 @@ def log_params(
 
 def log_metrics(
     metrics: dict[str, Any],
-    run=None,
+    run: any | None = None,
     prefix: str = "",
     step: int | None = None,
     log_confusion_matrix: bool = True,
@@ -210,11 +219,7 @@ def log_metrics(
     wandb = _require_wandb()
     resolved = _resolve_run(wandb, run)
 
-    log_dict = {
-        f"{prefix}{k}": metrics[k]
-        for k in _SCALAR_METRIC_KEYS
-        if k in metrics
-    }
+    log_dict = {f"{prefix}{k}": metrics[k] for k in _SCALAR_METRIC_KEYS if k in metrics}
 
     if log_confusion_matrix and all(k in metrics for k in ("tn", "fp", "fn", "tp")):
         log_dict[f"{prefix}confusion_matrix"] = _build_confusion_table(metrics, wandb)
@@ -225,7 +230,7 @@ def log_metrics(
 
 def log_extra(
     data: dict[str, Any],
-    run=None,
+    run: any | None = None,
     step: int | None = None,
 ) -> None:
     """Log arbitrary key-value pairs to a wandb run.
@@ -259,7 +264,7 @@ def run_with_tracking(
     test_metrics_key: str | None = None,
     extra_log: dict[str, Any] | None = None,
     wandb_kwargs: dict | None = None,
-    on_run_created: Optional[Callable[[any, dict], None]] = None,
+    on_run_created: Callable[[any, dict], None] | None = None,
 ) -> dict[str, Any]:
     """Wrap any train_and_evaluate function with a full wandb tracking lifecycle.
 
@@ -356,7 +361,7 @@ def wandb_sweep_fn(
     train_fn: Callable[..., dict[str, Any]],
     base_train_kwargs: dict[str, Any],
     project: str,
-    **tracking_kwargs,
+    **tracking_kwargs: dict,
 ) -> Callable[[], None]:
     """Return a zero-argument sweep function compatible with wandb.agent().
 
@@ -397,7 +402,7 @@ def wandb_sweep_fn(
     import wandb as _wandb
 
     @functools.wraps(train_fn)
-    def _sweep_trial():
+    def _sweep_trial()->None:
         # wandb.agent() calls wandb.init() for us — grab that run explicitly
         run = _wandb.run
         sweep_params = dict(_wandb.config)

@@ -11,6 +11,8 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 
+FEATURE_COUNT = 18
+
 
 class SiloADataset(Dataset):
     """PyTorch Dataset for Silo A demographic features.
@@ -59,28 +61,24 @@ def load_silo_a(
     id_list_path = processed_dir / "ordered_id_list.json"
 
     if not silo_path.exists():
-        raise FileNotFoundError(
-            f"{silo_path} not found. Run: python scripts/prepare_silos.py"
-        )
+        raise FileNotFoundError(f"{silo_path} not found. Run: python scripts/prepare_silos.py")
     if not bypass_psi:
         if not id_list_path.exists():
-            raise FileNotFoundError(
-                f"{id_list_path} not found. Run: python -m psi.psi_client"
-            )
+            raise FileNotFoundError(f"{id_list_path} not found. Run: python -m psi.psi_client")
 
     with open(silo_path, "rb") as f:
         data: dict = pickle.load(f)
 
     train_ds = SiloADataset(data["X_train"], data["y_train"])
-    val_ds   = SiloADataset(data["X_val"],   data["y_val"])
-    test_ds  = SiloADataset(data["X_test"],  data["y_test"])
+    val_ds = SiloADataset(data["X_val"], data["y_val"])
+    test_ds = SiloADataset(data["X_test"], data["y_test"])
 
     g = torch.Generator()
     g.manual_seed(seed)
 
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  generator=g)
-    val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False)
-    test_loader  = DataLoader(test_ds,  batch_size=batch_size, shuffle=False)
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, generator=g)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
+    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False)
 
     return train_loader, val_loader, test_loader
 
@@ -108,7 +106,7 @@ def make_synthetic_loader_a(
         Tuple of (train_loader, val_loader, test_loader).
     """
     n_total = n_train + n_val + n_test
-    X = np.random.default_rng(seed).standard_normal((n_total, 12)).astype(np.float32)
+    X = np.random.default_rng(seed).standard_normal((n_total, FEATURE_COUNT)).astype(np.float32)
     y = np.random.default_rng(seed + 100).binomial(1, 0.3, n_total).astype(np.float32)
 
     g = torch.Generator().manual_seed(seed)

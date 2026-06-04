@@ -11,6 +11,8 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 
+FEATURE_COUNT = 27
+
 
 class SiloBDataset(Dataset):
     """PyTorch Dataset for Silo B VLE + assessment features."""
@@ -45,24 +47,22 @@ def load_silo_b(
     silo_path = processed_dir / "silo_b.pkl"
 
     if not silo_path.exists():
-        raise FileNotFoundError(
-            f"{silo_path} not found. Run: python scripts/prepare_silos.py"
-        )
+        raise FileNotFoundError(f"{silo_path} not found. Run: python scripts/prepare_silos.py")
 
     with open(silo_path, "rb") as f:
         data: dict = pickle.load(f)
 
     train_ds = SiloBDataset(data["X_train"], data["y_train"])
-    val_ds   = SiloBDataset(data["X_val"],   data["y_val"])
-    test_ds  = SiloBDataset(data["X_test"],  data["y_test"])
+    val_ds = SiloBDataset(data["X_val"], data["y_val"])
+    test_ds = SiloBDataset(data["X_test"], data["y_test"])
 
     g = torch.Generator()
     g.manual_seed(seed)
 
     return (
         DataLoader(train_ds, batch_size=batch_size, shuffle=True, generator=g),
-        DataLoader(val_ds,   batch_size=batch_size, shuffle=False),
-        DataLoader(test_ds,  batch_size=batch_size, shuffle=False),
+        DataLoader(val_ds, batch_size=batch_size, shuffle=False),
+        DataLoader(test_ds, batch_size=batch_size, shuffle=False),
     )
 
 
@@ -89,7 +89,7 @@ def make_synthetic_loader_b(
         Tuple of (train_loader, val_loader, test_loader).
     """
     n_total = n_train + n_val + n_test
-    X = np.random.default_rng(seed + 1).standard_normal((n_total, 22)).astype(np.float32)
+    X = np.random.default_rng(seed + 1).standard_normal((n_total, FEATURE_COUNT)).astype(np.float32)
     y = np.random.default_rng(seed + 100).binomial(1, 0.3, n_total).astype(np.float32)
 
     g = torch.Generator().manual_seed(seed)

@@ -11,6 +11,7 @@ import torch
 def test_bottom_model_a_output_shape() -> None:
     """BottomModelA outputs (batch, embedding_dim) with correct shape."""
     from silo_a.bottom_model_a import BottomModelA
+
     model = BottomModelA(input_dim=12, embedding_dim=32)
     model.eval()
     x = torch.randn(16, 12)
@@ -23,6 +24,7 @@ def test_bottom_model_a_output_shape() -> None:
 def test_bottom_model_b_output_shape() -> None:
     """BottomModelB outputs (batch, embedding_dim) with correct shape."""
     from silo_b.bottom_model_b import BottomModelB
+
     model = BottomModelB(input_dim=22, embedding_dim=32)
     model.eval()
     x = torch.randn(16, 22)
@@ -35,6 +37,7 @@ def test_bottom_model_b_output_shape() -> None:
 def test_top_model_output_shape() -> None:
     """TopModel outputs (batch, 1) logit tensor."""
     from fl_server.top_model import TopModel
+
     model = TopModel(embedding_dim=32)
     model.eval()
     emb_a = torch.randn(16, 32)
@@ -48,6 +51,7 @@ def test_top_model_output_shape() -> None:
 def test_top_model_gradient_flow() -> None:
     """TopModel.compute_loss_and_gradients() returns valid gradients for both silos."""
     from fl_server.top_model import TopModel
+
     model = TopModel(embedding_dim=32)
     emb_a = torch.randn(16, 32)
     emb_b = torch.randn(16, 32)
@@ -66,6 +70,7 @@ def test_top_model_gradient_flow() -> None:
 def test_bottom_model_a_get_embedding_matches_forward() -> None:
     """get_embedding() and forward() return identical results."""
     from silo_a.bottom_model_a import BottomModelA
+
     model = BottomModelA(input_dim=12, embedding_dim=32)
     model.eval()
     x = torch.randn(8, 12)
@@ -81,8 +86,9 @@ def test_eval_utils_metrics_keys() -> None:
     import numpy as np
 
     from baselines.eval_utils import compute_metrics
+
     y_true = np.array([0, 1, 0, 1, 1, 0])
-    y_prob  = np.array([0.1, 0.9, 0.2, 0.8, 0.7, 0.3])
+    y_prob = np.array([0.1, 0.9, 0.2, 0.8, 0.7, 0.3])
     metrics = compute_metrics(y_true, y_prob)
     required = {"auc_roc", "accuracy", "f1_macro", "precision", "recall", "brier_score"}
     assert required.issubset(metrics.keys()), f"Missing keys: {required - metrics.keys()}"

@@ -45,7 +45,7 @@ def train_and_evaluate(
     X_test: np.ndarray,
     y_test: np.ndarray,
     config: dict | None = None,
-    run = None,
+    run: any | None=None,
 ) -> dict[str, float]:
     """Train CentralizedMLP and return test metrics.
 
@@ -58,8 +58,11 @@ def train_and_evaluate(
         Test metrics dict from compute_metrics().
     """
     cfg = {
-        "lr": 1e-3, "epochs": 50, "batch_size": 64,
-        "dropout_rate": 0.2, "seed": 42,
+        "lr": 1e-3,
+        "epochs": 50,
+        "batch_size": 64,
+        "dropout_rate": 0.2,
+        "seed": 42,
         **(config or {}),
     }
     seed_everything(cfg["seed"])
@@ -72,8 +75,9 @@ def train_and_evaluate(
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg["lr"])
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, mode="max")
 
-    train_ds = TensorDataset(torch.tensor(X_train, dtype=torch.float32),
-                              torch.tensor(y_train, dtype=torch.float32))
+    train_ds = TensorDataset(
+        torch.tensor(X_train, dtype=torch.float32), torch.tensor(y_train, dtype=torch.float32)
+    )
     train_loader = DataLoader(train_ds, batch_size=cfg["batch_size"], shuffle=True)
 
     best_val_auc, best_state = 0.0, None
@@ -89,19 +93,27 @@ def train_and_evaluate(
         # Validation
         model.eval()
         with torch.no_grad():
-            val_prob = torch.sigmoid(
-                model(torch.tensor(X_val, dtype=torch.float32).to(device))
-            ).squeeze(1).cpu().numpy()
+            val_prob = (
+                torch.sigmoid(model(torch.tensor(X_val, dtype=torch.float32).to(device)))
+                .squeeze(1)
+                .cpu()
+                .numpy()
+            )
         val_metrics = compute_metrics(y_val, val_prob)
         scheduler.step(val_metrics["auc_roc"])
-        
+
         if run is not None:
             from utils.wandb_utils import log_extra
-            log_extra({
-                "val/auc_roc": val_metrics["auc_roc"],
-                "val/f1":      val_metrics["f1_binary"],
-            }, run=run, step=epoch)
-        
+
+            log_extra(
+                {
+                    "val/auc_roc": val_metrics["auc_roc"],
+                    "val/f1": val_metrics["f1_binary"],
+                },
+                run=run,
+                step=epoch,
+            )
+
         if val_metrics["auc_roc"] > best_val_auc:
             best_val_auc = val_metrics["auc_roc"]
             best_state = {k: v.clone() for k, v in model.state_dict().items()}
@@ -110,9 +122,12 @@ def train_and_evaluate(
     model.load_state_dict(best_state)
     model.eval()
     with torch.no_grad():
-        test_prob = torch.sigmoid(
-            model(torch.tensor(X_test, dtype=torch.float32).to(device))
-        ).squeeze(1).cpu().numpy()
+        test_prob = (
+            torch.sigmoid(model(torch.tensor(X_test, dtype=torch.float32).to(device)))
+            .squeeze(1)
+            .cpu()
+            .numpy()
+        )
 
     test_metrics = compute_metrics(y_test, test_prob)
     print_metrics_table(test_metrics, "Centralized MLP (test set)")
