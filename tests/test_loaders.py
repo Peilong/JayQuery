@@ -134,7 +134,7 @@ class TestPreparedSiloA:
             "age_band_enc",
             "gender_enc",
             "disability_enc",
-            "studied_credits_norm",
+            "studied_credits",
             "label",
         }
         assert expected.issubset(
@@ -149,7 +149,6 @@ class TestPreparedSiloA:
             "region",
             "gender",
             "disability",
-            "studied_credits",
             "code_module",
             "code_presentation",
             "final_result",
@@ -169,7 +168,7 @@ class TestPreparedSiloA:
             "age_band_enc",
             "gender_enc",
             "disability_enc",
-            "studied_credits_norm",
+            "studied_credits",
         ]
         null_counts = prepared_silo_a[feature_cols].isnull().sum()
         assert null_counts.sum() == 0, f"Unexpected nulls:\n{null_counts[null_counts > 0]}"
