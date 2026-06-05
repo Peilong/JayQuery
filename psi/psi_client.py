@@ -17,6 +17,7 @@ from pathlib import Path
 import socket
 
 from psi.ecdh_utils import blind_id, generate_keypair
+from psi.psi_server import _recv_all
 
 PSI_SERVER_HOST = os.getenv("PSI_SERVER_HOST", "localhost")
 PSI_SERVER_PORT = int(os.getenv("PSI_SERVER_PORT", "50051"))
@@ -66,7 +67,7 @@ def run_psi(
         send_data = b"".join(blinded_client_set)  # TODO: convert to length-prefixed JSON
         client_socket.sendall(send_data)
 
-        data = client_socket.recv(1024)  # TODO: receive length-prefixed JSON response
+        data = _recv_all(client_socket, 4096)  # TODO: receive length-prefixed JSON response
 
         client_socket.close()
 
@@ -81,7 +82,7 @@ def run_psi(
     )
     with open(OUTPUT_PATH, "w") as f:
         json.dump(intersection, f)
-    OUTPUT_PATH.write_bytes(json.dumps(intersection).encode())
+        OUTPUT_PATH.write_bytes(json.dumps(intersection).encode())
     return intersection
     
     raise NotImplementedError("TODO (Wyatt, Week 3): implement run_psi()")
