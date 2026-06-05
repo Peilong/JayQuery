@@ -27,6 +27,7 @@ data/processed/
 *.parquet
 !experiments/configs/*.yaml
 !docs/*.md
+!experiments/psi_timing.csv
 
 # ── Model checkpoints ────────────────────────────────────────────
 experiments/checkpoints/

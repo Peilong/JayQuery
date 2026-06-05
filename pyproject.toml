@@ -24,7 +24,7 @@ target-version = "py311"
 lint.select = ["E", "F", "I", "UP", "ANN"]
 lint.ignore = ["ANN101", "ANN102"]
 
-[tool.ruff.per-file-ignores]
+[tool.ruff.lint.per-file-ignores]
 "tests/*" = ["ANN"]
 "notebooks/*" = ["ANN", "E501"]
 

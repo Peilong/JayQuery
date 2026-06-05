@@ -13,8 +13,8 @@ Run:
 
 import json
 import os
-from pathlib import Path
 import socket
+from pathlib import Path
 
 from psi.ecdh_utils import blind_id, generate_keypair, second_blind
 from psi.psi_framing import recv_blinded_ids, send_blinded_ids

@@ -16,11 +16,9 @@ import hashlib
 
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.asymmetric.ec import (
-    ECDH,
     SECP256R1,
     EllipticCurvePrivateKey,
     EllipticCurvePublicKey,
-    derive_private_key,
     generate_private_key,
 )
 from cryptography.hazmat.primitives.serialization import (

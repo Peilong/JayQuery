@@ -13,14 +13,14 @@ Results are printed as a table and saved to experiments/psi_timing.csv.
 Run modes:
 
   Full benchmark (all sizes):
-      pytest tests/test_psi_benchmark.py -v -s
+      pytest psi/benchmark.py -v -s
 
   Single specific size (e.g. 3000 IDs):
-      PSI_BENCH_N=3000 pytest tests/test_psi_benchmark.py -v -s
+      PSI_BENCH_N=3000 pytest psi/benchmark.py -v -s
 
   Direct Python execution (also supports PSI_BENCH_N):
-      python tests/test_psi_benchmark.py
-      PSI_BENCH_N=3000 python tests/test_psi_benchmark.py
+      python psi/benchmark.py
+      PSI_BENCH_N=3000 python psi/benchmark.py
 ─────────────────────────────────────────────────────────────────────────────
 """
 
