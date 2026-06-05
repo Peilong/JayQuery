@@ -16,8 +16,8 @@ import os
 from pathlib import Path
 import socket
 
-from psi.ecdh_utils import blind_id, generate_keypair
-from psi.psi_server import _recv_all
+from psi.ecdh_utils import blind_id, generate_keypair, second_blind
+from psi.psi_framing import recv_blinded_ids, send_blinded_ids
 
 PSI_SERVER_HOST = os.getenv("PSI_SERVER_HOST", "localhost")
 PSI_SERVER_PORT = int(os.getenv("PSI_SERVER_PORT", "50051"))
@@ -58,35 +58,30 @@ def run_psi(
     Common mistake (see CLAUDE.md):
         Always sort() both sets before comparing — Python sets are unordered.
     """
-    client_private, client_public = generate_keypair()
-    blinded_client_set = [blind_id(id, client_private) for id in local_ids]
-
+    client_private, _ = generate_keypair()
+    
+    blinded_client = [blind_id(oid, client_private) for oid in local_ids]
+    blinded_to_original = {b: oid for b, oid in zip(blinded_client, local_ids)}
+    
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_socket:
         client_socket.connect((server_host, server_port))
 
-        send_data = b"".join(blinded_client_set)  # TODO: convert to length-prefixed JSON
-        client_socket.sendall(send_data)
+        send_blinded_ids(client_socket, blinded_client)
+        blinded_server = recv_blinded_ids(client_socket)
+        doubly_blinded_client = recv_blinded_ids(client_socket)
 
-        data = _recv_all(client_socket, 4096)  # TODO: receive length-prefixed JSON response
-
-        client_socket.close()
-
-    blinded_server_set, doubly_blinded_client_set = json.loads(data)
-    doubly_blinded_server = [blind_id(id, client_private) for id in blinded_server_set]
-    sorted_client = sorted(doubly_blinded_client_set)
-    sorted_server = sorted(doubly_blinded_server)
-    intersection = sorted(
-        id
-        for id in doubly_blinded_client_set
-        if blind_id(id, sorted_client) in sorted_server
-    )
-    with open(OUTPUT_PATH, "w") as f:
-        json.dump(intersection, f)
-        OUTPUT_PATH.write_bytes(json.dumps(intersection).encode())
-    return intersection
+    doubly_blinded_server = [second_blind(b, client_private) for b in blinded_server]
     
-    raise NotImplementedError("TODO (Wyatt, Week 3): implement run_psi()")
-
+    intersection = sorted(
+        blinded_to_original[b]
+        for b, db in zip(blinded_client, doubly_blinded_client)
+        if db in doubly_blinded_server
+    )
+    
+    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    OUTPUT_PATH.write_text(json.dumps(intersection))
+    
+    return intersection
 
 if __name__ == "__main__":
     # Demo run with synthetic IDs

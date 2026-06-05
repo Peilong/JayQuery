@@ -28,6 +28,7 @@ from cryptography.hazmat.primitives.serialization import (
     PublicFormat,
 )
 
+_ORDER = SECP256R1().group_order
 
 def generate_keypair() -> tuple[EllipticCurvePrivateKey, EllipticCurvePublicKey]:
     """Generate an ECDH key pair on the SECP256R1 (P-256) curve.
@@ -67,13 +68,16 @@ def blind_id(id_string: str, private_key: EllipticCurvePrivateKey) -> bytes:
         3. Perform ECDH exchange: shared = private_key.exchange(ECDH(), derived_pubkey)
         4. Return the shared secret bytes (64 bytes).
     """
-    h_id = hash_id(id_string)
-    scale = int.from_bytes(h_id, byteorder="big")
-    scale = (scale % SECP256R1().group_order - 1) + 1
-    derived_privkey = derive_private_key(scale, SECP256R1())
-    derived_pubkey = derived_privkey.public_key()
-    shared = private_key.exchange(ECDH(), derived_pubkey)
-    return shared
+    scalar = int.from_bytes(hash_id(id_string), byteorder="big") % _ORDER
+    k = private_key.private_numbers().private_value
+    result = (k * scalar) % _ORDER
+    return result.to_bytes(32,"big")
+
+def second_blind(blinded_bytes: bytes, private_key: EllipticCurvePrivateKey) -> bytes:
+    prev = int.from_bytes(blinded_bytes, "big")
+    k = private_key.private_numbers().private_value
+    result = (k * prev) % _ORDER
+    return result.to_bytes(32, "big")
 
 
 def hash_id(id_string: str) -> bytes:
