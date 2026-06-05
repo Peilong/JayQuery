@@ -14,8 +14,8 @@ import argparse
 from pathlib import Path
 
 import flwr as fl
-import wandb
 
+import wandb
 from fl_server.vfl_strategy import VFLStrategy
 from utils.config import config_to_dict, load_config
 from utils.reproducibility import seed_everything

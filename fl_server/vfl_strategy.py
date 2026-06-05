@@ -10,7 +10,6 @@ Custom Strategy that orchestrates the VFL training loop:
   3. Both silo clients apply received gradients to their Bottom Models.
 """
 
-
 import flwr as fl
 from flwr.common import FitRes, Parameters, Scalar
 from flwr.server.client_proxy import ClientProxy

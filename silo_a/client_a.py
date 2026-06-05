@@ -71,9 +71,7 @@ class SiloAClient(fl.client.NumPyClient):
         state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
         self.model.load_state_dict(state_dict, strict=True)
 
-    def fit(
-        self, parameters: NDArrays, config: dict
-    ) -> tuple[NDArrays, int, dict[str, Scalar]]:
+    def fit(self, parameters: NDArrays, config: dict) -> tuple[NDArrays, int, dict[str, Scalar]]:
         """TODO (Alex, Week 5): Implement one VFL training round.
 
         Steps:
@@ -85,9 +83,7 @@ class SiloAClient(fl.client.NumPyClient):
         # TODO: implement full VFL fit round
         return self.get_parameters(config={}), len(self.train_loader.dataset), {}
 
-    def evaluate(
-        self, parameters: NDArrays, config: dict
-    ) -> tuple[float, int, dict[str, Scalar]]:
+    def evaluate(self, parameters: NDArrays, config: dict) -> tuple[float, int, dict[str, Scalar]]:
         """TODO (Alex, Week 5): Evaluate on validation set."""
         self.set_parameters(parameters)
         # TODO: implement evaluation

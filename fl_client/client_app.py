@@ -177,9 +177,7 @@ def apply_grad(msg: Message, context: Context) -> Message:
     optimizer.zero_grad()
     embedding = model(X)
 
-    grad = torch.from_numpy(
-        msg.content["gradients"]["local-gradients"].numpy()
-    )
+    grad = torch.from_numpy(msg.content["gradients"]["local-gradients"].numpy())
     embedding.backward(grad)
     optimizer.step()
 

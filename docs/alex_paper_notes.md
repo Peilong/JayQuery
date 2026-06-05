@@ -35,3 +35,23 @@
 - Implementation note: This is an extremely useful resource, as it functions as a sort of generic lookup of where to find more detailed information relating to SpliNN and Federated Learning. Nothing specifically seems worth seeking to implement at this current point in the project, but useful notes to have on hand as we go further into the project.
 
 ---
+
+## Week 3
+
+### Kotsiantis et al. 2010
+- Design choice: This paper covers the usage of an ensemble model with three classifiers to predict student success. This doesn't introduce really all that much for the concepts they use, but rather show that this format is better than a traditional batch-ensemble because it can accomodate new features mid-stream.
+- Implementation note: This paper shows that what we are trying to achieve as a final outcome is possible and useful, but the architectures discussed here are not really anything we would want to implement on our end. It is interesting reading if only for the sake of understanding how others have attempted this problem in the past, but not much for how we are going to implement any piece of our architecture.
+
+### Chawla et al. 2002 
+- Design choice: This paper introduces SMOTE. Rather than duplicating existing minority samples (which can cause overfitting), SMOTE generates new synthetic samples by interpolating between real ones in feature space. This forces the classifier to learn broader, more general decision regions for the minority label. The combination of SMOTE on the minority class and random under-sampling on the majority class together consistently outperforms either approach alone.
+- Implementation note: I use this in my prepare_silos.py file via imbalanced-learn's SMOTE. This directly alters the number of samples we see in the output of this file.
+
+### Xu et al. 2021
+> The original paper list under Xu on the research plan was actually Qiu's paper in 2023. I have also added Qiu's paper to the reading list just in case.
+- Design choice: This paper proposes FedV, a VFL framework that eliminates peer-to-peer communication between parties by using Functional Encryption for gradient computation. The most important potion is that gradient aggregation in VFL can be decomposed into two inner-product operations — one across features, one across samples — both of which FE can handle non-interactively. It also extends cleanly to logistic regression and SVMs without Taylor approximation, which prior work required.
+- Implementation note: FedV is not something we are implementing, we plan to use SplitNN via Flower instead, which is simpler and better suited to deep neural networks. However, this paper is useful for understanding why the communication design of a VFL system matters. The key practical takeaway is that FedV trades a simpler implementation for stronger cryptographic guarantees, and JayQuery trades those guarantees for flexibility and deep learning compatibility, which is why we have the DP wrapper to compensate.
+
+### Qiu et al. 2023
+- Design choice: 
+- Implementation note:
+---

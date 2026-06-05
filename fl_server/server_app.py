@@ -169,9 +169,7 @@ def _send_gradients(
     pos_to_grad = {_SILO_A_POS: grad_a, _SILO_B_POS: grad_b}
     messages = []
     for node_id, pos in node_pos_map.items():
-        arr_rec = ArrayRecord(
-            {"local-gradients": Array(pos_to_grad[pos].cpu().numpy())}
-        )
+        arr_rec = ArrayRecord({"local-gradients": Array(pos_to_grad[pos].cpu().numpy())})
         messages.append(
             Message(
                 content=RecordDict({"gradients": arr_rec}),

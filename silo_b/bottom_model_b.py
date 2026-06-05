@@ -76,11 +76,11 @@ class BottomModelB(nn.Module):
         Returns:
             Embedding tensor of shape (batch_size, embedding_dim).
         """
-        h1 = self.layer1(x)                    # (B, 128)
-        h2 = self.layer2(h1)                   # (B, 64)
-        h2 = h2 + self.skip_proj(h1)           # residual add
+        h1 = self.layer1(x)  # (B, 128)
+        h2 = self.layer2(h1)  # (B, 64)
+        h2 = h2 + self.skip_proj(h1)  # residual add
         h2 = self.dropout(h2)
-        return self.embed(h2)                  # (B, embedding_dim)
+        return self.embed(h2)  # (B, embedding_dim)
 
     def get_embedding(self, x: torch.Tensor) -> torch.Tensor:
         """Compute cut-layer embedding (alias for forward).

@@ -41,15 +41,18 @@ def compute_metrics(
     tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
 
     return {
-        "auc_roc":       float(roc_auc_score(y_true, y_pred_prob)),
-        "accuracy":      float(accuracy_score(y_true, y_pred)),
-        "f1_macro":      float(f1_score(y_true, y_pred, average="macro", zero_division=0)),
-        "f1_binary":     float(f1_score(y_true, y_pred, average="binary", zero_division=0)),
-        "precision":     float(precision_score(y_true, y_pred, zero_division=0)),
-        "recall":        float(recall_score(y_true, y_pred, zero_division=0)),
-        "brier_score":   float(brier_score_loss(y_true, y_pred_prob)),
+        "auc_roc": float(roc_auc_score(y_true, y_pred_prob)),
+        "accuracy": float(accuracy_score(y_true, y_pred)),
+        "f1_macro": float(f1_score(y_true, y_pred, average="macro", zero_division=0)),
+        "f1_binary": float(f1_score(y_true, y_pred, average="binary", zero_division=0)),
+        "precision": float(precision_score(y_true, y_pred, zero_division=0)),
+        "recall": float(recall_score(y_true, y_pred, zero_division=0)),
+        "brier_score": float(brier_score_loss(y_true, y_pred_prob)),
         "avg_precision": float(average_precision_score(y_true, y_pred_prob)),
-        "tn": int(tn), "fp": int(fp), "fn": int(fn), "tp": int(tp),
+        "tn": int(tn),
+        "fp": int(fp),
+        "fn": int(fn),
+        "tp": int(tp),
     }
 
 
@@ -64,5 +67,7 @@ def print_metrics_table(metrics: dict[str, float], label: str = "") -> None:
     print(header)
     for k in ["auc_roc", "accuracy", "f1_macro", "precision", "recall", "brier_score"]:
         print(f"  {k:<18}: {metrics[k]:.4f}")
-    print(f"  {'confusion matrix':<18}: TN={metrics['tn']} FP={metrics['fp']} "
-          f"FN={metrics['fn']} TP={metrics['tp']}")
+    print(
+        f"  {'confusion matrix':<18}: TN={metrics['tn']} FP={metrics['fp']} "
+        f"FN={metrics['fn']} TP={metrics['tp']}"
+    )

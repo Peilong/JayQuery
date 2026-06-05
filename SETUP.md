@@ -8,9 +8,10 @@ git clone https://github.com/Peilong/JayQuery.git
 cd JayQuery
 conda create -n jayquery python=3.11 && conda activate jayquery
 pip install -r requirements.txt
+pip install -e .
 
 # 2. Copy and configure environment variables
-cp .env.example .env        # fill in WANDB_API_KEY
+cp .env.example .env # fill in WANDB_API_KEY
 
 # 3. Download OULAD dataset
 bash scripts/download_oulad.sh
@@ -27,3 +28,13 @@ flwr run .
 #This doesn't show much, but it is functional for starting the flwr environment.
 ```
 
+## Run Model Baselines
+```bash
+#Wandb login, enter the API key you saved to the env variables if asked.
+wandb login
+
+#Can replace the --run all with --run x, where x is the model you want to run. The model names are defined in the baselines/run_baselines file.
+#Also can replace any model parameters in exp01 with any that you want the baselines to use.
+python -m baselines.run_baselines --config experiments/configs/exp01_centralized_baselines.yaml --run all
+
+```
