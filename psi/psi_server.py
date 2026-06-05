@@ -16,20 +16,11 @@ Run:
 import os
 import socket
 
+from psi.ecdh_utils import blind_id, generate_keypair, second_blind
+from psi.psi_framing import recv_blinded_ids, send_blinded_ids
+
 PSI_SERVER_HOST = os.getenv("PSI_SERVER_HOST", "localhost")
 PSI_SERVER_PORT = int(os.getenv("PSI_SERVER_PORT", "50051"))
-
-
-def _recv_all(conn: socket.socket, n: int) -> bytes:
-    """Receive exactly n bytes from socket."""
-    data = b""
-    while len(data) < n:
-        chunk = conn.recv(n - len(data))
-        if not chunk:
-            raise ConnectionError("Socket closed prematurely")
-        data += chunk
-    return data
-
 
 def run_server(
     server_ids: list[str], host: str = PSI_SERVER_HOST, port: int = PSI_SERVER_PORT
@@ -51,8 +42,26 @@ def run_server(
         6. Send back: (blinded_server_set, doubly_blinded_client_set) as JSON.
         7. Close connection.
     """
-    raise NotImplementedError("TODO (Wyatt, Week 3): implement run_server()")
+    server_private, _ = generate_keypair()
+    blinded_server_set = [blind_id(id, server_private) for id in server_ids]
 
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
+        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR,1)
+        server_socket.bind((host, port))
+        server_socket.listen(1)
+        print(f"[PSI Server] Listening on {host}:{port}...")
+        conn, addr = server_socket.accept()
+        with conn:
+            print(f"[PSI Server] Connected by {addr}")
+
+            client_data = recv_blinded_ids(conn)
+            doubly_blinded_client_set = [second_blind(b, server_private) for b in client_data]
+                
+            send_blinded_ids(conn,blinded_server_set)
+            send_blinded_ids(conn,doubly_blinded_client_set)
+
+            print(f"[PSI Server] Done — {len(blinded_server_set)} server IDs, "
+                  f"{len(doubly_blinded_client_set)} re-blinded client IDs sent.")
 
 if __name__ == "__main__":
     # Demo: load server IDs from data/processed/silo_b.pkl or a test fixture

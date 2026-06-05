@@ -46,15 +46,16 @@ NOT FULL READING
 ## Week 3
 
 ### Abadi et al. 2016 (ACM CCS)
-1. What it does: 
-2. Surprising: 
-3. Relates to: 
+NOT FULL READING (Abstract + Sections 1-3)
+1. What it does: This paper is on differential privacy, with a specific integration of it alongside deep learning. 
+2. Surprising: I am constantly surprised by the explanation of these different privacy algorithms.
+3. Relates to: We use deep learning, and we want to keep everything that needs to be private private.
 
 ### Huang et al. 2012 (NDSS)
 NOT FULL READING (Sections 1-2)
-1. What it does: 
-2. Surprising: 
-3. Relates to: 
+1. What it does: Kept very simply, this paper is wide on PSI protocols. It explains all the simplicities in the little sections I was given to read.
+2. Surprising: Garbled circuits is quite interesting as the very basic version of PSI from the way it is explained. 
+3. Relates to: This is PSI related, which is necessary to keep privacy in JayQuery.
 
 ## Week 4
 

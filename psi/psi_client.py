@@ -11,8 +11,13 @@ Run:
     python -m psi.psi_client
 """
 
+import json
 import os
 from pathlib import Path
+import socket
+
+from psi.ecdh_utils import blind_id, generate_keypair, second_blind
+from psi.psi_framing import recv_blinded_ids, send_blinded_ids
 
 PSI_SERVER_HOST = os.getenv("PSI_SERVER_HOST", "localhost")
 PSI_SERVER_PORT = int(os.getenv("PSI_SERVER_PORT", "50051"))
@@ -53,8 +58,30 @@ def run_psi(
     Common mistake (see CLAUDE.md):
         Always sort() both sets before comparing — Python sets are unordered.
     """
-    raise NotImplementedError("TODO (Wyatt, Week 3): implement run_psi()")
+    client_private, _ = generate_keypair()
+    
+    blinded_client = [blind_id(oid, client_private) for oid in local_ids]
+    blinded_to_original = {b: oid for b, oid in zip(blinded_client, local_ids)}
+    
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_socket:
+        client_socket.connect((server_host, server_port))
 
+        send_blinded_ids(client_socket, blinded_client)
+        blinded_server = recv_blinded_ids(client_socket)
+        doubly_blinded_client = recv_blinded_ids(client_socket)
+
+    doubly_blinded_server = [second_blind(b, client_private) for b in blinded_server]
+    
+    intersection = sorted(
+        blinded_to_original[b]
+        for b, db in zip(blinded_client, doubly_blinded_client)
+        if db in doubly_blinded_server
+    )
+    
+    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    OUTPUT_PATH.write_text(json.dumps(intersection))
+    
+    return intersection
 
 if __name__ == "__main__":
     # Demo run with synthetic IDs
