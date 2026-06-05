@@ -172,7 +172,10 @@ def prepare_silo_b_data(
     return assessment_df.merge(vle_df, on="id_student", how="left")
 
 
-def build_silo_a(prepared_silo_a: pd.DataFrame, intersection_ids: list[str]) -> tuple[np.ndarray, np.ndarray]:
+def build_silo_a(
+    prepared_silo_a: pd.DataFrame, 
+    intersection_ids: list[str]
+) -> tuple[np.ndarray, np.ndarray]:
     """Align Silo A to PSI intersection order and extract feature and label arrays.
 
     Args:
@@ -344,7 +347,8 @@ def main() -> None:
         out_path = PROCESSED_DIR / f"{name}.pkl"
         with open(out_path, "wb") as f:
             pickle.dump(data, f)
-        print(f"[Silo Prep] Saved {out_path} — train={len(y_train)}, val={len(y_a[idx_val])}, test={len(y_a[idx_test])}")
+        print(f"[Silo Prep] Saved {out_path} — train={len(y_train)},\
+ val={len(y_a[idx_val])}, test={len(y_a[idx_test])}")
 
 
 if __name__ == "__main__":
