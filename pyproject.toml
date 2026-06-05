@@ -28,6 +28,9 @@ lint.ignore = ["ANN101", "ANN102"]
 "tests/*" = ["ANN"]
 "notebooks/*" = ["ANN", "E501"]
 
+[tool.ruff.lint.isort]
+known-first-party = ["psi", "silo_a", "silo_b", "fl_server", "fl_client", "privacy", "baselines", "utils", "proto"]
+
 [tool.mypy]
 python_version = "3.11"
 warn_return_any = true
