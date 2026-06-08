@@ -17,6 +17,18 @@ cp .env.example .env # fill in WANDB_API_KEY
 bash scripts/download_oulad.sh
 ```
 
+## Running PSI & Silo Setup
+```bash
+
+python scripts/extract_ids_for_psi.py
+
+python -m psi.psi_server &
+python -m psi.psi_client
+
+python scripts/prepare_silos.py
+
+```
+
 ## Testing the flwr server/client
 ```bash
 #Set flwr to simulation mode with 2 virtual SuperNodes.

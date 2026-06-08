@@ -185,7 +185,16 @@ def build_silo_a(
     Returns:
         Tuple of (X, y) float32 arrays aligned to intersection_ids order.
     """
-    df = prepared_silo_a.reindex(intersection_ids)
+    int_ids = [int(i) for i in intersection_ids]
+    df = prepared_silo_a.reindex(int_ids)
+
+    missing = df["label"].isna().sum()
+    if missing > len(int_ids) * 0.01:
+        raise ValueError(
+            f"build_silo_a: {missing}/{len(int_ids)} intersection IDs not found in "
+            "Silo A DataFrame. Check that ordered_id_list.json was produced for the "
+            "same module as prepare_silos.py --module."
+        )
 
     feature_cols = [
         "imd_band_enc",

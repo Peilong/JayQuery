@@ -21,6 +21,8 @@ from psi.psi_framing import recv_blinded_ids, send_blinded_ids
 
 PSI_SERVER_HOST = os.getenv("PSI_SERVER_HOST", "localhost")
 PSI_SERVER_PORT = int(os.getenv("PSI_SERVER_PORT", "50051"))
+
+SILO_A_IDS_PATH = Path("data/processed/silo_a_ids.json")
 OUTPUT_PATH = Path("data/processed/ordered_id_list.json")
 
 
@@ -84,8 +86,17 @@ def run_psi(
     return intersection
 
 if __name__ == "__main__":
-    # Demo run with synthetic IDs
-    client_ids = [str(i) for i in range(1200)]  # 200 extra IDs not in server
-    result = run_psi(client_ids)
-    print(f"[PSI Client] Intersection size: {len(result)}")
+    if not SILO_A_IDS_PATH.exists():
+        raise FileNotFoundError(
+            f"{SILO_A_IDS_PATH} not found.\n"
+            "Run  python scripts/extract_ids_for_psi.py  first."
+        )
+    local_ids = json.loads(SILO_A_IDS_PATH.read_text())
+    print(f"[PSI Client] Loaded {len(local_ids):,} Silo A IDs from {SILO_A_IDS_PATH}")
+    result = run_psi(local_ids)
+    print(f"[PSI Client] Intersection size: {len(result):,}")
     print(f"[PSI Client] Written to {OUTPUT_PATH}")
+    print()
+    print("[PSI Client] Next step:")
+    print("  python scripts/prepare_silos.py")
+ 
