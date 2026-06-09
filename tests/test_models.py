@@ -6,15 +6,17 @@ Run: pytest tests/test_models.py -v
 import pytest
 import torch
 
+SILO_A_FEATURES = 18
+SILO_B_FEATURES = 26
 
 @pytest.mark.model
 def test_bottom_model_a_output_shape() -> None:
     """BottomModelA outputs (batch, embedding_dim) with correct shape."""
     from silo_a.bottom_model_a import BottomModelA
 
-    model = BottomModelA(input_dim=12, embedding_dim=32)
+    model = BottomModelA(input_dim=SILO_A_FEATURES, embedding_dim=32)
     model.eval()
-    x = torch.randn(16, 12)
+    x = torch.randn(16, SILO_A_FEATURES)
     with torch.no_grad():
         out = model(x)
     assert out.shape == (16, 32), f"Expected (16, 32), got {out.shape}"
@@ -25,9 +27,9 @@ def test_bottom_model_b_output_shape() -> None:
     """BottomModelB outputs (batch, embedding_dim) with correct shape."""
     from silo_b.bottom_model_b import BottomModelB
 
-    model = BottomModelB(input_dim=22, embedding_dim=32)
+    model = BottomModelB(input_dim=SILO_B_FEATURES, embedding_dim=32)
     model.eval()
-    x = torch.randn(16, 22)
+    x = torch.randn(16, SILO_B_FEATURES)
     with torch.no_grad():
         out = model(x)
     assert out.shape == (16, 32), f"Expected (16, 32), got {out.shape}"
@@ -71,9 +73,9 @@ def test_bottom_model_a_get_embedding_matches_forward() -> None:
     """get_embedding() and forward() return identical results."""
     from silo_a.bottom_model_a import BottomModelA
 
-    model = BottomModelA(input_dim=12, embedding_dim=32)
+    model = BottomModelA(input_dim=SILO_A_FEATURES, embedding_dim=32)
     model.eval()
-    x = torch.randn(8, 12)
+    x = torch.randn(8, SILO_A_FEATURES)
     with torch.no_grad():
         emb1 = model.forward(x)
         emb2 = model.get_embedding(x)

@@ -18,6 +18,7 @@ from silo_a.bottom_model_a import BottomModelA
 from silo_a.data_loader_a import load_silo_a
 from utils.reproducibility import seed_everything
 
+SILO_A_FEATURES = 18
 
 class SiloAClient(fl.client.NumPyClient):
     """Flower client representing the Financial Aid silo.
@@ -34,7 +35,7 @@ class SiloAClient(fl.client.NumPyClient):
 
         # Model
         self.model = BottomModelA(
-            input_dim=config.get("input_dim_a", 12),
+            input_dim=config.get("input_dim_a", SILO_A_FEATURES),
             embedding_dim=config.get("embedding_dim", 32),
             dropout_rate=config.get("dropout_rate", 0.3),
         ).to(self.device)

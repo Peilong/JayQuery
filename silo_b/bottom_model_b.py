@@ -1,18 +1,17 @@
 """Bottom Model B — processes VLE interaction + assessment features from Silo B.
 
 Owner: Alex Pellet
-Architecture: Input(22) → Linear(128) → BN → ReLU →
+Architecture: Input(26) → Linear(128) → BN → ReLU →
               Linear(64) → BN → ReLU → Linear(64) [+skip projection] → Linear(32)
 
-Input features (22 total):
-  - per-activity VLE click counts: 15 features (one per OULAD activity_type)
-  - weighted_avg_score: 1 feature
-  - num_assessments_submitted: 1 feature
-  - days_active: 1 feature
-  - total_activity_types_used: 1 feature
-  - weeks_with_any_activity: 1 feature
-  - max_single_week_clicks: 1 feature
-  - early_submission_ratio: 1 feature
+Input features (26 total):
+ - 0    | num_assessments: Row count for id_student in studentAssessment (Unbounded Standard Scalar)
+ - 1    | participation_rate: Sum of assessment weights taken / total class weight (0-1)
+ - 2    | weighted_score_pct: Sum of weighted scores / total possible weighted score (0-1)
+ - 3    | start_date: Day offset of first VLE interaction relative to module start (Unbounded Standard Scalar)
+ - 4    | end_date: Day offset of last VLE interaction relative to module start (Unbounded Standard Scalar)
+ - 5    | active_days: Count of distinct days with VLE activity (Unbounded Standard Scalar)
+ - 6-25 | vle_click_[activity_type]: Sum of sum_click per activity_type (Unbounded Standard Scalar)
 """
 
 import torch
@@ -35,7 +34,7 @@ class BottomModelB(nn.Module):
 
     def __init__(
         self,
-        input_dim: int = 22,
+        input_dim: int = 26,
         embedding_dim: int = 32,
         dropout_rate: float = 0.3,
         use_cnn: bool = False,
