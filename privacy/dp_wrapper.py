@@ -33,7 +33,7 @@ def make_private(
     target_delta: float,
     max_grad_norm: float,
     num_epochs: int,
-) -> tuple[GradSampleModule, DPOptimizer, DataLoader]:
+) -> tuple[GradSampleModule, DPOptimizer, DataLoader, PrivacyEngine]:
     """Wrap model, optimizer, and data_loader with Opacus PrivacyEngine.
 
     After calling this function, use the returned dp_model, dp_optimizer, and
@@ -101,17 +101,17 @@ def make_private(
                                                                               target_delta = target_delta, 
                                                                               epochs = num_epochs, 
                                                                               max_grad_norm = max_grad_norm)
-    return [dp_model, dp_optimizer, dp_loader]
+    return [dp_model, dp_optimizer, dp_loader, priv_engine]
 
 
-def get_current_epsilon(dp_optimizer: DPOptimizer, delta: float = 1e-5) -> float:
+def get_current_epsilon(priv_engine: PrivacyEngine, delta: float = 1e-5) -> float:
     """Query the current epsilon expenditure from a DP-wrapped optimizer.
 
     Args:
-        dp_optimizer: An Opacus DPOptimizer returned by make_private().
+        priv_engine: A PrivacyEngine instance.
         delta: The delta value used during training (should match target_delta).
 
     Returns:
         Current epsilon (float). Increases monotonically with training steps.
     """
-    return dp_optimizer.privacy_engine.get_epsilon(delta=delta)  # type: ignore[return-value]
+    return priv_engine.get_epsilon(delta=delta)  # type: ignore[return-value]
