@@ -13,6 +13,7 @@ References:
 """
 
 
+from opacus import PrivacyEngine
 import torch
 import torch.nn as nn
 from opacus.grad_sample import GradSampleModule
@@ -91,9 +92,16 @@ def make_private(
         raise ValueError(f"target_epsilon must be > 0, got {target_epsilon}")
     if target_delta <= 0:
         raise ValueError(f"target_delta must be > 0, got {target_delta}")
-
-    # TODO (Wyatt, Week 4): implement make_private using Opacus PrivacyEngine
-    raise NotImplementedError("TODO (Wyatt, Week 4): implement make_private()")
+    
+    priv_engine = PrivacyEngine()
+    dp_model, dp_optimizer, dp_loader = priv_engine.make_private_with_epsilon(module = model, 
+                                                                              optimizer = optimizer, 
+                                                                              data_loader = data_loader, 
+                                                                              target_epsilon = target_epsilon, 
+                                                                              target_delta = target_delta, 
+                                                                              epochs = num_epochs, 
+                                                                              max_grad_norm = max_grad_norm)
+    return [dp_model, dp_optimizer, dp_loader]
 
 
 def get_current_epsilon(dp_optimizer: DPOptimizer, delta: float = 1e-5) -> float:
