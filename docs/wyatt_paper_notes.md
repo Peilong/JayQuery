@@ -67,9 +67,9 @@ NOT FULL READING (Sections 1-3)
 
 ### Abadi et al. 2016 (ACM CSS)
 REST OF READING
-1. What it does:
-2. Surprising:
-3. Relates to:
+1. What it does: This half of the paper goes on about the implementation of the differential privacy model, with all the little bits and pieces of it, alongside a short reasoning on why it is being done. After the implementation is a results section, comparing the various settings, their model to some other models, with multiple datasets, the highlights and the lowlights.
+2. Surprising: Looking at the charts, it's odd seeing odd lines, not matching with any basic functions in the slightest.
+3. Relates to: This is just an extension of the differential privacy from the previous half of the reading.
 
 ## Week 7
 
