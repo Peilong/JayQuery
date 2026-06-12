@@ -105,9 +105,9 @@ def test_eval_utils_metrics_keys() -> None:
 @pytest.mark.model
 def test_integration_bottom_to_top_forward() -> None:
     """Random data > both Bottom Models > Top Model"""
+    from fl_server.top_model import TopModel
     from silo_a.bottom_model_a import BottomModelA
     from silo_b.bottom_model_b import BottomModelB
-    from fl_server.top_model import TopModel
 
     batch = 16
     model_a = BottomModelA(input_dim=SILO_A_FEATURES, embedding_dim=EMBEDDING_DIM)
@@ -140,9 +140,9 @@ def test_integration_bottom_models_receive_gradients() -> None:
     backward pass — this test confirms that wiring populates real parameter
     gradients in both Bottom Models.
     """
+    from fl_server.top_model import TopModel
     from silo_a.bottom_model_a import BottomModelA
     from silo_b.bottom_model_b import BottomModelB
-    from fl_server.top_model import TopModel
 
     batch = 16
     model_a = BottomModelA(input_dim=SILO_A_FEATURES, embedding_dim=EMBEDDING_DIM)
@@ -188,9 +188,9 @@ def test_integration_full_round_trip() -> None:
       3. Those gradients backprop into both Bottom Models.
       4. An optimizer step actually updates the weights of all three models.
     """
+    from fl_server.top_model import TopModel
     from silo_a.bottom_model_a import BottomModelA
     from silo_b.bottom_model_b import BottomModelB
-    from fl_server.top_model import TopModel
 
     batch = 16
     model_a = BottomModelA(input_dim=SILO_A_FEATURES, embedding_dim=EMBEDDING_DIM)

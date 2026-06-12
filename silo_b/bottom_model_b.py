@@ -5,13 +5,14 @@ Architecture: Input(26) → Linear(128) → BN → ReLU →
               Linear(64) → BN → ReLU → Linear(64) [+skip projection] → Linear(32)
 
 Input features (26 total):
- - 0    | num_assessments: Row count for id_student in studentAssessment (Unbounded Standard Scalar)
+> USS -> Unbounded Standard Scalar
+ - 0    | num_assessments: Row count for id_student in studentAssessment (USS)
  - 1    | participation_rate: Sum of assessment weights taken / total class weight (0-1)
  - 2    | weighted_score_pct: Sum of weighted scores / total possible weighted score (0-1)
- - 3    | start_date: Day offset of first VLE interaction relative to module start (Unbounded Standard Scalar)
- - 4    | end_date: Day offset of last VLE interaction relative to module start (Unbounded Standard Scalar)
- - 5    | active_days: Count of distinct days with VLE activity (Unbounded Standard Scalar)
- - 6-25 | vle_click_[activity_type]: Sum of sum_click per activity_type (Unbounded Standard Scalar)
+ - 3    | start_date: Day offset of first VLE interaction relative to module start (USS)
+ - 4    | end_date: Day offset of last VLE interaction relative to module start (USS)
+ - 5    | active_days: Count of distinct days with VLE activity (USS)
+ - 6-25 | vle_click_[activity_type]: Sum of sum_click per activity_type (USS)
 """
 
 import torch
