@@ -62,4 +62,9 @@
 - Design choice: This paper covers the metrics of ROC and AUC. It explains how it is more resistant to class-imablance in data, and why it is a good metric to use for judging classifiers. 
 - Implementation note: We are planning to use ROC and AUC to score our models, due to the class imbalance we have in our data. This paper is a good resource on how we will be implementing it, as well as why we decided to use this metric.
 
+### Chen & Guestrin 2016
+> Section 2
+- Design choice: This paper covers the different portions of XGBoost, and how the different parameters change the model as a whole.
+- Implementation note: We use XGBoost in our baselines, but we do not plan to use it in the production workflow. This paper is helpful in understanding the algorithm and how it is a good baseline for our problem, but it lacks any importance in the implementation of our project.
+
 ---
