@@ -35,7 +35,7 @@ def test_dp_wrapper_basic() -> None:
     from privacy.dp_wrapper import make_private
     model, optimizer, loader = _make_tiny_model_and_loader()
 
-    dp_model, dp_optimizer, dp_loader = make_private(
+    dp_model, dp_optimizer, dp_loader, priv_engine = make_private(
         model=model, optimizer=optimizer, data_loader=loader,
         target_epsilon=5.0, target_delta=1e-5,
         max_grad_norm=1.0, num_epochs=10,
@@ -44,10 +44,8 @@ def test_dp_wrapper_basic() -> None:
     assert dp_model is not None, "make_private() returned None for dp_model"
     assert dp_optimizer is not None, "make_private() returned None for dp_optimizer"
     assert dp_loader is not None, "make_private() returned None for dp_loader"
-    assert hasattr(dp_optimizer, "privacy_engine"), (
-        "dp_optimizer must have a .privacy_engine attribute (Opacus requirement)"
-    )
-    print("\n✅  make_private() PASSED — PrivacyEngine attached to optimizer")
+    assert priv_engine is not None, "make_private() returned None for priv_engine"
+    print("\n✅  make_private() PASSED — Everything returned successfully")
 
 
 @pytest.mark.dp

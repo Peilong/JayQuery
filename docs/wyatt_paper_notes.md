@@ -59,11 +59,17 @@ NOT FULL READING (Sections 1-2)
 
 ## Week 4
 
-### Mironov 2017 (IEEE CSP)
+### Mironov 2017 (IEEE CSF)
 NOT FULL READING (Sections 1-3)
-1. What it does: 
-2. Surprising: 
-3. Relates to: 
+1. What it does: This paper begins with the common definition of differential privacy, as well as some common uses for the standard (epsilon, delta)-differential privacy implementation. It goes on to explain Renyi differential privacy, a different form that is claimed to be a stronger definition than the (epsilon, delta)-differential privacy definition. The second section explains a solid amount of other "flavors" of differential privacy, just mostly going through a lot of other varients as well as their relaxations. Section 3 really goes into the Renyi differential privacy. The section defines this version of differential privacy, the bad outcomes is guaranteed to not change in probability throughout the definition. Another claim is that it appears to be robust against auxiliary information, where it will not change unexpectedly, at least from my interpretation of the written mathematical proof of it. Another claim is that with post-processing, the privacy will be preserved, it also has this last claim where it can still stay preserved even under "adaptive sequential composition". I do not know exactly the meaning of this last one, but it appears that even when adaptations are being made to an algorithm, it will stay differentially private. The section finally goes into 2 propositions of use of the differential privacy definition, where it lightly explains the cases and how they support the usage of the Renyi Differential Privacy definition.
+2. Surprising: I was not entirely aware of the fact that differential privacy nomenclature used definitions for the different types of uses.
+3. Relates to: This explains a version of differential privacy, possibly one that we could end up specifically using. At the very least, it is very informative on the workings of differential privacy.
+
+### Abadi et al. 2016 (ACM CSS)
+REST OF READING
+1. What it does: This half of the paper goes on about the implementation of the differential privacy model, with all the little bits and pieces of it, alongside a short reasoning on why it is being done. After the implementation is a results section, comparing the various settings, their model to some other models, with multiple datasets, the highlights and the lowlights.
+2. Surprising: Looking at the charts, it's odd seeing odd lines, not matching with any basic functions in the slightest.
+3. Relates to: This is just an extension of the differential privacy from the previous half of the reading.
 
 ## Week 7
 
