@@ -4,15 +4,15 @@ Owner: Alex Pellet
 Architecture: Input(12) → Linear(64) → BN → ReLU → Dropout(0.3) →
               Linear(64) → BN → ReLU → Linear(32)
 
-Input features (12 total from studentInfo.csv):
-  - imd_band: ordinal-encoded deprivation index (0-9)
-  - highest_education: ordinal-encoded education level (0-4)
-  - age_band: ordinal-encoded age group (0-2)
-  - gender: binary (0=M, 1=F)
-  - disability: binary (0=N, 1=Y)
-  - region: one-hot encoded (8 UK regions)
-  - studied_credits: normalized float
-  Total: 1 + 1 + 1 + 1 + 1 + 8 - 1 (drop one hot ref) + 1 = 12
+Input features (18 total from studentInfo.csv):
+ - 0    | imd_band: Index of Multiple Deprivation band; higher = less deprived 
+ - 1    | highest_education: 0-4, 0=No formal quals, 4=Post-grad 
+ - 2    | age_band: 0-2, 0=0-35, 1=35-55, 2=55+
+ - 3    | gender: 0/1, 0=M & 1=F 
+ - 4    | disability: 0/1, 0=N & 1=Y 
+ - 5    | studied_credits: Credits registered for in this module
+ - 6-17 | region: OneHotEncoded 0/1, 13 UK regions & reference dropped
+  Total: 1 + 1 + 1 + 1 + 1 + 1 + 13 - 1 (drop one hot ref) + 1 = 18
 """
 
 import torch
@@ -23,14 +23,14 @@ class BottomModelA(nn.Module):
     """MLP with batch normalization for demographic (Silo A) features.
 
     Args:
-        input_dim: Number of input features. Default 12.
+        input_dim: Number of input features. Default 18.
         embedding_dim: Output embedding dimension. Default 32.
         dropout_rate: Dropout probability. Default 0.3.
     """
 
     def __init__(
         self,
-        input_dim: int = 12,
+        input_dim: int = 18,
         embedding_dim: int = 32,
         dropout_rate: float = 0.3,
     ) -> None:

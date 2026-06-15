@@ -13,14 +13,18 @@ Run:
     python -m psi.psi_server          # listens on PSI_SERVER_PORT (default 50051)
 """
 
+import json
 import os
 import socket
+from pathlib import Path
 
 from psi.ecdh_utils import blind_id, generate_keypair, second_blind
 from psi.psi_framing import recv_blinded_ids, send_blinded_ids
 
 PSI_SERVER_HOST = os.getenv("PSI_SERVER_HOST", "localhost")
 PSI_SERVER_PORT = int(os.getenv("PSI_SERVER_PORT", "50051"))
+
+SILO_B_IDS_PATH = Path("data/processed/silo_b_ids.json")
 
 def run_server(
     server_ids: list[str], host: str = PSI_SERVER_HOST, port: int = PSI_SERVER_PORT
@@ -64,8 +68,11 @@ def run_server(
                   f"{len(doubly_blinded_client_set)} re-blinded client IDs sent.")
 
 if __name__ == "__main__":
-    # Demo: load server IDs from data/processed/silo_b.pkl or a test fixture
-    print(f"[PSI Server] Listening on {PSI_SERVER_HOST}:{PSI_SERVER_PORT}")
-    # TODO: load real server IDs here
-    demo_ids = [str(i) for i in range(1000)]
-    run_server(demo_ids)
+    if not SILO_B_IDS_PATH.exists():
+            raise FileNotFoundError(
+                f"{SILO_B_IDS_PATH} not found.\n"
+                "Run  python scripts/extract_ids_for_psi.py  first."
+            )
+    server_ids = json.loads(SILO_B_IDS_PATH.read_text())
+    print(f"[PSI Server] Loaded {len(server_ids):,} Silo B IDs from {SILO_B_IDS_PATH}")
+    run_server(server_ids)

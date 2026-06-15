@@ -15,6 +15,7 @@ from silo_b.bottom_model_b import BottomModelB
 from silo_b.data_loader_b import load_silo_b
 from utils.reproducibility import seed_everything
 
+SILO_B_FEATURES = 26
 
 class SiloBClient(fl.client.NumPyClient):
     """Flower client representing the Academic Affairs silo."""
@@ -25,7 +26,7 @@ class SiloBClient(fl.client.NumPyClient):
         self.config = config
 
         self.model = BottomModelB(
-            input_dim=config.get("input_dim_b", 22),
+            input_dim=config.get("input_dim_b", SILO_B_FEATURES),
             embedding_dim=config.get("embedding_dim", 32),
             dropout_rate=config.get("dropout_rate", 0.3),
         ).to(self.device)
