@@ -1,0 +1,31 @@
+code_module,code_presentation,id_student,gender,region,highest_education,imd_band,age_band,num_of_prev_attempts,studied_credits,disability,final_result
+CCC,2014J,100001,M,East Anglian Region,HE Qualification,30-40%,0-35,0,60,N,Pass
+CCC,2014J,100002,F,East Midlands Region,A Level or Equivalent,20-30%,35-55,0,60,N,Fail
+CCC,2014J,100003,M,Ireland,Lower Than A Level,10-20%,0-35,0,60,Y,Pass
+CCC,2014J,100004,F,London Region,Post Graduate Qualification,50-60%,35-55,0,120,N,Pass
+CCC,2014J,100005,M,North Region,HE Qualification,40-50%,0-35,0,60,N,Withdrawn
+CCC,2014J,100006,F,North Western Region,A Level or Equivalent,30-40%,35-55,0,60,N,Pass
+CCC,2014J,100007,M,Scotland,Lower Than A Level,20-30%,55<=,0,60,N,Pass
+CCC,2014J,100008,F,South East Region,HE Qualification,60-70%,0-35,0,60,Y,Fail
+CCC,2014J,100009,M,South Region,Post Graduate Qualification,70-80%,35-55,0,60,N,Pass
+CCC,2014J,100010,F,South West Region,A Level or Equivalent,80-90%,0-35,0,60,N,Pass
+CCC,2014J,100011,M,Wales,No Formal quals,0-10%,0-35,0,60,N,Withdrawn
+CCC,2014J,100012,F,West Midlands Region,Lower Than A Level,10-20%,35-55,0,60,N,Pass
+CCC,2014J,100013,M,Yorkshire Region,A Level or Equivalent,20-30%,0-35,0,60,N,Pass
+CCC,2014J,100014,F,East Anglian Region,HE Qualification,30-40%,35-55,0,120,N,Pass
+CCC,2014J,100015,M,East Midlands Region,Post Graduate Qualification,40-50%,0-35,0,60,N,Pass
+CCC,2014J,100016,F,Ireland,A Level or Equivalent,50-60%,0-35,0,60,Y,Fail
+CCC,2014J,100017,M,London Region,Lower Than A Level,60-70%,35-55,0,60,N,Pass
+CCC,2014J,100018,F,North Region,HE Qualification,70-80%,0-35,0,60,N,Withdrawn
+CCC,2014J,100019,M,North Western Region,A Level or Equivalent,80-90%,55<=,0,60,N,Pass
+CCC,2014J,100020,F,Scotland,Post Graduate Qualification,90-100%,0-35,0,60,N,Distinction
+CCC,2014J,100021,M,South East Region,HE Qualification,0-10%,35-55,0,60,N,Pass
+CCC,2014J,100022,F,South Region,Lower Than A Level,10-20%,0-35,0,60,Y,Fail
+CCC,2014J,100023,M,South West Region,A Level or Equivalent,20-30%,35-55,0,60,N,Pass
+CCC,2014J,100024,F,Wales,HE Qualification,30-40%,0-35,0,60,N,Withdrawn
+CCC,2014J,100025,M,West Midlands Region,Post Graduate Qualification,40-50%,35-55,0,60,N,Pass
+CCC,2014J,100026,F,Yorkshire Region,A Level or Equivalent,50-60%,0-35,0,60,N,Pass
+CCC,2014J,100027,M,East Anglian Region,Lower Than A Level,60-70%,35-55,0,60,N,Fail
+CCC,2014J,100028,F,East Midlands Region,HE Qualification,70-80%,0-35,0,60,N,Pass
+CCC,2014J,100029,M,Ireland,A Level or Equivalent,80-90%,55<=,0,60,Y,Withdrawn
+CCC,2014J,100030,F,London Region,Post Graduate Qualification,90-100%,35-55,0,60,N,Pass

@@ -12,35 +12,41 @@ import pytest
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 RAW_DIR = Path("data/raw")
+FIXTURE_DIR = Path("tests/fixtures")  # synthetic OULAD data committed for CI
 MODULE = "CCC_2014J"
 A_FEATURE_COUNT = 18
 B_FEATURE_COUNT = 27
 PSI_AVAILABLE = False
 
 
+def _csv_dir() -> Path:
+    """Return data/raw if the real OULAD data exists, else fall back to tests/fixtures/."""
+    return RAW_DIR if (RAW_DIR / "studentInfo.csv").exists() else FIXTURE_DIR
+
+
 @pytest.fixture(scope="module")
 def raw_student_info():
-    return pd.read_csv(RAW_DIR / "studentInfo.csv")
+    return pd.read_csv(_csv_dir() / "studentInfo.csv")
 
 
 @pytest.fixture(scope="module")
 def raw_student_vle():
-    return pd.read_csv(RAW_DIR / "studentVle.csv")
+    return pd.read_csv(_csv_dir() / "studentVle.csv")
 
 
 @pytest.fixture(scope="module")
 def raw_vle():
-    return pd.read_csv(RAW_DIR / "vle.csv")
+    return pd.read_csv(_csv_dir() / "vle.csv")
 
 
 @pytest.fixture(scope="module")
 def raw_assessments():
-    return pd.read_csv(RAW_DIR / "assessments.csv")
+    return pd.read_csv(_csv_dir() / "assessments.csv")
 
 
 @pytest.fixture(scope="module")
 def raw_student_assessment():
-    return pd.read_csv(RAW_DIR / "studentAssessment.csv")
+    return pd.read_csv(_csv_dir() / "studentAssessment.csv")
 
 
 @pytest.fixture(scope="module")

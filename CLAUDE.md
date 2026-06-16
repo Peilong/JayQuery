@@ -21,21 +21,24 @@ Dataset (OULAD) as a proxy for FERPA-protected campus data.
 jayquery/
 ├── CLAUDE.md                   ← you are here
 ├── data/raw/                   ← OULAD CSVs (gitignored, never commit)
-├── data/processed/             ← silo_a.pkl, silo_b.pkl, ordered_id_list.json
+├── data/processed/             ← silo_a.pkl, silo_b.pkl, ordered_id_list.json (gitignored)
 ├── fl_server/                  ← Flower server, VFLStrategy, Top Model   [Alex]
-├── silo_a/                     ← Flower client A, Bottom Model A, DataLoader A   [Alex]
-├── silo_b/                     ← Flower client B, Bottom Model B, DataLoader B   [Alex]
+├── fl_client/                  ← Flower client app (shared VFL client logic)   [Alex]
+├── silo_a/                     ← Bottom Model A, DataLoader A, Client A   [Alex]
+├── silo_b/                     ← Bottom Model B, DataLoader B, Client B   [Alex]
 ├── psi/                        ← ECDH-based Private Set Intersection   [Wyatt]
 ├── privacy/                    ← Opacus DP wrapper, budget tracker, noise injection   [Wyatt]
 ├── attack/                     ← iDLG inversion attack, label inference, gradient monitor   [Wyatt]
 ├── baselines/                  ← centralized ML baselines, eval utilities   [Alex]
+├── utils/                      ← reproducibility seed, wandb helpers, config loader   [Shared]
 ├── experiments/configs/        ← YAML experiment configs   [Alex]
 ├── experiments/checkpoints/    ← saved model checkpoints (gitignored)
-├── notebooks/                  ← EDA (Alex), attack demo (Wyatt)
-├── tests/                      ← pytest unit tests
+├── notebooks/                  ← EDA notebook (Alex), testing notebook (Wyatt)
+├── tests/                      ← pytest unit tests (test_loaders, test_models, test_dp, test_psi)
+├── tests/fixtures/             ← synthetic OULAD CSVs committed for CI (30 students, 20 VLE types)
 ├── docs/                       ← design docs, paper notes, weekly reports
 ├── proto/                      ← gRPC protobuf definitions
-└── scripts/                    ← OULAD download, wandb setup, reproduce_all.sh
+└── scripts/                    ← OULAD download, silo prep, wandb setup, reproduce_all.sh
 ```
 
 ---
@@ -44,9 +47,9 @@ jayquery/
 
 | Module | Owner | Autonomy Level |
 |--------|-------|----------------|
-| `fl_server/`, `silo_a/`, `silo_b/`, `baselines/`, `notebooks/eda.ipynb` | **Alex Pellet** | High — make design decisions, document rationale in `docs/alex_paper_notes.md` |
-| `psi/`, `privacy/`, `attack/`, `notebooks/attack_demo.ipynb` | **Wyatt Wilfong** | Guided — follow step-by-step scaffolds in `CLAUDE.md` and the research plan |
-| `experiments/`, `tests/`, `docs/` | **Shared** | Alex owns experiment orchestration; Wyatt owns privacy docs |
+| `fl_server/`, `fl_client/`, `silo_a/`, `silo_b/`, `baselines/`, `notebooks/2026_05_20-EDA_Notebook-v1.ipynb` | **Alex Pellet** | High — make design decisions, document rationale in `docs/alex_paper_notes.md` |
+| `psi/`, `privacy/`, `attack/`, `notebooks/2026_05_29-testing_notebook.ipynb` | **Wyatt Wilfong** | Guided — follow step-by-step scaffolds in `CLAUDE.md` and the research plan |
+| `utils/`, `experiments/`, `tests/`, `docs/` | **Shared** | Alex owns experiment orchestration; Wyatt owns privacy docs |
 
 When Claude Code works on a file, respect this ownership — do not refactor a module
 that belongs to the other student without an explicit instruction.
@@ -67,46 +70,60 @@ that belongs to the other student without an explicit instruction.
 
 ## Running the Project
 
-### 1 — Environment
+### 1 — Environment setup (first time only)
 ```bash
-conda activate jayquery          # or: source .venv/bin/activate
+git clone https://github.com/Peilong/JayQuery.git
+cd JayQuery
+conda create -n jayquery python=3.11 && conda activate jayquery
+pip install -r requirements.txt
+pip install -e .
+cp .env.example .env             # fill in WANDB_API_KEY
+```
+
+### 2 — Activate environment (subsequent sessions)
+```bash
+conda activate jayquery
 python -c "import torch, flwr, opacus; print('OK')"
 ```
 
-### 2 — Download OULAD
+### 3 — Download OULAD
 ```bash
 bash scripts/download_oulad.sh   # places 7 CSVs into data/raw/
 ```
 
-### 3 — Prepare silos (Alex)
+### 4 — Extract IDs and run PSI (Wyatt)
 ```bash
-python scripts/prepare_silos.py  # outputs data/processed/silo_{a,b}.pkl + ordered_id_list.json
+python scripts/extract_ids_for_psi.py   # writes per-silo ID lists for PSI input
+python -m psi.psi_server &              # start server in background
+python -m psi.psi_client               # run PSI, writes data/processed/ordered_id_list.json
 ```
 
-### 4 — Run PSI (Wyatt)
+### 5 — Prepare silos (Alex)
 ```bash
-python -m psi.psi_server &       # start server in background
-python -m psi.psi_client         # run PSI, writes data/processed/ordered_id_list.json
+python scripts/prepare_silos.py  # outputs data/processed/silo_{a,b}.pkl
 ```
 
-### 5 — Train VFL (no DP)
+### 6 — Run VFL training (Flower simulation)
 ```bash
-python -m fl_server.server --config experiments/configs/exp02_vfl_no_dp.yaml
+flwr federation simulation-config --num-supernodes=2
+flwr run .
 ```
 
-### 6 — Train VFL + DP
+### 7 — Run baselines (Alex)
 ```bash
-python -m fl_server.server --config experiments/configs/exp03_dp_epsilon_grid.yaml --epsilon 1.0
+wandb login
+python -m baselines.run_baselines --config experiments/configs/exp01_centralized_baselines.yaml --run all
 ```
 
-### 7 — Run all experiments
+### 8 — Run all experiments
 ```bash
 bash scripts/reproduce_all.sh
 ```
 
-### 8 — Run tests
+### 9 — Run tests
 ```bash
 pytest tests/ -v --cov=. --cov-report=term-missing
+# Tests fall back to tests/fixtures/ synthetic CSVs when data/raw/ is absent (CI-safe)
 ```
 
 ---
