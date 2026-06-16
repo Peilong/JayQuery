@@ -146,8 +146,8 @@ def make_private(
     target_delta: float,
     max_grad_norm: float,
     num_epochs: int,
-) -> tuple[GradSampleModule, DPOptimizer, DataLoader]:
-    """Returns (dp_model, dp_optimizer, dp_loader). Raises ValueError if epsilon <= 0."""
+) -> tuple[GradSampleModule, DPOptimizer, DataLoader, PrivacyEngine]:
+    """Returns (dp_model, dp_optimizer, dp_loader, priv_engine). Raises ValueError if epsilon <= 0."""
 ```
 
 ### Embedding Interface (cut layer)
