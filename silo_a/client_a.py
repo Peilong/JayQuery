@@ -18,6 +18,8 @@ from silo_a.bottom_model_a import BottomModelA
 from silo_a.data_loader_a import load_silo_a
 from utils.reproducibility import seed_everything
 
+from privacy.dp_wrapper import make_private
+
 SILO_A_FEATURES = 18
 
 class SiloAClient(fl.client.NumPyClient):
@@ -56,6 +58,15 @@ class SiloAClient(fl.client.NumPyClient):
         #       max_grad_norm=config["max_grad_norm"], num_epochs=config["num_epochs"],
         #   )
         # ───────────────────────────────────────────────────────────────────────
+        self.model, self.optimizer, self.train_loader = make_private(
+            model=self.model, 
+            optimizer=self.optimizer,
+            data_loader=self.train_loader,
+            target_epsilon=config["epsilon"], 
+            target_delta=config["delta"],
+            max_grad_norm=config["max_grad_norm"], 
+            num_epochs=config["num_epochs"]
+        )
 
         # DataLoaders
         self.train_loader, self.val_loader, self.test_loader = load_silo_a(
