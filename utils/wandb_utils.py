@@ -15,6 +15,13 @@ Design:
     case. For parallel or sequential multi-run workflows, use init_run() /
     finish_run() directly.
 
+    For the federated structure, the stateless Message-API ClientApps cannot
+    hold a Run across rounds, so they use log_client_round() — a resume-by-id
+    helper that re-attaches to a persistent run each round, logs, and finishes.
+    A federated hyperparameter sweep cannot call a single in-process train_fn
+    (the loop spans ServerApp + ClientApps across processes); build_flwr_sweep_fn()
+    launches `flwr run` per trial instead. See those functions below.
+
 Typical single-model usage:
     from baselines.wandb_utils import run_with_tracking
 
@@ -57,13 +64,23 @@ Parallel multi-run usage (concurrent.futures):
         fut_a = pool.submit(run_model, "model-a", train_fn_a, kwargs_a)
         fut_b = pool.submit(run_model, "model-b", train_fn_b, kwargs_b)
         metrics_a, metrics_b = fut_a.result(), fut_b.result()
+
+Federated client per-round logging (stateless ClientApp handlers):
+    from baselines.wandb_utils import log_client_round, new_run_id
+    # persist new_run_id() in context.state once, then each round:
+    log_client_round(run_id=rid, metrics={"client_a/grad_l2": 1.23},
+                     step=server_round, project="jayquery-vfl")
 """
 
 from __future__ import annotations
 
 import functools
+import logging
+import os
 from collections.abc import Callable
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # Scalar metric keys safe to log directly.
 # Confusion-matrix integers are handled separately as a wandb.Table.
@@ -97,6 +114,11 @@ def _resolve_run(wandb:any, run:any)->any:
 
     Raises if neither is available, with a message that distinguishes the
     two failure modes (no run passed vs. no global run active).
+
+    NOTE: runs created by init_run() use reinit="create_new", which does NOT
+    register them as the global wandb.run. The wandb.run fallback therefore only
+    works for runs created elsewhere (e.g. by wandb.agent during a sweep). Always
+    pass an explicit `run` for init_run()-created runs.
     """
     if run is not None:
         return run
@@ -147,7 +169,9 @@ def init_run(
         entity: wandb team or username. Defaults to the jayquery entity.
         config: Hyperparameters / settings dict to log upfront. Can also be
                 updated later via log_params().
-        **wandb_kwargs: Any additional kwargs forwarded to wandb.init().
+        **wandb_kwargs: Any additional kwargs forwarded to wandb.init(). Do NOT
+                pass `settings` here — this function already sets it (passing it
+                again would raise a duplicate-keyword TypeError).
 
     Returns:
         A wandb.Run object. Pass this to all other wandb_utils functions.
@@ -365,6 +389,11 @@ def wandb_sweep_fn(
 ) -> Callable[[], None]:
     """Return a zero-argument sweep function compatible with wandb.agent().
 
+    NOTE: this is for the CENTRALIZED baselines, where one in-process call to
+    train_fn produces the swept metric. The VFL loop spans a ServerApp and
+    multiple ClientApps across processes and CANNOT be swept this way — use
+    build_flwr_sweep_fn() for that.
+
     The returned function merges wandb.config into base_train_kwargs["config"]
     on each sweep trial.
 
@@ -420,3 +449,198 @@ def wandb_sweep_fn(
             finish_run(run)
 
     return _sweep_trial
+
+
+# ── federated structure: stateless-client logging + flwr sweep ──────────────────
+
+
+def new_run_id() -> str:
+    """Return a fresh wandb run id (16-char base-62), without starting a run.
+
+    Persist this once in a ClientApp's context.state and reuse it every round so
+    that log_client_round() always resumes the SAME run for that node.
+    """
+    wandb = _require_wandb()
+    return wandb.util.generate_id()
+
+
+def log_client_round(
+    run_id: str,
+    metrics: dict[str, Any],
+    *,
+    project: str,
+    step: int | None = None,
+    config: dict[str, Any] | None = None,
+    name: str | None = None,
+    entity: str | None = "jayquery",
+    tags: list[str] | None = None,
+    group: str | None = None,
+    mode: str = "online",
+) -> None:
+    """Resume-by-id per-round logging for stateless Flower ClientApp handlers.
+
+    A Message-API ClientApp is ephemeral — it is instantiated for one Message and
+    destroyed on reply — so it cannot hold a wandb Run across rounds. This helper
+    re-attaches to the run identified by `run_id` (resume="allow"), logs
+    `metrics` at `step`, and finishes. Pass the SAME run_id every round (persist
+    it in context.state via new_run_id()).
+
+    Telemetry must never break training: any wandb failure here is logged and
+    swallowed, and the FL round proceeds normally.
+
+    Trade-off: this performs one init/log/finish per call. That is fine for
+    research-scale simulations (tens of rounds). For very high round counts or
+    many clients, prefer logging the swept metric from the ServerApp (which is
+    persistent) and keep client logging to occasional diagnostics.
+
+    Args:
+        run_id: Stable run id; the same value must be used for every round.
+        metrics: Flat dict of scalar (or wandb media) values to log.
+        project: wandb project name.
+        step: Logging step (use the FL round number). Must be monotonic.
+        config: Hyperparameters to attach (static across rounds; re-sent each
+                call, which is a no-op when unchanged).
+        name: Run display name. If None, wandb keeps/auto-generates one.
+        entity: wandb team or username.
+        tags: Tag strings for filtering in the UI.
+        group: Optional run group (e.g. to group both silos of one FL run).
+        mode: "online", "offline", or "disabled". Use "offline"/"disabled" in CI
+              or when no wandb login is available.
+    """
+    wandb = _require_wandb()
+    run = None
+    try:
+        run = wandb.init(
+            project=project,
+            id=run_id,
+            resume="allow",
+            entity=entity,
+            name=name,
+            tags=tags,
+            group=group,
+            config=config or None,
+            mode=mode,
+            settings=wandb.Settings(reinit="create_new"),
+        )
+        kwargs = {"step": step} if step is not None else {}
+        run.log(metrics, **kwargs)
+    except Exception:  # noqa: BLE001 — telemetry must not break the FL round
+        logger.warning(
+            "wandb client-round logging failed (run_id=%s, step=%s); continuing.",
+            run_id,
+            step,
+            exc_info=True,
+        )
+    finally:
+        if run is not None:
+            try:
+                run.finish()
+            except Exception:  # noqa: BLE001
+                logger.warning("wandb run.finish() failed; continuing.", exc_info=True)
+
+
+def _fmt_run_config_value(v: Any) -> str:
+    """Render a Python value as a flwr --run-config TOML scalar."""
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return repr(v)
+    return "'" + str(v).replace("'", "\\'") + "'"
+
+
+def build_flwr_sweep_fn(
+    *,
+    project: str,
+    app: str = ".",
+    federation: str | None = None,
+    entity: str | None = "jayquery",
+    extra_run_config: dict[str, Any] | None = None,
+    flwr_bin: str = "flwr",
+) -> Callable[[], None]:
+    """Return a zero-arg sweep trial fn (for wandb.agent) that runs a full
+    federated `flwr run` with hyperparameters drawn from wandb.config.
+
+    Why this exists
+    ---------------
+    The VFL training loop spans a ServerApp + ClientApps across separate
+    processes, so it cannot be swept by calling a single in-process train_fn
+    (that is wandb_sweep_fn, for the centralized baselines). Instead, each trial
+    launches `flwr run` as a subprocess and passes the sampled hyperparameters
+    via --run-config.
+
+    How the metric gets back to the sweep
+    -------------------------------------
+    The optimisation target (e.g. validation AUC) is produced by the ServerApp,
+    in the subprocess. This function exports WANDB_RUN_ID / WANDB_PROJECT /
+    WANDB_ENTITY / WANDB_RESUME into the subprocess environment, so the ServerApp
+    must call wandb.init(resume="allow") (no explicit id needed — it reads the
+    env) and log the metric there. That attaches the server's metric to THIS
+    trial's run, which is what wandb.agent reads to drive the sweep. The
+    client-side log_client_round() calls will land in the same run when the
+    clients are given the same run id (e.g. via a "wandb-run-name"/env shared by
+    the server). For a clean correlation, set the sweep metric name to whatever
+    key the ServerApp logs (e.g. "val/auc_roc").
+
+    Args:
+        project: wandb project the sweep lives in.
+        app: Path to the Flower app (passed positionally to `flwr run`).
+        federation: Optional federation name from pyproject.toml.
+        entity: wandb entity.
+        extra_run_config: Fixed run-config overrides merged under the swept ones.
+        flwr_bin: The flwr executable (override if not on PATH).
+
+    Returns:
+        A zero-argument callable suitable for wandb.agent().
+
+    Example:
+        sweep_config = {
+            "method": "bayes",
+            "metric": {"name": "val/auc_roc", "goal": "maximize"},
+            "parameters": {
+                "learning-rate": {"min": 1e-4, "max": 5e-3},
+                "dropout-rate":  {"values": [0.1, 0.2, 0.3]},
+                "embedding-dim": {"values": [16, 32, 64]},
+            },
+        }
+        sweep_id = wandb.sweep(sweep_config, project="jayquery-vfl")
+        wandb.agent(
+            sweep_id,
+            build_flwr_sweep_fn(project="jayquery-vfl", federation="local-sim"),
+            count=20,
+        )
+    """
+    import subprocess
+
+    def _trial() -> None:
+        wandb = _require_wandb()
+        run = wandb.run  # wandb.agent already started this run for us
+        if run is None:
+            raise RuntimeError(
+                "build_flwr_sweep_fn() must be invoked by wandb.agent(), which "
+                "creates the active run."
+            )
+
+        cfg: dict[str, Any] = dict(extra_run_config or {})
+        cfg.update(dict(wandb.config))
+        run_config_str = " ".join(
+            f"{k}={_fmt_run_config_value(v)}" for k, v in cfg.items()
+        )
+
+        env = dict(os.environ)
+        env["WANDB_RUN_ID"] = run.id
+        env["WANDB_PROJECT"] = project
+        env["WANDB_RESUME"] = "allow"
+        if entity:
+            env["WANDB_ENTITY"] = entity
+
+        cmd = [flwr_bin, "run", app]
+        if federation:
+            cmd.append(federation)
+        cmd += ["--run-config", run_config_str]
+
+        logger.info("sweep trial -> %s", " ".join(cmd))
+        # check=True so a failed trial surfaces to the agent rather than being
+        # silently scored as a missing metric.
+        subprocess.run(cmd, check=True, env=env)
+
+    return _trial
