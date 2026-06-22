@@ -76,7 +76,8 @@ def load_silo_a(
     g = torch.Generator()
     g.manual_seed(seed)
 
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, generator=g)
+    #shuffle=False is necessary for the client_a reproducability when checking gradients.
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=False, generator=g)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
     test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False)
 

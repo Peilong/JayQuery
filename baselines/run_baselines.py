@@ -10,9 +10,27 @@ Usage:
         --config experiments/configs/exp01_centralized_baselines.yaml --run mlp
     python -m baselines.run_baselines \
         --run all
+
+wandb run-passing methodology (IMPORTANT):
+    utils.wandb_utils.init_run() creates runs with reinit="create_new", so there
+    is NO global wandb.run. Every wandb log_*() call must therefore be given an
+    explicit run= (a fallback to the global run now raises "No run available").
+    Concretely, each train_fn that logs DURING training must:
+        (1) accept a `run` parameter, and
+        (2) pass that run to every log_extra()/log_metrics() call it makes.
+    See baselines.centralized_mlp.train_and_evaluate for the reference pattern.
+    The final test metrics are logged by run_with_tracking() with the explicit
+    run, so a train_fn that does no intra-training logging needs no run at all.
+
+    make_run_injector() below wires the active Run into train_kwargs["run"] for
+    any train_fn that accepts it (and is a no-op for those that don't), so the
+    AVAILABLE_MODELS table no longer needs a hand-maintained on_run_created.
 """
 
+from typing import Any
+
 import argparse
+import inspect
 
 import torch
 import yaml
@@ -24,36 +42,46 @@ from silo_b.data_loader_b import load_silo_b
 from utils.wandb_utils import run_with_tracking
 
 
-def inject_run(run: any, train_kwargs: dict) -> None:
-    train_kwargs["run"] = run
+def make_run_injector(train_fn) -> "callable":
+    """Return an on_run_created hook that injects the active wandb Run into
+    train_kwargs['run'] — but ONLY if train_fn accepts a `run` parameter.
+
+    The signature guard makes this safe for train_fns that don't take a run
+    (e.g. a pure sklearn fit with no per-epoch logging): they simply don't get
+    one, and their final metrics are still logged by run_with_tracking() with an
+    explicit run. Train_fns that DO log during training will receive the run and
+    must forward it to their log_*() calls.
+    """
+    accepts_run = "run" in inspect.signature(train_fn).parameters
+
+    def _inject(run: Any, train_kwargs: dict) -> None:
+        if accepts_run:
+            train_kwargs["run"] = run
+
+    return _inject
 
 
 AVAILABLE_MODELS = {
     "xgboost": {
         "train_fn": centralized_xgb.train_and_evaluate,
         "tags": ["baseline", "xgboost"],
-        "on_run_created": inject_run,
     },
     "mlp": {
         "train_fn": centralized_mlp.train_and_evaluate,
         "tags": ["baseline", "mlp"],
-        "on_run_created": inject_run,
     },
     "logistic_regression": {
         "train_fn": centralized_lr.train_and_evaluate,
         "tags": ["baseline", "logistic_regression"],
-        "on_run_created": None,
     },
     "isolated_silo_a": {
         "train_fn": isolated_mlp.train_and_evaluate,
         "tags": ["baseline", "isolated", "silo_a"],
-        "on_run_created": inject_run,
         "data": "silo_a",
     },
     "isolated_silo_b": {
         "train_fn": isolated_mlp.train_and_evaluate,
         "tags": ["baseline", "isolated", "silo_b"],
-        "on_run_created": inject_run,
         "data": "silo_b",
     },
 }
@@ -176,7 +204,8 @@ def main() -> None:
             name=f"{experiment['name']}-{model_name}",
             group=f"{experiment['name']}-{model_name}",
             tags=model_cfg["tags"] + [f"week{experiment['week']}"],
-            on_run_created=model_cfg["on_run_created"],
+            # Inject the active run into train_kwargs iff this train_fn takes it.
+            on_run_created=make_run_injector(model_cfg["train_fn"]),
         )
 
 

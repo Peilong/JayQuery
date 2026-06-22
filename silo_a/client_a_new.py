@@ -43,7 +43,7 @@ import torch
 from flwr.app import Array, ArrayRecord, ConfigRecord, Context, Message, RecordDict
 from flwr.clientapp import ClientApp
 
-from baselines.wandb_utils import log_client_round, new_run_id
+from utils.wandb_utils import log_client_round, new_run_id
 from silo_a.bottom_model_a import BottomModelA
 from silo_a.data_loader_a import load_silo_a
 from utils.reproducibility import seed_everything  # noqa: F401  (kept for parity)
@@ -72,12 +72,6 @@ def _full_trainset(batch_size: int) -> tuple[torch.Tensor, torch.Tensor]:
     VFL here is full-batch: one forward over all PSI-aligned rows per round, not
     a mini-batch loop. Row order must be identical every round so the recomputed
     forward in apply_gradients reproduces the embedding we sent.
-
-    NOTE: this requires load_silo_a()'s train_loader to be deterministic
-    (shuffle=False, or a fixed sampler). If it shuffles, the row order — and
-    therefore the embedding — will differ between generate_embeddings and
-    apply_gradients, and the injected gradient will be misaligned. Verify this
-    in silo_a/data_loader_a.py.
     """
     train_loader, _, _ = load_silo_a(batch_size=batch_size)
     xs, ys = [], []

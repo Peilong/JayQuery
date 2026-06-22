@@ -23,7 +23,7 @@ Design:
     launches `flwr run` per trial instead. See those functions below.
 
 Typical single-model usage:
-    from baselines.wandb_utils import run_with_tracking
+    from utils.wandb_utils import run_with_tracking
 
     metrics = run_with_tracking(
         train_fn=train_and_evaluate,
@@ -34,7 +34,7 @@ Typical single-model usage:
     )
 
 Simultaneous multi-run usage:
-    from baselines.wandb_utils import init_run, log_metrics, finish_run
+    from utils.wandb_utils import init_run, log_metrics, finish_run
 
     run_a = init_run(project="dropout-risk", name="model-a")
     run_b = init_run(project="dropout-risk", name="model-b")
@@ -50,7 +50,7 @@ Simultaneous multi-run usage:
 
 Parallel multi-run usage (concurrent.futures):
     from concurrent.futures import ThreadPoolExecutor
-    from baselines.wandb_utils import run_with_tracking
+    from utils.wandb_utils import run_with_tracking
 
     def run_model(name, train_fn, kwargs):
         return run_with_tracking(
@@ -66,13 +66,15 @@ Parallel multi-run usage (concurrent.futures):
         metrics_a, metrics_b = fut_a.result(), fut_b.result()
 
 Federated client per-round logging (stateless ClientApp handlers):
-    from baselines.wandb_utils import log_client_round, new_run_id
+    from utils.wandb_utils import log_client_round, new_run_id
     # persist new_run_id() in context.state once, then each round:
     log_client_round(run_id=rid, metrics={"client_a/grad_l2": 1.23},
                      step=server_round, project="jayquery-vfl")
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 import functools
 import logging
@@ -96,7 +98,7 @@ _SCALAR_METRIC_KEYS = [
 ]
 
 
-def _require_wandb()->any:
+def _require_wandb()->Any:
     """Import and return the wandb module, raising clearly if not installed."""
     try:
         import wandb
@@ -109,7 +111,7 @@ def _require_wandb()->any:
         )
 
 
-def _resolve_run(wandb:any, run:any)->any:
+def _resolve_run(wandb:Any, run:Any)->Any:
     """Return `run` if provided, else fall back to wandb.run (the global singleton).
 
     Raises if neither is available, with a message that distinguishes the
@@ -130,7 +132,7 @@ def _resolve_run(wandb:any, run:any)->any:
     )
 
 
-def _build_confusion_table(metrics: dict[str, Any], wandb: any)->any:
+def _build_confusion_table(metrics: dict[str, Any], wandb: Any)->Any:
     """Build a labelled 2x2 wandb.Table from confusion matrix values."""
     return wandb.Table(
         columns=["", "Predicted negative", "Predicted positive"],
@@ -153,7 +155,7 @@ def init_run(
     config: dict | None = None,
     group: str | None = None,
     **wandb_kwargs: dict,
-)->any:
+)->Any:
     """Initialize a wandb run and return the Run object.
 
     Each call returns an independent Run object. Multiple calls can be active
@@ -190,7 +192,7 @@ def init_run(
     )
 
 
-def finish_run(run: any | None = None) -> None:
+def finish_run(run: Any | None = None) -> None:
     """Cleanly close a wandb run.
 
     Args:
@@ -205,7 +207,7 @@ def finish_run(run: any | None = None) -> None:
 
 def log_params(
     params: dict[str, Any],
-    run: any | None = None,
+    run: Any | None = None,
 ) -> None:
     """Update a run's config (hyperparameters).
 
@@ -222,7 +224,7 @@ def log_params(
 
 def log_metrics(
     metrics: dict[str, Any],
-    run: any | None = None,
+    run: Any | None = None,
     prefix: str = "",
     step: int | None = None,
     log_confusion_matrix: bool = True,
@@ -254,7 +256,7 @@ def log_metrics(
 
 def log_extra(
     data: dict[str, Any],
-    run: any | None = None,
+    run: Any | None = None,
     step: int | None = None,
 ) -> None:
     """Log arbitrary key-value pairs to a wandb run.
@@ -288,7 +290,7 @@ def run_with_tracking(
     test_metrics_key: str | None = None,
     extra_log: dict[str, Any] | None = None,
     wandb_kwargs: dict | None = None,
-    on_run_created: Callable[[any, dict], None] | None = None,
+    on_run_created: Callable[[Any, dict], None] | None = None,
 ) -> dict[str, Any]:
     """Wrap any train_and_evaluate function with a full wandb tracking lifecycle.
 
