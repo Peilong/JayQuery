@@ -5,10 +5,10 @@ Status: SCAFFOLD — implement PrivacyBudgetTracker in Week 5.
 
 References:
   - Mironov 2017 (CSF) — Rényi DP composition
-  - autodp library: https://github.com/yuxiangw/autodp
 """
 
 from privacy.dp_wrapper import PrivacyBudgetExceededError
+from opacus import PrivacyEngine
 
 
 class PrivacyBudgetTracker:
@@ -53,6 +53,7 @@ class PrivacyBudgetTracker:
         self._round = 0
 
         # TODO (Wyatt, Week 5): initialize autodp accountant or store dp_optimizer ref
+        self.priv_engine = None  # Placeholder for PrivacyEngine reference until there's a clear link to the dp_wrapper make_private() function and the PrivacyBudgetTracker.
 
     def step(self) -> None:
         """Advance the accountant by one training round.
@@ -77,7 +78,7 @@ class PrivacyBudgetTracker:
 
         TODO (Wyatt, Week 5): implement using dp_optimizer.privacy_engine.get_epsilon(delta).
         """
-        raise NotImplementedError("TODO (Wyatt, Week 5): implement get_epsilon()")
+        return PrivacyEngine.get_epsilon(delta=self.delta)
 
     @property
     def rounds_completed(self) -> int:
