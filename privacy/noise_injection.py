@@ -15,6 +15,7 @@ References:
 """
 
 import torch
+import math
 
 
 def add_dp_noise_to_embedding(
@@ -56,8 +57,9 @@ def add_dp_noise_to_embedding(
     if sensitivity <= 0:
         raise ValueError(f"sensitivity must be > 0, got {sensitivity}")
 
-    # TODO (Wyatt, Week 6): implement Gaussian noise injection
-    raise NotImplementedError("TODO (Wyatt, Week 6): implement add_dp_noise_to_embedding()")
+    sigma = sensitivity * math.sqrt(2 * math.log(1.25 / delta)) / epsilon
+    noise = torch.randn_like(embedding) * sigma
+    return embedding + noise
 
 
 def add_laplace_noise_to_embedding(
@@ -80,4 +82,6 @@ def add_laplace_noise_to_embedding(
 
     TODO (Wyatt, Week 6): implement using torch.distributions.Laplace.
     """
-    raise NotImplementedError("TODO (Wyatt, Week 6): implement add_laplace_noise_to_embedding()")
+    laplace = torch.distributions.Laplace(loc=0.0, scale=sensitivity / epsilon)
+    noise = laplace.sample(embedding.shape)
+    return embedding + noise
