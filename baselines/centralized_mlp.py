@@ -3,7 +3,15 @@
 Owner: Alex Pellet
 Architecture mirrors the TopModel but with raw 34-dim input.
 This sets the performance ceiling for VFL comparisons.
+
+This file is the REFERENCE pattern for wandb run-passing under the new
+utils.wandb_utils methodology: runs are created with reinit="create_new" (no
+global wandb.run), so every log call receives the explicit `run` that
+run_baselines injects via on_run_created. Mirror this in centralized_lr.py,
+centralized_xgb.py, and isolated_mlp.py — i.e. accept `run` and pass it to every
+log_extra()/log_metrics() call; never rely on a global run.
 """
+from typing import Any
 
 import numpy as np
 import torch
@@ -12,6 +20,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from baselines.eval_utils import compute_metrics, print_metrics_table
 from utils.reproducibility import seed_everything
+from utils.wandb_utils import log_extra
 
 
 class CentralizedMLP(nn.Module):
@@ -45,7 +54,7 @@ def train_and_evaluate(
     X_test: np.ndarray,
     y_test: np.ndarray,
     config: dict | None = None,
-    run: any | None=None,
+    run: Any | None = None,
 ) -> dict[str, float]:
     """Train CentralizedMLP and return test metrics.
 
@@ -53,6 +62,9 @@ def train_and_evaluate(
         X_train/val/test: Feature arrays of shape (N, 45).
         y_train/val/test: Label arrays of shape (N,).
         config: Optional hyperparameter dict (overrides defaults).
+        run: The active wandb Run injected by run_baselines. If None, no
+             per-epoch logging is performed (final metrics are still logged by
+             run_with_tracking with its own explicit run).
 
     Returns:
         Test metrics dict from compute_metrics().
@@ -102,9 +114,9 @@ def train_and_evaluate(
         val_metrics = compute_metrics(y_val, val_prob)
         scheduler.step(val_metrics["auc_roc"])
 
+        # New methodology: log to the EXPLICIT injected run (there is no global
+        # wandb.run under reinit="create_new").
         if run is not None:
-            from utils.wandb_utils import log_extra
-
             log_extra(
                 {
                     "val/auc_roc": val_metrics["auc_roc"],
@@ -114,7 +126,7 @@ def train_and_evaluate(
                 step=epoch,
             )
 
-        if val_metrics["auc_roc"] > best_val_auc:
+        if best_state is None or val_metrics["auc_roc"] > best_val_auc:
             best_val_auc = val_metrics["auc_roc"]
             best_state = {k: v.clone() for k, v in model.state_dict().items()}
 

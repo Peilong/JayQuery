@@ -51,7 +51,7 @@ collaborate to train a dropout-risk predictor *without ever sharing raw records*
 # 1. Clone and set up environment
 git clone https://github.com/Peilong/JayQuery.git
 cd JayQuery
-conda create -n jayquery python=3.11 && conda activate jayquery
+conda create -n jayquery python=3.11 && conda activate jayquery #conda is used here, but not neccessary
 pip install -r requirements.txt
 
 # 2. Copy and configure environment variables
@@ -60,20 +60,23 @@ cp .env.example .env        # fill in WANDB_API_KEY
 # 3. Download OULAD dataset
 bash scripts/download_oulad.sh
 
-# 4. Prepare data silos
-python scripts/prepare_silos.py
+# 4. Extract ids for PSI
+python scripts/extract_ids_for_psi.py
 
 # 5. Run PSI protocol (terminal 1: server, terminal 2: client)
 python -m psi.psi_server &
 python -m psi.psi_client
 
-# 6. Train VFL (no DP)
+# 6. Prepare data silos
+python scripts/prepare_silos.py
+
+# 7. Train VFL (no DP)
 python -m fl_server.server --config experiments/configs/exp02_vfl_no_dp.yaml
 
-# 7. Run all experiments (reproduces paper results)
+# 8. Run all experiments (reproduces paper results)
 bash scripts/reproduce_all.sh
 
-# 8. Run tests
+# 9. Run tests
 pytest tests/ -v
 ```
 

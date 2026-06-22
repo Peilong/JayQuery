@@ -28,6 +28,7 @@ data/processed/
 !experiments/configs/*.yaml
 !docs/*.md
 !experiments/psi_timing.csv
+!tests/fixtures/*.csv
 
 # ── Model checkpoints ────────────────────────────────────────────
 experiments/checkpoints/

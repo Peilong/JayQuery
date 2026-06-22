@@ -4,6 +4,7 @@ Owner: Alex Pellet
 Trains on a single silo's features without access to the other silo.
 Establishes the lower bound — quantifies the benefit of VFL collaboration.
 """
+from typing import Any
 
 import numpy as np
 import torch
@@ -45,7 +46,7 @@ def train_and_evaluate(
     X_test: np.ndarray,
     y_test: np.ndarray,
     config: dict | None = None,
-    run: any | None = None,
+    run: Any | None = None,
 ) -> dict[str, float]:
     """Train IsolatedMLP on a single silo and return test metrics.
 

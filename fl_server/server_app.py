@@ -18,6 +18,9 @@ Usage (deployment mode — three separate processes):
     flwr supernode --partition-id 0 &
     flwr supernode --partition-id 1 &
     flwr run .
+    
+TODO: 
+- Implement Validation Rounds
 """
 
 from logging import INFO

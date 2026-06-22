@@ -4,6 +4,8 @@ Owner: Alex Pellet
 Typically the strongest centralized baseline on tabular data.
 """
 
+from typing import Any
+
 import numpy as np
 import xgboost as xgb
 
@@ -18,7 +20,7 @@ def train_and_evaluate(
     X_test: np.ndarray,
     y_test: np.ndarray,
     config: dict | None = None,
-    run: any | None = None,
+    run: Any | None = None,
 ) -> dict[str, float]:
     """Train XGBoost classifier and return test metrics.
 
