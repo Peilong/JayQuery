@@ -1,5 +1,8 @@
 """Flower Client for Silo B — Academic Affairs / VLE.
 
+--MARKED FOR DELETION 23/06/2026--
+-- This file is incorporated into the fl_client system, and serves no purpose outside of it. --
+
 Owner: Alex Pellet
 Mirrors client_a.py. TODO (Week 5, Alex): implement fit() and evaluate().
 TODO (Week 6, Wyatt): insert dp_wrapper at the marked DP HOOK location.

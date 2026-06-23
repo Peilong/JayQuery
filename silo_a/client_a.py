@@ -1,5 +1,8 @@
 """Flower Client for Silo A — Financial Aid / Demographics.
 
+--MARKED FOR DELETION 23/06/2026--
+-- This file is incorporated into the fl_client system, and serves no purpose outside of it. --
+
 Owner: Alex Pellet
 Handles the Silo A side of the VFL training loop:
   - Loads BottomModelA and Silo A DataLoader
