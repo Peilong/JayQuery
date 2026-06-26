@@ -37,6 +37,10 @@ class PrivacyBudgetTracker:
         Store dp_optimizer reference or use autodp for standalone computation.
     """
 
+    # I am sorta waiting on the first actual use of the privacybudgettracker to see what exactly needs to be done with this to actually get it functioning properly.
+    # Until then, it will just wait as this nearly complete scaffold till then, as with the 4 probable privacy engines i would think to give the step function a privacy_engine parameter to be able to discern between the 4. 
+    #       But I will wait to see what the implementation would look like before i change anything.
+
     def __init__(
         self,
         target_epsilon: float,
