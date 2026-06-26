@@ -14,6 +14,7 @@ import torch
 from flwr.app import Array, ArrayRecord, ConfigRecord, Context, Message, RecordDict
 
 from fl_client.silo_spec import SiloSpec
+from privacy.dp_wrapper import make_private
 from utils.wandb_utils import log_client_round, new_run_id
 
 
@@ -171,6 +172,16 @@ def apply_gradients(spec: SiloSpec, msg: Message, context: Context) -> Message:
     # DP HOOK: Opacus wraps `optimizer` here in a future round.
     # make_private() expects loss.backward(); embedding.backward(grad) below
     # is upstream-gradient injection instead — confirm compatibility first.
+    model, optimizer = make_private(
+            model=model, 
+            optimizer=optimizer,
+            data_loader=train_loader,
+            target_epsilon=config["epsilon"], 
+            target_delta=config["delta"],
+            max_grad_norm=config["max_grad_norm"], 
+            num_epochs=config["num_epochs"]) 
+    # Very basic hook, effectively ripped from the original silo_a/client_a.py. 
+    # Like last time, I'm not entirely sure how the implementation of this is supposed to work but it is a something to start with.
 
     # DO NOT move this load above the RNG restore below. The forward's
     # dropout mask is driven by the global torch RNG; if load_fn ever
