@@ -41,6 +41,32 @@ def _full_trainset(spec: SiloSpec, context: Context) -> tuple[torch.Tensor, torc
         ys.append(y)
     return torch.cat(xs).float(), torch.cat(ys).float()
 
+# ── Configs ───────────────────────────────────────────────────
+
+def _dp_config(spec: SiloSpec, context: Context) -> dict:
+    """DP params, run_config defaults overridden by per-silo SiloSpec values."""
+    rc = context.run_config
+    cfg = {
+        "enabled": bool(rc.get("dp-enabled", False)),
+        "epsilon": float(rc.get("dp-epsilon", 1.0)),
+        "delta": float(rc.get("dp-delta", 1e-5)),
+        "max_grad_norm": float(rc.get("dp-max-grad-norm", 1.0)),
+        "num_epochs": int(rc.get("dp-epochs", rc.get("num-server-rounds", 10))),
+    }
+    cfg.update(spec.dp_config_fn(context))  # silo-specific overrides
+    return cfg
+
+def _wandb_config(spec: SiloSpec, context: Context) -> dict:
+    rc = context.run_config
+    cfg = {
+        "silo": spec.wandb_tag,
+        "embedding-dim": rc.get("embedding-dim", 32),
+        "learning-rate": rc.get("learning-rate", 1e-3),
+        "batch-size": rc.get("batch-size", 64),
+        "seed": rc.get("seed", 42),
+    }
+    cfg.update(spec.extra_wandb_config_fn(context))
+    return cfg
 
 # ── wandb tracking helpers ───────────────────────────────────────────────────
 
@@ -69,19 +95,6 @@ def _round_number(context: Context, msg: Message, *, advance: bool) -> int:
         r = prev + 1 if advance else max(prev, 0)
     context.state["round"] = ConfigRecord({"v": r})
     return r
-
-
-def _wandb_config(spec: SiloSpec, context: Context) -> dict:
-    rc = context.run_config
-    cfg = {
-        "silo": spec.wandb_tag,
-        "embedding-dim": rc.get("embedding-dim", 32),
-        "learning-rate": rc.get("learning-rate", 1e-3),
-        "batch-size": rc.get("batch-size", 64),
-        "seed": rc.get("seed", 42),
-    }
-    cfg.update(spec.extra_wandb_config_fn(context))
-    return cfg
 
 
 def _log(spec: SiloSpec, context: Context, metrics: dict, step: int) -> None:
@@ -169,25 +182,15 @@ def apply_gradients(spec: SiloSpec, msg: Message, context: Context) -> Message:
             torch.load(io.BytesIO(rec["serialized"]), weights_only=False)
         )
 
-    # DP HOOK: Opacus wraps `optimizer` here in a future round.
-    # make_private() expects loss.backward(); embedding.backward(grad) below
-    # is upstream-gradient injection instead — confirm compatibility first.
-    model, optimizer = make_private(
-            model=model, 
-            optimizer=optimizer,
-            data_loader=train_loader,
-            target_epsilon=config["epsilon"], 
-            target_delta=config["delta"],
-            max_grad_norm=config["max_grad_norm"], 
-            num_epochs=config["num_epochs"]) 
-    # Very basic hook, effectively ripped from the original silo_a/client_a.py. 
-    # Like last time, I'm not entirely sure how the implementation of this is supposed to work but it is a something to start with.
+    dp = _dp_config(spec, context)
+    if dp["enabled"]:
+        # Not Implemented. Outlined in tasklist
+        raise NotImplementedError(
+            f"[{spec.wandb_tag}] DP-SGD not yet wired for the VFL upstream-gradient "
+            "loop (concern list H1–H3). Run with dp-enabled=false until Phase B."
+        )
 
-    # DO NOT move this load above the RNG restore below. The forward's
-    # dropout mask is driven by the global torch RNG; if load_fn ever
-    # consumes RNG (e.g. a shuffling sampler), restoring RNG state first
-    # would let the load desync it from generate_embeddings' snapshot, and
-    # the recomputed embedding below would no longer match the one sent.
+    # Must remain before RNG restore
     X, _ = _full_trainset(spec, context)
 
     if (rec := context.state.get("rng")) is not None:

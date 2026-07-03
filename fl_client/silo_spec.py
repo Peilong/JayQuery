@@ -31,6 +31,7 @@ class SiloSpec:
     load_fn: Callable[..., tuple[DataLoader, DataLoader, DataLoader]]
     sends_labels: bool
     wandb_tag: str
+    dp_config_fn: Callable[[object], dict] = field(default=lambda context: {})
     extra_wandb_config_fn: Callable[[object], dict] = field(default=lambda context: {})
 
     def __post_init__(self) -> None:
@@ -43,3 +44,5 @@ class SiloSpec:
             raise TypeError("load_fn must be callable(...) -> (train, val, test) loaders")
         if not isinstance(self.partition_id, int):
             raise TypeError(f"partition_id must be int, got {self.partition_id!r}")
+        if not callable(self.dp_config_fn):
+            raise TypeError("dp_config_fn must be callable(context) -> dict")
