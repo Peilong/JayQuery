@@ -101,7 +101,7 @@ def make_private(
                                                                               target_delta = target_delta, 
                                                                               epochs = num_epochs, 
                                                                               max_grad_norm = max_grad_norm)
-    return [dp_model, dp_optimizer, dp_loader, priv_engine]
+    return dp_model, dp_optimizer, dp_loader, priv_engine
 
 
 def get_current_epsilon(priv_engine: PrivacyEngine, delta: float = 1e-5) -> float:

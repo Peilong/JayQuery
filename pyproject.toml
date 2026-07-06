@@ -56,6 +56,21 @@ omit = ["tests/*", "notebooks/*", "scripts/*", "experiments/*"]
 [tool.flwr.app]
 publisher = "jayquery"
 
+# NOTE: each pattern below must match at least one real file/dir in this
+# project or `flwr build`/`flwr run` will raise a ValueError ("did not match
+# any files").
+fab-include = [
+    "fl_client/**/*.py",
+    "fl_server/**/*.py",
+    "privacy/**/*.py",
+    "psi/**/*.py",
+    "silo_a/**/*.py",
+    "silo_b/**/*.py",
+    "utils/**/*.py",
+    "pyproject.toml",
+    "LICENSE",
+]
+
 [tool.flwr.app.components]
 serverapp = "fl_server.server_app:app"
 clientapp = "fl_client.client_app:app"
@@ -64,6 +79,11 @@ clientapp = "fl_client.client_app:app"
 num-server-rounds = 50
 learning-rate = 1e-3
 embedding-dim = 32
-input-dim-a = 12
-input-dim-b = 22
+input-dim-a = 18
+input-dim-b = 27
 processed-dir = "data/processed"
+dp-enabled = false
+dp-epsilon = 1.0
+dp-delta = 1e-5
+dp-max-grad-norm = 1.0
+dp-epochs = 10
