@@ -26,7 +26,7 @@ TODO:
 from logging import INFO
 
 import torch
-from flwr.app import Array, ArrayRecord, Context, Message, RecordDict
+from flwr.app import Array, ArrayRecord, Context, Message, RecordDict, ConfigRecord
 from flwr.common import log
 from flwr.serverapp import Grid, ServerApp
 
@@ -71,6 +71,7 @@ def main(grid: Grid, context: Context) -> None:
         emb_a, emb_b, labels, node_pos_map = _get_embeddings(
             grid=grid,
             node_ids=node_ids,
+            round_num=round_num,
         )
 
         # 2. TopModel forward + backward
@@ -87,6 +88,7 @@ def main(grid: Grid, context: Context) -> None:
             node_pos_map=node_pos_map,
             grad_a=grad_a,
             grad_b=grad_b,
+            round_num=round_num,
         )
 
     log(INFO, "")
@@ -98,6 +100,7 @@ def main(grid: Grid, context: Context) -> None:
 def _get_embeddings(
     grid: Grid,
     node_ids: list[int],
+    round_num: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[int, int]]:
     """Send generate_embeddings query to both SuperNodes and collect replies.
 
@@ -116,7 +119,7 @@ def _get_embeddings(
     """
     messages = [
         Message(
-            content=RecordDict(),
+            content=RecordDict({"config": ConfigRecord({"server-round": round_num})}),
             message_type="query.generate_embeddings",
             dst_node_id=nid,
         )
@@ -157,6 +160,7 @@ def _send_gradients(
     node_pos_map: dict[int, int],
     grad_a: torch.Tensor,
     grad_b: torch.Tensor,
+    round_num: int,
 ) -> None:
     """Push per-silo embedding gradients back to each SuperNode.
 
@@ -175,7 +179,10 @@ def _send_gradients(
         arr_rec = ArrayRecord({"local-gradients": Array(pos_to_grad[pos].cpu().numpy())})
         messages.append(
             Message(
-                content=RecordDict({"gradients": arr_rec}),
+                content=RecordDict({
+                    "gradients": arr_rec,
+                    "config": ConfigRecord({"server-round": round_num}),
+                }),
                 message_type="train.apply_gradients",
                 dst_node_id=node_id,
             )
