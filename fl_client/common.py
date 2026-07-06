@@ -15,6 +15,7 @@ from flwr.app import Array, ArrayRecord, ConfigRecord, Context, Message, RecordD
 
 from fl_client.silo_spec import SiloSpec
 from privacy.dp_wrapper import make_private
+from privacy.noise_injection import add_dp_noise_to_embedding
 from utils.wandb_utils import log_client_round, new_run_id
 
 
@@ -54,6 +55,17 @@ def _dp_config(spec: SiloSpec, context: Context) -> dict:
         "num_epochs": int(rc.get("dp-epochs", rc.get("num-server-rounds", 10))),
     }
     cfg.update(spec.dp_config_fn(context))  # silo-specific overrides
+    return cfg
+
+def _cut_noise_config(spec: SiloSpec, context: Context) -> dict:
+    """Noise injection params, run_config defaults overridden by per-silo SiloSpec values."""
+    rc = context.run_config
+    cfg = {
+        "enabled": bool(rc.get("cut-noise-enabled", False)),
+        "epsilon": float(rc.get("cut-noise-epsilon", 1.0)),
+        "max_grad_norm": float(rc.get("cut-noise-max-grad-norm", 1.0)),
+    }
+    cfg.update(spec.cut_noise_config_fn(context))  # silo-specific overrides
     return cfg
 
 def _wandb_config(spec: SiloSpec, context: Context) -> dict:
@@ -157,6 +169,14 @@ def generate_embeddings(spec: SiloSpec, msg: Message, context: Context) -> Messa
                 f"{spec.wandb_tag}/n_examples": int(emb.shape[0]),
             },
             step=rnd,
+        )
+
+    noise = _cut_noise_config(spec, context)
+    if noise["enabled"]:
+        emb = add_dp_noise_to_embedding(
+            embedding = embedding,
+            sensitivity = noise["max_grad_norm"],
+            epsilon = noise["epsilon"]
         )
 
     arrays = {"embedding": Array(emb.numpy())}
