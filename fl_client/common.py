@@ -12,6 +12,7 @@ import time
 
 import torch
 from flwr.app import Array, ArrayRecord, ConfigRecord, Context, Message, RecordDict
+from torchgen import context
 
 from fl_client.silo_spec import SiloSpec
 from privacy.dp_wrapper import make_private
@@ -178,6 +179,9 @@ def generate_embeddings(spec: SiloSpec, msg: Message, context: Context) -> Messa
             sensitivity = noise["max_grad_norm"],
             epsilon = noise["epsilon"]
         )
+        context.state["sigma"] = ConfigRecord({"v": float(noise["epsilon"])})
+        context.state["sensitivity"] = ConfigRecord({"v": float(noise["max_grad_norm"])})
+        context.state["steps"] = ConfigRecord({"v": int(noise["num_epochs"])})
 
     arrays = {"embedding": Array(emb.numpy())}
     if spec.sends_labels:
