@@ -12,10 +12,8 @@ import time
 
 import torch
 from flwr.app import Array, ArrayRecord, ConfigRecord, Context, Message, RecordDict
-from torchgen import context
 
 from fl_client.silo_spec import SiloSpec
-from privacy.dp_wrapper import make_private
 from privacy.noise_injection import add_dp_noise_to_embedding
 from utils.wandb_utils import log_client_round, new_run_id
 
@@ -44,19 +42,6 @@ def _full_trainset(spec: SiloSpec, context: Context) -> tuple[torch.Tensor, torc
     return torch.cat(xs).float(), torch.cat(ys).float()
 
 # ── Configs ───────────────────────────────────────────────────
-
-def _dp_config(spec: SiloSpec, context: Context) -> dict:
-    """DP params, run_config defaults overridden by per-silo SiloSpec values."""
-    rc = context.run_config
-    cfg = {
-        "enabled": bool(rc.get("dp-enabled", False)),
-        "epsilon": float(rc.get("dp-epsilon", 1.0)),
-        "delta": float(rc.get("dp-delta", 1e-5)),
-        "max_grad_norm": float(rc.get("dp-max-grad-norm", 1.0)),
-        "num_epochs": int(rc.get("dp-epochs", rc.get("num-server-rounds", 10))),
-    }
-    cfg.update(spec.dp_config_fn(context))  # silo-specific overrides
-    return cfg
 
 def _cut_noise_config(spec: SiloSpec, context: Context) -> dict:
     """Noise injection params, run_config defaults overridden by per-silo SiloSpec values."""
@@ -174,16 +159,16 @@ def generate_embeddings(spec: SiloSpec, msg: Message, context: Context) -> Messa
 
     noise = _cut_noise_config(spec, context)
     if noise["enabled"]:
-        emb = add_dp_noise_to_embedding(
-            embedding = embedding,
+        noised_emb, sigma = add_dp_noise_to_embedding(
+            embedding = emb,
             sensitivity = noise["max_grad_norm"],
             epsilon = noise["epsilon"]
         )
-        context.state["sigma"] = ConfigRecord({"v": float(noise["epsilon"])})
+        context.state["sigma"] = ConfigRecord({"v": float(sigma)})
         context.state["sensitivity"] = ConfigRecord({"v": float(noise["max_grad_norm"])})
         context.state["steps"] = ConfigRecord({"v": int(noise["num_epochs"])})
 
-    arrays = {"embedding": Array(emb.numpy())}
+    arrays = {"embedding": Array(noised_emb.numpy())}
     if spec.sends_labels:
         arrays["labels"] = Array(y.numpy())
 
@@ -204,14 +189,6 @@ def apply_gradients(spec: SiloSpec, msg: Message, context: Context) -> Message:
     if (rec := context.state.get("optimizer_state")) is not None:
         optimizer.load_state_dict(
             torch.load(io.BytesIO(rec["serialized"]), weights_only=False)
-        )
-
-    dp = _dp_config(spec, context)
-    if dp["enabled"]:
-        # Not Implemented. Outlined in tasklist
-        raise NotImplementedError(
-            f"[{spec.wandb_tag}] DP-SGD not yet wired for the VFL upstream-gradient "
-            "loop (concern list H1–H3). Run with dp-enabled=false until Phase B."
         )
 
     # Must remain before RNG restore
