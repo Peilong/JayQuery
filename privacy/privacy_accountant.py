@@ -8,7 +8,9 @@ References:
 """
 
 from privacy.dp_wrapper import PrivacyBudgetExceededError
-from opacus import PrivacyEngine
+from autodp import mechanism_zoo
+from autodp import dp_acct
+from autodp import transformer_zoo
 
 
 class PrivacyBudgetTracker:
@@ -37,13 +39,11 @@ class PrivacyBudgetTracker:
         Store dp_optimizer reference or use autodp for standalone computation.
     """
 
-    # I am sorta waiting on the first actual use of the privacybudgettracker to see what exactly needs to be done with this to actually get it functioning properly.
-    # Until then, it will just wait as this nearly complete scaffold till then, as with the 4 probable privacy engines i would think to give the step function a privacy_engine parameter to be able to discern between the 4. 
-    #       But I will wait to see what the implementation would look like before i change anything.
-
     def __init__(
         self,
         target_epsilon: float,
+        sigma: float = 1.0,
+        sensitivity: float = 1.0,
         delta: float = 1e-5,
         num_epochs: int = 10,
         batch_size: int = 64,
@@ -56,8 +56,9 @@ class PrivacyBudgetTracker:
         self.dataset_size = dataset_size
         self._round = 0
 
-        # TODO (Wyatt, Week 5): initialize autodp accountant or store dp_optimizer ref
-        self.priv_engine = None  # Placeholder for PrivacyEngine reference until there's a clear link to the dp_wrapper make_private() function and the PrivacyBudgetTracker.
+        # TODO (Wyatt, Week 7): initialize autodp accountant.
+        self.mechanism = mechanism_zoo.GaussianMechanism(sigma=sigma)
+        self.accountant = dp_acct.DP_acct()
 
     def step(self) -> None:
         """Advance the accountant by one training round.
@@ -68,6 +69,7 @@ class PrivacyBudgetTracker:
         TODO (Wyatt, Week 5): implement step() — increment round counter and check budget.
         """
         self._round += 1
+        self.accountant.update_DPlosses(eps = self.get_epsilon(), delta = self.delta)
         current = self.get_epsilon()
         if current > self.target_epsilon:
             raise PrivacyBudgetExceededError(
@@ -80,9 +82,11 @@ class PrivacyBudgetTracker:
         Returns:
             Current epsilon as a float.
 
-        TODO (Wyatt, Week 5): implement using dp_optimizer.privacy_engine.get_epsilon(delta).
+        TODO (Wyatt, Week 5): implement using autodp.
         """
-        return PrivacyEngine.get_epsilon(delta=self.delta)
+        transformer = transformer_zoo.ComposeGaussian()
+        self.mechanism = transformer.compose(mechanism_list = self.mechanism, num_compositions = self._round)
+        return self.mechanism.get_eps(delta=self.delta)
 
     @property
     def rounds_completed(self) -> int:
