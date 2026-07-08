@@ -31,6 +31,9 @@ from flwr.common import log
 from flwr.serverapp import Grid, ServerApp
 
 from fl_server.top_model import TopModel
+from torch.utils.data import TensorDataset, DataLoader
+
+from privacy.dp_wrapper import make_private
 
 app = ServerApp()
 
@@ -56,6 +59,10 @@ def main(grid: Grid, context: Context) -> None:
 
     losses: list[tuple[int, float]] = []
 
+    dp = _server_dp_config(context)      # the Step 1 config helper
+    train_model, train_optimizer, priv_engine = top_model, optimizer, None
+    wrapped = False 
+
     for round_num in range(1, num_rounds + 1):
         log(INFO, "")
         log(INFO, "--- ServerApp Round %d / %d ---", round_num, num_rounds)
@@ -68,16 +75,34 @@ def main(grid: Grid, context: Context) -> None:
             )
 
         # 1. Collect embeddings (and labels from Silo A)
-        emb_a, emb_b, labels, node_pos_map = _get_embeddings(
-            grid=grid,
-            node_ids=node_ids,
-            round_num=round_num,
-        )
+        emb_a, emb_b, labels, node_pos_map = _get_embeddings(grid=grid, node_ids=node_ids, round_num=round_num)
 
-        # 2. TopModel forward + backward
-        optimizer.zero_grad()
-        loss, grad_a, grad_b = top_model.compute_loss_and_gradients(emb_a, emb_b, labels)
-        optimizer.step()
+        # Step 4: build the loader + wrap, once, now that real embeddings exist.
+        if dp["enabled"] and not wrapped:
+            loader = _make_server_loader(emb_a, emb_b, labels)
+            train_model, train_optimizer, _, priv_engine = make_private(
+                model=top_model, optimizer=optimizer, data_loader=loader,
+                target_epsilon=dp["epsilon"], target_delta=dp["delta"],
+                max_grad_norm=dp["max_grad_norm"], num_epochs=dp["num_epochs"],
+            )
+            wrapped = True
+            log(INFO, "DP wrap OK: N=%d, dp_optimizer=%s", len(loader.dataset), type(train_optimizer).__name__)
+            
+        emb_a = emb_a.detach().requires_grad_(True)
+        emb_b = emb_b.detach().requires_grad_(True)
+        train_optimizer.zero_grad()
+        logits = train_model(emb_a, emb_b).squeeze(1)
+        loss = top_model.loss_fn(logits, labels.float())
+        loss.backward()
+        if emb_a.grad is None or emb_b.grad is None:
+            raise RuntimeError(
+                f"[server] input grads are None after backward "
+                f"(train_model wrapped={type(train_model).__name__}). "
+                "Opacus GradSampleModule is not exposing input gradients — "
+                "escalate before relying on the DP path."
+            )
+        train_optimizer.step()
+        grad_a, grad_b = emb_a.grad.clone(), emb_b.grad.clone()
 
         log(INFO, "Round %d — loss: %.4f", round_num, float(loss))
         losses.append((round_num, float(loss)))
@@ -96,6 +121,28 @@ def main(grid: Grid, context: Context) -> None:
     for r, loss_val in losses:
         log(INFO, "  Round %3d — loss: %.4f", r, loss_val)
 
+def _server_dp_config(context: Context) -> dict:
+    """Server-side DP-SGD params from run_config (Step 1 keys in pyproject.toml).
+
+    Unlike the client _cut_noise_config, there is no per-silo override — the server
+    is a single node, so these come straight from run_config.
+    """
+    rc = context.run_config
+    return {
+        "enabled": bool(rc.get("server-dp-enabled", False)),
+        "epsilon": float(rc.get("server-dp-epsilon", 1.0)),
+        "delta": float(rc.get("server-dp-delta", 1e-5)),
+        "max_grad_norm": float(rc.get("server-dp-max-grad-norm", 1.0)),
+        "num_epochs": int(rc.get("server-dp-epochs", rc.get("num-server-rounds", 10))),
+    }
+
+def _make_server_loader(emb_a: torch.Tensor, emb_b: torch.Tensor, labels: torch.Tensor) -> DataLoader:
+    """One full-batch DataLoader over [emb_a‖emb_b] and labels — gives Opacus the
+    dataset size it needs. Full-batch => sample_rate = 1.0 (see M1)."""
+    X = torch.cat([emb_a, emb_b], dim=1).detach()   # (N, 2*embedding_dim)
+    y = labels.detach().float()                     # (N,)
+    dataset = TensorDataset(X, y)
+    return DataLoader(dataset, batch_size=len(dataset), shuffle=False)
 
 def _get_embeddings(
     grid: Grid,

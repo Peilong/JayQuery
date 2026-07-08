@@ -157,6 +157,7 @@ def generate_embeddings(spec: SiloSpec, msg: Message, context: Context) -> Messa
             step=rnd,
         )
 
+    noised_emb = emb
     noise = _cut_noise_config(spec, context)
     if noise["enabled"]:
         noised_emb, sigma = add_dp_noise_to_embedding(

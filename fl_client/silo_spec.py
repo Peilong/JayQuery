@@ -33,6 +33,7 @@ class SiloSpec:
     wandb_tag: str
     dp_config_fn: Callable[[object], dict] = field(default=lambda context: {})
     extra_wandb_config_fn: Callable[[object], dict] = field(default=lambda context: {})
+    cut_noise_config_fn: Callable[[object], dict] = field(default=lambda context: {})
 
     def __post_init__(self) -> None:
         #helps verify silo is formatted correctly.
@@ -46,3 +47,5 @@ class SiloSpec:
             raise TypeError(f"partition_id must be int, got {self.partition_id!r}")
         if not callable(self.dp_config_fn):
             raise TypeError("dp_config_fn must be callable(context) -> dict")
+        if not callable(self.cut_noise_config_fn):
+            raise TypeError("cut_noise_config_fn must be callable(context) -> dict")

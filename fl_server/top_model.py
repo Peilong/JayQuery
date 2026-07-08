@@ -48,7 +48,21 @@ class TopModel(nn.Module):
         """
         combined = torch.cat([emb_a, emb_b], dim=1)
         return self.net(combined)
+    
+    def loss_fn(
+        self, 
+        logits: torch.Tensor, 
+        labels: torch.Tensor
+    ) -> torch.Tensor:
+        """Compute BCE-with-logits loss using the current pos_weight.
 
+        Exposed so the server loop can run the forward/backward itself (required
+        for Opacus DP-SGD, which must own the backward), instead of routing
+        through compute_loss_and_gradients.
+        """
+        loss_fn = nn.BCEWithLogitsLoss(pos_weight=self.pos_weight.to(logits.device))
+        return loss_fn(logits, labels.float())
+    
     def compute_loss_and_gradients(
         self,
         emb_a: torch.Tensor,
@@ -78,8 +92,7 @@ class TopModel(nn.Module):
         logits = self.forward(emb_a, emb_b).squeeze(1)
 
         # Update pos_weight in loss (in case it changed externally)
-        self._loss_fn = nn.BCEWithLogitsLoss(pos_weight=self.pos_weight.to(logits.device))
-        loss = self._loss_fn(logits, labels.float())
+        loss = self.loss_fn(logits, labels.float())
 
         # Backward pass — gradients accumulate on emb_a and emb_b
         loss.backward()
@@ -98,4 +111,3 @@ class TopModel(nn.Module):
         """
         weight = torch.tensor(n_neg / max(n_pos, 1), dtype=torch.float32)
         self.pos_weight = weight
-        self._loss_fn = nn.BCEWithLogitsLoss(pos_weight=weight)
