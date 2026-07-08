@@ -85,7 +85,7 @@ class PrivacyBudgetTracker:
         TODO (Wyatt, Week 5): implement using autodp.
         """
         transformer = transformer_zoo.ComposeGaussian()
-        self.mechanism = transformer.compose(mechanism_list = self.mechanism, num_compositions = self._round)
+        self.mechanism = transformer.compose(mechanism_list = [self.mechanism], coeff_list = [self._round])
         return self.mechanism.get_eps(delta=self.delta)
 
     @property
