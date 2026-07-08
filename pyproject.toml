@@ -77,13 +77,14 @@ clientapp = "fl_client.client_app:app"
 
 [tool.flwr.app.config]
 num-server-rounds = 50
-learning-rate = 1e-3
+learning-rate = 1e-2
 embedding-dim = 32
 input-dim-a = 18
 input-dim-b = 27
 processed-dir = "data/processed"
-dp-enabled = false
-dp-epsilon = 1.0
-dp-delta = 1e-5
-dp-max-grad-norm = 1.0
-dp-epochs = 10
+server-dp-enabled = false
+server-dp-epsilon = 1.0
+server-dp-delta = 1e-5
+server-dp-max-grad-norm = 1.0
+server-dp-epochs = 10
+track-wandb=false
