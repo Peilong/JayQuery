@@ -28,7 +28,6 @@ import pytest
 import torch
 import torch.nn as nn
 
-
 # ── flwr.app / flwr.clientapp stand-ins ─────────────────────────────────────
 
 

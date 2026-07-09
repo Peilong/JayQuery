@@ -7,8 +7,9 @@ References:
   - Mironov 2017 (CSF) — Rényi DP composition
 """
 
-from privacy.dp_wrapper import PrivacyBudgetExceededError
 from opacus import PrivacyEngine
+
+from privacy.dp_wrapper import PrivacyBudgetExceededError
 
 
 class PrivacyBudgetTracker:

@@ -223,6 +223,14 @@ def apply_gradients(spec: SiloSpec, msg: Message, context: Context) -> Message:
     torch.save(optimizer.state_dict(), buf)
     context.state["optimizer_state"] = ConfigRecord({"serialized": buf.getvalue()})
 
+    cfg = msg.content.get("config")
+    if cfg is not None and "num-server-rounds" in cfg:
+        if int(cfg["server-round"]) >= int(cfg["num-server-rounds"]):
+            from pathlib import Path
+            ckpt_dir = Path("experiments/checkpoints") / str(cfg["eps-tag"])
+            ckpt_dir.mkdir(parents=True, exist_ok=True)
+            torch.save(model.state_dict(), ckpt_dir / f"{spec.wandb_tag}.pt")
+
     rnd = _round_number(context, msg, advance=False)
     with torch.no_grad():
         g = grad.detach()

@@ -87,4 +87,4 @@ server-dp-epsilon = 1.0
 server-dp-delta = 1e-5
 server-dp-max-grad-norm = 1.0
 server-dp-epochs = 10
-track-wandb=false
+track-wandb=true

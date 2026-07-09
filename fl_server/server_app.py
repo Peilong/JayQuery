@@ -26,13 +26,17 @@ TODO:
 from logging import INFO
 
 import torch
-from flwr.app import Array, ArrayRecord, Context, Message, RecordDict, ConfigRecord
+from flwr.app import Array, ArrayRecord, ConfigRecord, Context, Message, RecordDict
 from flwr.common import log
 from flwr.serverapp import Grid, ServerApp
+from torch.utils.data import DataLoader, TensorDataset
+
+import wandb
+
+from pathlib import Path
+import json
 
 from fl_server.top_model import TopModel
-from torch.utils.data import TensorDataset, DataLoader
-
 from privacy.dp_wrapper import make_private
 
 app = ServerApp()
@@ -58,10 +62,30 @@ def main(grid: Grid, context: Context) -> None:
     top_model.train()
 
     losses: list[tuple[int, float]] = []
+    
+    track = bool(context.run_config.get("track-wandb", True))
 
     dp = _server_dp_config(context)      # the Step 1 config helper
     train_model, train_optimizer, priv_engine = top_model, optimizer, None
     wrapped = False 
+
+    if track:
+        wandb.init(
+            entity=context.run_config.get("wandb-entity", "jayquery"),
+            project=context.run_config.get("wandb-project", "jayquery-vfl"),
+            name=context.run_config.get("wandb-run-name", "") or "server",
+            group=context.run_config.get("wandb-group", "") or None,
+            tags=["vfl", "server"],
+            config={
+                "num-server-rounds": num_rounds,
+                "learning-rate": lr,
+                "embedding-dim": embedding_dim,
+                "server-dp-enabled": dp["enabled"],
+            },
+            resume="never",
+        )
+        
+    eps_tag = f"eps_{dp['epsilon']}" if dp["enabled"] else "eps_inf"
 
     for round_num in range(1, num_rounds + 1):
         log(INFO, "")
@@ -107,6 +131,9 @@ def main(grid: Grid, context: Context) -> None:
         log(INFO, "Round %d — loss: %.4f", round_num, float(loss))
         losses.append((round_num, float(loss)))
 
+        if track:
+            wandb.log({"train/loss": float(loss)}, step=round_num)
+
         # 3. Push per-silo gradients (fire-and-forget)
         _send_gradients(
             grid=grid,
@@ -114,12 +141,33 @@ def main(grid: Grid, context: Context) -> None:
             grad_a=grad_a,
             grad_b=grad_b,
             round_num=round_num,
+            num_rounds=num_rounds,
+            eps_tag=eps_tag
         )
+
+    ckpt_dir = Path("experiments/checkpoints") / eps_tag
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    
+    top_sd = train_model._module.state_dict() if dp["enabled"] else top_model.state_dict()
+    torch.save(top_sd, ckpt_dir / "top.pt")
+    
+    meta = {
+        "epsilon": dp["epsilon"] if dp["enabled"] else None,
+        "delta": dp["delta"],
+        "embedding_dim": embedding_dim,
+        "num_rounds": num_rounds,
+        "server_dp_enabled": dp["enabled"],
+        # cut-layer sigma/sensitivity filled from client-reported values if you thread them up;
+        # otherwise the clients write their own noise params into meta (see H6.3 note).
+    }
+    (ckpt_dir / "meta.json").write_text(json.dumps(meta, indent=2))
 
     log(INFO, "")
     log(INFO, "=== Training Complete ===")
     for r, loss_val in losses:
         log(INFO, "  Round %3d — loss: %.4f", r, loss_val)
+    if track:
+        wandb.finish()
 
 def _server_dp_config(context: Context) -> dict:
     """Server-side DP-SGD params from run_config (Step 1 keys in pyproject.toml).
@@ -208,6 +256,8 @@ def _send_gradients(
     grad_a: torch.Tensor,
     grad_b: torch.Tensor,
     round_num: int,
+    num_rounds: int,
+    eps_tag: str,
 ) -> None:
     """Push per-silo embedding gradients back to each SuperNode.
 
@@ -228,7 +278,11 @@ def _send_gradients(
             Message(
                 content=RecordDict({
                     "gradients": arr_rec,
-                    "config": ConfigRecord({"server-round": round_num}),
+                    "config": ConfigRecord({
+                        "server-round": round_num,
+                        "num-server-rounds": num_rounds,   # H6.2: lets client detect the last round
+                        "eps-tag": eps_tag,                # H6.2: single source of truth for the dir name
+                    }),
                 }),
                 message_type="train.apply_gradients",
                 dst_node_id=node_id,
