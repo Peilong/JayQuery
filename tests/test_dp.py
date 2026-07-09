@@ -117,7 +117,7 @@ def test_noise_injection_changes_embedding() -> None:
     """
     from privacy.noise_injection import add_dp_noise_to_embedding
     embedding = torch.ones(4, 32)
-    noisy = add_dp_noise_to_embedding(embedding, sensitivity=1.0, epsilon=0.01)
+    noisy, _ = add_dp_noise_to_embedding(embedding, sensitivity=1.0, epsilon=0.01)
 
     assert not torch.allclose(embedding, noisy), (
         "With epsilon=0.01, noise should significantly alter the embedding"
@@ -129,7 +129,7 @@ def test_noise_injection_preserves_shape() -> None:
     """add_dp_noise_to_embedding() returns a tensor with the same shape."""
     from privacy.noise_injection import add_dp_noise_to_embedding
     embedding = torch.randn(16, 32)
-    noisy = add_dp_noise_to_embedding(embedding, sensitivity=1.0, epsilon=1.0)
+    noisy, _ = add_dp_noise_to_embedding(embedding, sensitivity=1.0, epsilon=1.0)
     assert noisy.shape == embedding.shape, (
         f"Shape mismatch: input {embedding.shape}, output {noisy.shape}"
     )
@@ -140,7 +140,7 @@ def test_noise_injection_high_epsilon_near_original() -> None:
     """With very high epsilon (little privacy), noise should be near zero."""
     from privacy.noise_injection import add_dp_noise_to_embedding
     embedding = torch.ones(8, 32)
-    noisy = add_dp_noise_to_embedding(embedding, sensitivity=1.0, epsilon=1e6)
+    noisy, _ = add_dp_noise_to_embedding(embedding, sensitivity=1.0, epsilon=1e6)
     # Mean absolute difference should be tiny
     mad = (noisy - embedding).abs().mean().item()
     assert mad < 0.01, f"With epsilon=1e6, noise should be near 0, got mean abs diff = {mad:.6f}"
