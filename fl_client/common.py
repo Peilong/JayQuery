@@ -225,7 +225,7 @@ def apply_gradients(spec: SiloSpec, msg: Message, context: Context) -> Message:
 
     cfg = msg.content.get("config")
     if cfg is not None and "num-server-rounds" in cfg:
-        if int(cfg["server-round"]) >= int(cfg["num-server-rounds"]):
+        if int(cfg["server-round"]) >= int(cfg["num-server-rounds"])-1:
             from pathlib import Path
             ckpt_dir = Path("experiments/checkpoints") / str(cfg["eps-tag"])
             ckpt_dir.mkdir(parents=True, exist_ok=True)
