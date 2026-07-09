@@ -23,7 +23,7 @@ def add_dp_noise_to_embedding(
     sensitivity: float,
     epsilon: float,
     delta: float = 1e-5,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor,float]:
     """Add calibrated Gaussian noise to an embedding tensor.
 
     Uses the Gaussian mechanism: noise ~ N(0, sigma^2 * I) where
@@ -43,13 +43,6 @@ def add_dp_noise_to_embedding(
 
     Example:
         noisy_emb = add_dp_noise_to_embedding(embedding, sensitivity=1.0, epsilon=1.0)
-
-    TODO (Wyatt, Week 6 — Step 5 in CLAUDE.md DP guide):
-        1. Validate epsilon > 0 and sensitivity > 0.
-        2. Compute sigma using the formula above (use import math; math.log for ln).
-        3. Generate Gaussian noise: noise = torch.randn_like(embedding) * sigma
-        4. Return embedding + noise.
-        Remember: do NOT modify embedding in-place (return a new tensor).
     """
 
     if epsilon <= 0:
@@ -59,7 +52,7 @@ def add_dp_noise_to_embedding(
 
     sigma = sensitivity * math.sqrt(2 * math.log(1.25 / delta)) / epsilon
     noise = torch.randn_like(embedding) * sigma
-    return embedding + noise
+    return embedding + noise, sigma
 
 
 def add_laplace_noise_to_embedding(
