@@ -35,6 +35,8 @@ from torch.utils.data import TensorDataset, DataLoader
 
 from privacy.dp_wrapper import make_private
 
+from privacy.privacy_accountant import PrivacyBudgetTracker
+
 app = ServerApp()
 
 _SILO_A_POS = 0
@@ -62,6 +64,8 @@ def main(grid: Grid, context: Context) -> None:
     dp = _server_dp_config(context)      # the Step 1 config helper
     train_model, train_optimizer, priv_engine = top_model, optimizer, None
     wrapped = False 
+    privacy_tracker = PrivacyBudgetTracker()
+    sample_rate = 1.0  # full-batch training on server, so sample_rate = 1.0
 
     for round_num in range(1, num_rounds + 1):
         log(INFO, "")
