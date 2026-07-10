@@ -38,6 +38,7 @@ import json
 
 from fl_server.top_model import TopModel
 from privacy.dp_wrapper import make_private
+from baselines.eval_utils import compute_metrics
 
 app = ServerApp()
 
@@ -65,7 +66,7 @@ def main(grid: Grid, context: Context) -> None:
     
     track = bool(context.run_config.get("track-wandb", True))
 
-    dp = _server_dp_config(context)      # the Step 1 config helper
+    dp = _server_dp_config(context)
     train_model, train_optimizer, priv_engine = top_model, optimizer, None
     wrapped = False 
 
@@ -98,10 +99,8 @@ def main(grid: Grid, context: Context) -> None:
                 "Run: flwr federation simulation-config --num-supernodes=2"
             )
 
-        # 1. Collect embeddings (and labels from Silo A)
         emb_a, emb_b, labels, node_pos_map = _get_embeddings(grid=grid, node_ids=node_ids, round_num=round_num)
 
-        # Step 4: build the loader + wrap, once, now that real embeddings exist.
         if dp["enabled"] and not wrapped:
             loader = _make_server_loader(emb_a, emb_b, labels)
             train_model, train_optimizer, _, priv_engine = make_private(
@@ -114,6 +113,8 @@ def main(grid: Grid, context: Context) -> None:
             
         emb_a = emb_a.detach().requires_grad_(True)
         emb_b = emb_b.detach().requires_grad_(True)
+        if dp['enabled']:
+            train_model.zero_grad(set_to_none=True)
         train_optimizer.zero_grad()
         logits = train_model(emb_a, emb_b).squeeze(1)
         loss = top_model.loss_fn(logits, labels.float())
@@ -133,8 +134,13 @@ def main(grid: Grid, context: Context) -> None:
 
         if track:
             wandb.log({"train/loss": float(loss)}, step=round_num)
-
-        # 3. Push per-silo gradients (fire-and-forget)
+            if round_num%10==0:
+                eval_model = TopModel(embedding_dim=embedding_dim)
+                src = train_model._module if dp["enabled"] else top_model
+                eval_model.load_state_dict(src.state_dict())
+                val_metrics = _run_eval(grid, node_ids, eval_model, split="val")
+                wandb.log({"val/auc": float(val_metrics["auc_roc"])}, step=round_num)
+    
         _send_gradients(
             grid=grid,
             node_pos_map=node_pos_map,
@@ -151,14 +157,17 @@ def main(grid: Grid, context: Context) -> None:
     top_sd = train_model._module.state_dict() if dp["enabled"] else top_model.state_dict()
     torch.save(top_sd, ckpt_dir / "top.pt")
     
+    final_eval = TopModel(embedding_dim=embedding_dim)
+    final_eval.load_state_dict((train_model._module if dp["enabled"] else top_model).state_dict())
+    test_metrics = _run_eval(grid, node_ids, final_eval, split="test")
+    
     meta = {
         "epsilon": dp["epsilon"] if dp["enabled"] else None,
         "delta": dp["delta"],
         "embedding_dim": embedding_dim,
         "num_rounds": num_rounds,
         "server_dp_enabled": dp["enabled"],
-        # cut-layer sigma/sensitivity filled from client-reported values if you thread them up;
-        # otherwise the clients write their own noise params into meta (see H6.3 note).
+        "metrics": test_metrics,
     }
     (ckpt_dir / "meta.json").write_text(json.dumps(meta, indent=2))
 
@@ -168,6 +177,8 @@ def main(grid: Grid, context: Context) -> None:
         log(INFO, "  Round %3d — loss: %.4f", r, loss_val)
     if track:
         wandb.finish()
+        
+    log(INFO, "Final test metrics: %s", test_metrics)
 
 def _server_dp_config(context: Context) -> dict:
     """Server-side DP-SGD params from run_config (Step 1 keys in pyproject.toml).
@@ -291,3 +302,48 @@ def _send_gradients(
 
     log(INFO, "Sending gradients to %d nodes...", len(messages))
     grid.push_messages(messages)
+
+def _run_eval(grid: Grid, node_ids: list[int], top_model: TopModel, split: str) -> dict:
+    messages = [
+        Message(
+            content=RecordDict({"config": ConfigRecord({
+                "split":split,
+            })}),
+            message_type="query.generate_eval_embeddings",
+            dst_node_id=nid,
+        )
+        for nid in node_ids
+    ]
+
+    log(INFO, "Requesting embeddings from %d nodes...", len(messages))
+    replies = grid.send_and_receive(messages)
+    log(INFO, "\tReceived %d/%d results", len(replies), len(messages))
+
+    emb_a = emb_b = labels = None
+    node_pos_map: dict[int, int] = {}
+
+    for reply in replies:
+        if not reply.has_content():
+            continue
+        pos: int = reply.content["config"]["pos"]
+        node_pos_map[reply.metadata.src_node_id] = pos
+        emb = torch.from_numpy(reply.content["arrays"]["embedding"].numpy())
+
+        if pos == _SILO_A_POS:
+            emb_a = emb
+            labels = torch.from_numpy(reply.content["arrays"]["labels"].numpy())
+        elif pos == _SILO_B_POS:
+            emb_b = emb
+
+    if emb_a is None or emb_b is None or labels is None:
+        raise RuntimeError(
+            "Failed to collect embeddings from both silos. "
+            f"Got positions: {list(node_pos_map.values())}"
+        )
+
+    top_model.eval()
+    with torch.no_grad():
+        logits = top_model(emb_a, emb_b).squeeze(1)    
+    probs = torch.sigmoid(logits)
+    
+    return compute_metrics(labels.numpy(), probs.numpy())

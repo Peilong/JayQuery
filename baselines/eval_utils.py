@@ -40,15 +40,20 @@ def compute_metrics(
     y_pred = (y_pred_prob >= threshold).astype(int)
     tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
 
+    both_classes = len(np.unique(y_true)) > 1
+    auc = float(roc_auc_score(y_true, y_pred_prob)) if both_classes else float("nan")
+    ap = float(average_precision_score(y_true, y_pred_prob)) if both_classes else float("nan")
+
+
     return {
-        "auc_roc": float(roc_auc_score(y_true, y_pred_prob)),
+        "auc_roc": auc,
         "accuracy": float(accuracy_score(y_true, y_pred)),
         "f1_macro": float(f1_score(y_true, y_pred, average="macro", zero_division=0)),
         "f1_binary": float(f1_score(y_true, y_pred, average="binary", zero_division=0)),
         "precision": float(precision_score(y_true, y_pred, zero_division=0)),
         "recall": float(recall_score(y_true, y_pred, zero_division=0)),
         "brier_score": float(brier_score_loss(y_true, y_pred_prob)),
-        "avg_precision": float(average_precision_score(y_true, y_pred_prob)),
+        "avg_precision": ap,
         "tn": int(tn),
         "fp": int(fp),
         "fn": int(fn),

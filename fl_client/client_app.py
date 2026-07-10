@@ -66,6 +66,11 @@ def get_emb(msg: Message, context: Context) -> Message:
     return _handlers_for(context).get_emb(msg, context)
 
 
+@app.query("generate_eval_embeddings")
+def get_eval_emb(msg: Message, context: Context) -> Message:
+    """Forward to this node's silo-specific embedding handler."""
+    return _handlers_for(context).get_eval_emb(msg, context)
+
 @app.train("apply_gradients")
 def apply_grad(msg: Message, context: Context) -> Message:
     """Forward to this node's silo-specific gradient-application handler."""
