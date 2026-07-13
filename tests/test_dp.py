@@ -115,6 +115,7 @@ def test_accountant_get_epsilon() -> None:
         target_epsilon=1.0, delta=1e-5,
         num_epochs=5, batch_size=32, dataset_size=200,
     )
+    tracker._round = 1
     eps = tracker.get_epsilon()
     assert isinstance(eps, float), f"get_epsilon() returned {type(eps)}, expected float"
     print(f"\n✅  get_epsilon() returned a float: {eps:.4f}")
