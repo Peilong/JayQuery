@@ -193,9 +193,6 @@ def main(grid: Grid, context: Context) -> None:
 def _server_dp_config(context: Context) -> dict:
     """Server-side DP-SGD params from run_config (Step 1 keys in pyproject.toml).
 
-def _server_dp_config(context: Context) -> dict:
-    """Server-side DP-SGD params from run_config (Step 1 keys in pyproject.toml).
-
     Unlike the client _cut_noise_config, there is no per-silo override — the server
     is a single node, so these come straight from run_config.
     """
