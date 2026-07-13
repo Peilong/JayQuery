@@ -9,11 +9,7 @@ References:
 
 from privacy.dp_wrapper import PrivacyBudgetExceededError
 from autodp import mechanism_zoo
-from autodp import dp_acct
 from autodp import transformer_zoo
-
-from privacy.dp_wrapper import PrivacyBudgetExceededError
-
 
 class PrivacyBudgetTracker:
     """Tracks per-round epsilon expenditure and raises an error when budget is exhausted.
@@ -35,10 +31,6 @@ class PrivacyBudgetTracker:
         batch_size: Mini-batch size.
         dataset_size: Total number of training samples.
 
-    TODO (Wyatt, Week 5 — Step 4 in CLAUDE.md DP guide):
-        Implement __init__, step(), and get_epsilon() using the pattern:
-            current_eps = dp_optimizer.privacy_engine.get_epsilon(delta=self.delta)
-        Store dp_optimizer reference or use autodp for standalone computation.
     """
 
     def __init__(
@@ -57,10 +49,9 @@ class PrivacyBudgetTracker:
         self.batch_size = batch_size
         self.dataset_size = dataset_size
         self._round = 0
+        self.sigma = sigma
 
         # TODO (Wyatt, Week 7): initialize autodp accountant.
-        self.mechanism = mechanism_zoo.GaussianMechanism(sigma=sigma)
-        self.accountant = dp_acct.DP_acct()
 
     def step(self) -> None:
         """Advance the accountant by one training round.
@@ -68,11 +59,9 @@ class PrivacyBudgetTracker:
         Raises:
             PrivacyBudgetExceededError: If current epsilon > target_epsilon after this step.
 
-        TODO (Wyatt, Week 5): implement step() — increment round counter and check budget.
         """
         self._round += 1
         current = self.get_epsilon()
-        self.accountant.update_DPlosses(eps = current, delta = self.delta)
         if current > self.target_epsilon:
             raise PrivacyBudgetExceededError(
                 f"Privacy budget exceeded: {current:.4f} > {self.target_epsilon}"
@@ -84,11 +73,12 @@ class PrivacyBudgetTracker:
         Returns:
             Current epsilon as a float.
 
-        TODO (Wyatt, Week 5): implement using autodp.
         """
-        transformer = transformer_zoo.ComposeGaussian()
-        self.mechanism = transformer.compose(mechanism_list = [self.mechanism], coeff_list = [self._round])
-        return self.mechanism.get_eps(delta=self.delta)
+        if self._round == 0:
+            return 0.0
+        base = mechanism_zoo.GaussianMechanism(sigma=self.sigma)
+        composed = transformer_zoo.ComposeGaussian().compose(mechanism_list = [base], coeff_list = [self._round])
+        return composed.get_eps(delta=self.delta)
 
     @property
     def rounds_completed(self) -> int:
