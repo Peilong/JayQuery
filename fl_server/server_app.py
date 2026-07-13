@@ -37,8 +37,12 @@ from pathlib import Path
 import json
 
 from fl_server.top_model import TopModel
-from privacy.dp_wrapper import make_private
 from baselines.eval_utils import compute_metrics
+from torch.utils.data import TensorDataset, DataLoader
+
+from privacy.dp_wrapper import make_private
+
+from privacy.privacy_accountant import PrivacyBudgetTracker
 
 app = ServerApp()
 
@@ -87,6 +91,12 @@ def main(grid: Grid, context: Context) -> None:
         )
         
     eps_tag = f"eps_{dp['epsilon']}" if dp["enabled"] else "eps_inf"
+
+    dp = _server_dp_config(context)      # the Step 1 config helper
+    train_model, train_optimizer, priv_engine = top_model, optimizer, None
+    wrapped = False 
+    privacy_tracker = PrivacyBudgetTracker()
+    sample_rate = 1.0  # full-batch training on server, so sample_rate = 1.0
 
     for round_num in range(1, num_rounds + 1):
         log(INFO, "")
@@ -179,6 +189,9 @@ def main(grid: Grid, context: Context) -> None:
         wandb.finish()
         
     log(INFO, "Final test metrics: %s", test_metrics)
+
+def _server_dp_config(context: Context) -> dict:
+    """Server-side DP-SGD params from run_config (Step 1 keys in pyproject.toml).
 
 def _server_dp_config(context: Context) -> dict:
     """Server-side DP-SGD params from run_config (Step 1 keys in pyproject.toml).
