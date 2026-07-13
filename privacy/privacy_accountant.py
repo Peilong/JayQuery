@@ -71,8 +71,8 @@ class PrivacyBudgetTracker:
         TODO (Wyatt, Week 5): implement step() — increment round counter and check budget.
         """
         self._round += 1
-        self.accountant.update_DPlosses(eps = self.get_epsilon(), delta = self.delta)
         current = self.get_epsilon()
+        self.accountant.update_DPlosses(eps = current, delta = self.delta)
         if current > self.target_epsilon:
             raise PrivacyBudgetExceededError(
                 f"Privacy budget exceeded: {current:.4f} > {self.target_epsilon}"
