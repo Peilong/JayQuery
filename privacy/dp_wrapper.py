@@ -13,9 +13,9 @@ References:
 """
 
 
-from opacus import PrivacyEngine
 import torch
 import torch.nn as nn
+from opacus import PrivacyEngine
 from opacus.grad_sample import GradSampleModule
 from opacus.optimizers import DPOptimizer
 from torch.utils.data import DataLoader

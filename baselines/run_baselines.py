@@ -27,10 +27,9 @@ wandb run-passing methodology (IMPORTANT):
     AVAILABLE_MODELS table no longer needs a hand-maintained on_run_created.
 """
 
-from typing import Any
-
 import argparse
 import inspect
+from typing import Any
 
 import torch
 import yaml

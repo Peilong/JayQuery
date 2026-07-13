@@ -14,8 +14,9 @@ References:
   - CLAUDE.md DP guide Step 5
 """
 
-import torch
 import math
+
+import torch
 
 
 def add_dp_noise_to_embedding(

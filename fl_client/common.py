@@ -41,6 +41,16 @@ def _full_trainset(spec: SiloSpec, context: Context) -> tuple[torch.Tensor, torc
         ys.append(y)
     return torch.cat(xs).float(), torch.cat(ys).float()
 
+def _eval_set(spec: SiloSpec, context: Context, split: str = "val") -> tuple[torch.Tensor, torch.Tensor]:
+    batch_size = context.run_config.get("batch-size", 64)
+    _, val_loader, test_loader = spec.load_fn(batch_size=batch_size)
+    loader = test_loader if split == "test" else val_loader
+    xs, ys = [], []
+    for x, y in loader:
+        xs.append(x)
+        ys.append(y)
+    return torch.cat(xs).float(), torch.cat(ys).float()
+
 # ── Configs ───────────────────────────────────────────────────
 
 def _cut_noise_config(spec: SiloSpec, context: Context) -> dict:
@@ -178,6 +188,29 @@ def generate_embeddings(spec: SiloSpec, msg: Message, context: Context) -> Messa
     )
     return Message(content=content, reply_to=msg)
 
+def generate_eval_embeddings(spec: SiloSpec, msg: Message, context: Context) -> Message:
+    model = _build_model(spec, context)
+    model.eval()
+
+    cfg = msg.content.get("config")
+    split = str(cfg["split"]) if cfg is not None and "split" in cfg else "val"
+    X, y = _eval_set(spec, context, split)
+
+    t0 = time.perf_counter()
+    with torch.no_grad():
+        embedding = model(X)
+    fwd_time = time.perf_counter() - t0
+
+    emb = embedding.detach()
+
+    arrays = {"embedding": Array(emb.numpy())}
+    if spec.sends_labels:
+        arrays["labels"] = Array(y.numpy())
+
+    content = RecordDict(
+        {"arrays": ArrayRecord(arrays), "config": ConfigRecord({"pos": spec.partition_id})}
+    )
+    return Message(content=content, reply_to=msg)
 
 def apply_gradients(spec: SiloSpec, msg: Message, context: Context) -> Message:
     """Round step 3: recompute forward, inject server gradient, step optimizer."""
@@ -222,6 +255,14 @@ def apply_gradients(spec: SiloSpec, msg: Message, context: Context) -> Message:
     buf = io.BytesIO()
     torch.save(optimizer.state_dict(), buf)
     context.state["optimizer_state"] = ConfigRecord({"serialized": buf.getvalue()})
+
+    cfg = msg.content.get("config")
+    if cfg is not None and "num-server-rounds" in cfg:
+        if int(cfg["server-round"]) >= int(cfg["num-server-rounds"])-1:
+            from pathlib import Path
+            ckpt_dir = Path("experiments/checkpoints") / str(cfg["eps-tag"])
+            ckpt_dir.mkdir(parents=True, exist_ok=True)
+            torch.save(model.state_dict(), ckpt_dir / f"{spec.wandb_tag}.pt")
 
     rnd = _round_number(context, msg, advance=False)
     with torch.no_grad():

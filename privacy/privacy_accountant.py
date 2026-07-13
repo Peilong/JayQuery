@@ -12,6 +12,8 @@ from autodp import mechanism_zoo
 from autodp import dp_acct
 from autodp import transformer_zoo
 
+from privacy.dp_wrapper import PrivacyBudgetExceededError
+
 
 class PrivacyBudgetTracker:
     """Tracks per-round epsilon expenditure and raises an error when budget is exhausted.

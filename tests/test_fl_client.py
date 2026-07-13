@@ -303,6 +303,7 @@ class TestDispatcher:
 
     def test_partition_0_routes_to_silo_a(self, fresh_context):
         from flwr.app import Message
+
         import fl_client.client_app as client_app
 
         ctx = fresh_context(node_config={"partition-id": 0})
@@ -311,6 +312,7 @@ class TestDispatcher:
 
     def test_partition_1_routes_to_silo_b(self, fresh_context):
         from flwr.app import Message
+
         import fl_client.client_app as client_app
 
         ctx = fresh_context(node_config={"partition-id": 1})
@@ -319,6 +321,7 @@ class TestDispatcher:
 
     def test_unmapped_partition_raises_keyerror(self, fresh_context):
         from flwr.app import Message
+
         import fl_client.client_app as client_app
 
         ctx = fresh_context(node_config={"partition-id": 7})
@@ -329,6 +332,7 @@ class TestDispatcher:
         """End-to-end: route both silos' generate_embeddings + apply_gradients
         through the real dispatcher, exactly as the ServerApp would."""
         from flwr.app import Array, ArrayRecord, Message, RecordDict
+
         import fl_client.client_app as client_app
 
         for pid in (0, 1):

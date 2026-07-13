@@ -74,8 +74,6 @@ Federated client per-round logging (stateless ClientApp handlers):
 
 from __future__ import annotations
 
-from typing import Any
-
 import functools
 import logging
 import os
