@@ -98,7 +98,7 @@ def test_accountant_budget_exceeded() -> None:
         target_epsilon=1.0, delta=1e-5,
         num_epochs=5, batch_size=32, dataset_size=200,
     )
-
+    tracker.step()
     # Patch get_epsilon to simulate exceeding the budget
     with patch.object(tracker, "get_epsilon", return_value=1.5):
         with pytest.raises(PrivacyBudgetExceededError):
