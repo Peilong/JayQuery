@@ -11,6 +11,9 @@ References:
 
 from __future__ import annotations
 
+import warnings
+from collections.abc import Sequence
+
 from autodp import mechanism_zoo, transformer_zoo
 
 
@@ -74,23 +77,18 @@ class PrivacyBudgetTracker:
         Returns:
             Cumulative epsilon at ``delta`` after ``steps`` compositions.
         """
-        if self.steps == 0:
-            return 0.0
-        base = mechanism_zoo.GaussianMechanism(sigma=self.sigma)
-        if self.sample_rate == 1.0:
-            # Exact composition for homogeneous Gaussians — tighter than the
-            # subsampled RDP bound at q=1.
-            composed = transformer_zoo.ComposeGaussian().compose(
-                mechanism_list=[base], coeff_list=[self.steps]
-            )
-        else:
-            subsampled = transformer_zoo.AmplificationBySampling(PoissonSampling=True)(
-                base, self.sample_rate, improved_bound_flag=True
-            )
-            composed = transformer_zoo.Composition().compose(
-                mechanism_list=[subsampled], coeff_list=[self.steps]
-            )
-        return float(composed.get_eps(delta=self.delta))
+        return combine_epsilon([self], delta=self.delta)
+
+    def would_exceed(self, n: int = 1) -> bool:
+        """Whether spending ``n`` more steps would exceed the budget (no mutation)."""
+        probe = PrivacyBudgetTracker(
+            target_epsilon=self.target_epsilon,
+            sigma=self.sigma,
+            sample_rate=self.sample_rate,
+            delta=self.delta,
+        )
+        probe.steps = self.steps + n
+        return probe.get_epsilon() > self.target_epsilon
 
     def to_dict(self) -> dict[str, float | int]:
         """Plain-primitive state for context.state persistence."""
@@ -113,6 +111,48 @@ class PrivacyBudgetTracker:
         )
         tracker.steps = int(state["steps"])
         return tracker
+
+
+def _per_step_mechanism(sigma: float, sample_rate: float) -> transformer_zoo.Mechanism:
+    """One noisy step as an autodp mechanism, subsampling-amplified when applicable."""
+    base = mechanism_zoo.GaussianMechanism(sigma=sigma)
+    if sample_rate == 1.0:
+        return base
+    return transformer_zoo.AmplificationBySampling(PoissonSampling=True)(
+        base, sample_rate, improved_bound_flag=True
+    )
+
+
+def combine_epsilon(trackers: Sequence[PrivacyBudgetTracker], delta: float) -> float:
+    """Composed epsilon across mechanisms (e.g. client cut-layer + server DP-SGD).
+
+    Args:
+        trackers: Accountants for each budget source; zero-step trackers contribute nothing.
+        delta: DP delta at which the combined guarantee is stated.
+
+    Returns:
+        Epsilon of the composition of every tracker's spend, at ``delta``.
+    """
+    if not 0.0 < delta < 1.0:
+        raise ValueError(f"delta must be in (0, 1), got {delta}")
+    active = [t for t in trackers if t.steps > 0]
+    if not active:
+        return 0.0
+    with warnings.catch_warnings():
+        # autodp's internal Brent search trips benign scipy RuntimeWarnings.
+        warnings.simplefilter("ignore", RuntimeWarning)
+        if all(t.sample_rate == 1.0 for t in active):
+            # Exact composition of Gaussians — tighter than the RDP bound.
+            composed = transformer_zoo.ComposeGaussian().compose(
+                mechanism_list=[mechanism_zoo.GaussianMechanism(sigma=t.sigma) for t in active],
+                coeff_list=[t.steps for t in active],
+            )
+        else:
+            composed = transformer_zoo.Composition().compose(
+                mechanism_list=[_per_step_mechanism(t.sigma, t.sample_rate) for t in active],
+                coeff_list=[t.steps for t in active],
+            )
+        return float(composed.get_eps(delta=delta))
 
 
 def solve_noise_multiplier(

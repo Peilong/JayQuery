@@ -130,7 +130,35 @@ class TestCommonHelpers:
         ctx = fresh_context(run_config={"track-wandb": True})
         common_module._log(spec, ctx, {"x": 1}, step=0)
         assert len(wandb_calls) == 1
-        assert wandb_calls[0]["metrics"] == {"x": 1}
+        assert wandb_calls[0]["entries"] == [[0, {"x": 1}]]
+
+    def test_log_buffers_until_interval_then_flushes(
+        self, common_module, fake_spec_factory, fresh_context, wandb_calls
+    ):
+        """With interval=3, entries accumulate (2/round) and upload as one batch."""
+        spec = fake_spec_factory()
+        ctx = fresh_context(run_config={"wandb-log-interval": 3})
+
+        for step in range(5):
+            common_module._log(spec, ctx, {"x": step}, step=step)
+        assert len(wandb_calls) == 0, "must not upload before 2*interval entries"
+
+        common_module._log(spec, ctx, {"x": 5}, step=5)  # 6th entry = 2*3 -> flush
+        assert len(wandb_calls) == 1
+        assert [e[0] for e in wandb_calls[0]["entries"]] == [0, 1, 2, 3, 4, 5]
+
+        common_module._log(spec, ctx, {"x": 6}, step=6)
+        assert len(wandb_calls) == 1, "buffer must restart empty after a flush"
+
+    def test_log_force_flush_uploads_partial_buffer(
+        self, common_module, fake_spec_factory, fresh_context, wandb_calls
+    ):
+        spec = fake_spec_factory()
+        ctx = fresh_context(run_config={"wandb-log-interval": 50})
+        common_module._log(spec, ctx, {"x": 0}, step=0)
+        common_module._log(spec, ctx, {"x": 1}, step=1, flush=True)
+        assert len(wandb_calls) == 1
+        assert len(wandb_calls[0]["entries"]) == 2
 
 
 # ── integration: full generate_embeddings -> apply_gradients round trip ────
@@ -218,7 +246,7 @@ class TestRoundTrip:
         common_module.apply_gradients(spec, grad_msg, ctx)
 
         assert len(wandb_calls) == 2  # one from generate_embeddings, one from apply_gradients
-        gen_metrics, apply_metrics = (c["metrics"] for c in wandb_calls)
+        gen_metrics, apply_metrics = (c["entries"][0][1] for c in wandb_calls)
         assert "silo_check/embedding_l2" in gen_metrics
         assert "silo_check/grad_l2" in apply_metrics
 
@@ -277,6 +305,165 @@ class TestMultiRound:
         )
         step_counts = [s["step"] for s in restored["state"].values() if "step" in s]
         assert step_counts and all(s >= 1 for s in step_counts)
+
+
+# ── mini-batching: shared-seed Poisson sampling + budget gating ────────────
+
+
+def _batch_msg(seed=7, q=0.5, rnd=1):
+    from flwr.app import ConfigRecord, Message, RecordDict
+
+    return Message(
+        content=RecordDict({"config": ConfigRecord({
+            "server-round": rnd, "batch-seed": seed, "batch-sample-rate": q,
+        })})
+    )
+
+
+class TestMiniBatching:
+    def test_batch_indices_identical_across_silos(self, common_module):
+        """Same seed + rate -> identical row selection (the cross-silo alignment invariant)."""
+        cfg = {"batch-seed": 3, "batch-sample-rate": 0.3}
+        idx1, q1 = common_module._batch_indices(200, cfg)
+        idx2, _ = common_module._batch_indices(200, cfg)
+        assert torch.equal(idx1, idx2)
+        assert q1 == 0.3
+        assert 0 < idx1.numel() < 200
+
+        idx3, _ = common_module._batch_indices(200, {"batch-seed": 4, "batch-sample-rate": 0.3})
+        assert not torch.equal(idx1, idx3), "different seeds must give different batches"
+
+    def test_batch_indices_full_batch_without_config(self, common_module):
+        idx, q = common_module._batch_indices(10, None)
+        assert q == 1.0
+        assert torch.equal(idx, torch.arange(10))
+
+    def test_batch_indices_requires_seed_when_sampling(self, common_module):
+        import pytest as _pytest
+
+        with _pytest.raises(ValueError, match="batch-seed"):
+            common_module._batch_indices(10, {"batch-sample-rate": 0.5})
+
+    def test_minibatch_round_trip(self, common_module, fake_spec_factory, fresh_context):
+        """A sampled round returns batch-sized embedding+labels and replays cleanly."""
+        from flwr.app import Array, ArrayRecord, Message, RecordDict
+
+        from tests.fixtures.conftest import make_fake_load_fn
+
+        spec = fake_spec_factory(load_fn=make_fake_load_fn(n_rows=40), sends_labels=True)
+        ctx = fresh_context()
+
+        reply = common_module.generate_embeddings(spec, _batch_msg(seed=11, q=0.5), ctx)
+        emb = reply.content["arrays"]["embedding"].numpy()
+        labels = reply.content["arrays"]["labels"].numpy()
+        assert 0 < emb.shape[0] < 40, "Poisson batch should be a strict subset"
+        assert labels.shape[0] == emb.shape[0]
+        assert reply.content["config"]["n-total"] == 40
+
+        grad_msg = Message(
+            content=RecordDict({"gradients": ArrayRecord({"local-gradients": Array(emb * 0.1)})})
+        )
+        common_module.apply_gradients(spec, grad_msg, ctx)  # replay on the same subset
+
+    def test_budget_exhausted_reply_carries_flag_not_embedding(
+        self, common_module, fake_spec_factory, fresh_context
+    ):
+        from privacy.privacy_accountant import PrivacyBudgetTracker
+
+        spec = fake_spec_factory()
+        ctx = fresh_context(run_config={"cut-noise-enabled": True, "num-server-rounds": 1})
+        spent = PrivacyBudgetTracker(target_epsilon=0.5, sigma=1.0, sample_rate=1.0)
+        spent.steps = 100
+        common_module._save_tracker(ctx, spent)
+
+        reply = common_module.generate_embeddings(spec, _batch_msg(q=1.0), ctx)
+        assert reply.content["config"]["budget-exhausted"] is True
+        assert "arrays" not in reply.content
+        assert reply.content["privacy"]["steps"] == 100
+
+    def test_cut_noise_reports_privacy_primitives_and_perturbs(
+        self, common_module, fake_spec_factory, fresh_context
+    ):
+        spec = fake_spec_factory()
+        ctx = fresh_context(
+            run_config={"cut-noise-enabled": True, "cut-noise-target-epsilon": 1.0,
+                        "num-server-rounds": 5}
+        )
+        reply = common_module.generate_embeddings(spec, _batch_msg(q=1.0), ctx)
+
+        privacy = reply.content["privacy"]
+        assert privacy["steps"] == 1
+        assert privacy["sigma"] > 0
+
+        clean = ctx.state["sent_embedding"]["v"].numpy()
+        sent = reply.content["arrays"]["embedding"].numpy()
+        assert sent.shape == clean.shape
+        assert not torch.allclose(torch.from_numpy(sent), torch.from_numpy(clean)), (
+            "sent embedding must be clipped+noised, stored embedding must stay clean"
+        )
+
+    def test_gradient_backprops_through_clip(
+        self, common_module, fake_spec_factory, fresh_context
+    ):
+        """With cut noise on, apply_gradients trains through the clip without desync."""
+        from flwr.app import Array, ArrayRecord, Message, RecordDict
+
+        spec = fake_spec_factory()
+        ctx = fresh_context(run_config={"cut-noise-enabled": True, "num-server-rounds": 5})
+
+        reply = common_module.generate_embeddings(spec, _batch_msg(q=1.0), ctx)
+        emb = reply.content["arrays"]["embedding"].numpy()
+        before = {k: v.clone() for k, v in ctx.state["model"].to_torch_state_dict().items()}
+
+        grad_msg = Message(
+            content=RecordDict({"gradients": ArrayRecord({"local-gradients": Array(emb * 0.1)})})
+        )
+        common_module.apply_gradients(spec, grad_msg, ctx)
+
+        after = ctx.state["model"].to_torch_state_dict()
+        assert any(not torch.allclose(before[k], after[k]) for k in before), (
+            "gradient must reach the bottom model through the clip"
+        )
+
+    def test_eval_embeddings_clipped_when_cut_noise_enabled(
+        self, common_module, fake_spec_factory, fresh_context
+    ):
+        """Eval embeddings match the training distribution: clipped, not noised."""
+        from flwr.app import ConfigRecord, Message, RecordDict
+
+        from tests.fixtures.conftest import make_fake_load_fn
+
+        base = make_fake_load_fn(n_rows=20)
+
+        def load3(batch_size=64):
+            loader, _, _ = base(batch_size)
+            return loader, loader, loader
+
+        spec = fake_spec_factory(load_fn=load3)
+        ctx = fresh_context(
+            run_config={"cut-noise-enabled": True, "cut-noise-max-norm": 0.5,
+                        "num-server-rounds": 5}
+        )
+        msg = Message(content=RecordDict({"config": ConfigRecord({"split": "val"})}))
+        reply = common_module.generate_eval_embeddings(spec, msg, ctx)
+        emb = torch.from_numpy(reply.content["arrays"]["embedding"].numpy())
+        assert (emb.norm(p=2, dim=1) <= 0.5 + 1e-5).all(), "eval rows must respect the clip bound"
+
+    def test_stop_run_checkpoints_without_training(
+        self, common_module, fake_spec_factory, fresh_context, tmp_path, monkeypatch
+    ):
+        from flwr.app import ConfigRecord, Message, RecordDict
+
+        monkeypatch.chdir(tmp_path)
+        spec = fake_spec_factory(wandb_tag="silo_stop")
+        ctx = fresh_context()
+
+        stop_msg = Message(
+            content=RecordDict({"config": ConfigRecord({"stop-run": True, "eps-tag": "eps_t"})})
+        )
+        common_module.apply_gradients(spec, stop_msg, ctx)
+        assert (tmp_path / "experiments/checkpoints/eps_t/silo_stop.pt").exists()
+        assert "optimizer_state" not in ctx.state, "stop-run must not train"
 
 
 # ── dispatcher: client_app.py routes to the REAL silo_a/silo_b handlers ────

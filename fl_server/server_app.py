@@ -23,28 +23,23 @@ TODO:
 - Implement Validation Rounds
 """
 
+import json
+from dataclasses import dataclass, field
 from logging import INFO, WARNING
+from pathlib import Path
 
 import torch
 from flwr.app import Array, ArrayRecord, ConfigRecord, Context, Message, RecordDict
 from flwr.common import log
 from flwr.serverapp import Grid, ServerApp
-from torch.utils.data import DataLoader, TensorDataset
 
 import wandb
-
-from pathlib import Path
-import json
-
-from fl_server.top_model import TopModel
 from baselines.eval_utils import compute_metrics
-from torch.utils.data import TensorDataset, DataLoader
-
+from fl_server.top_model import TopModel
 from privacy.dp_wrapper import make_private_with_noise
-
 from privacy.privacy_accountant import (
-    PrivacyBudgetExceededError,
     PrivacyBudgetTracker,
+    combine_epsilon,
     solve_noise_multiplier,
 )
 
@@ -75,8 +70,8 @@ def main(grid: Grid, context: Context) -> None:
     track = bool(context.run_config.get("track-wandb", True))
 
     dp = _server_dp_config(context)
-    train_model, train_optimizer, priv_engine = top_model, optimizer, None
-    wrapped = False 
+    train_model, train_optimizer = top_model, optimizer
+    wrapped = False
 
     if track:
         wandb.init(
@@ -96,7 +91,12 @@ def main(grid: Grid, context: Context) -> None:
         
     eps_tag = f"eps_{dp['epsilon']}" if dp["enabled"] else "eps_inf"
 
-    privacy_tracker: PrivacyBudgetTracker | None = None
+    sample_rate = float(context.run_config.get("batch-sample-rate", 1.0))
+    seed = int(context.run_config.get("seed", 42))
+    combined_target = float(context.run_config.get("combined-target-epsilon", 3.0))
+    server_tracker: PrivacyBudgetTracker | None = None
+    client_trackers: dict[int, PrivacyBudgetTracker] = {}
+    stopped_early = False
 
     for round_num in range(1, num_rounds + 1):
         log(INFO, "")
@@ -109,35 +109,54 @@ def main(grid: Grid, context: Context) -> None:
                 "Run: flwr federation simulation-config --num-supernodes=2"
             )
 
-        emb_a, emb_b, labels, node_pos_map = _get_embeddings(grid=grid, node_ids=node_ids, round_num=round_num)
+        rd = _get_embeddings(
+            grid=grid, node_ids=node_ids, round_num=round_num,
+            batch_seed=seed * 100_000 + round_num, sample_rate=sample_rate,
+        )
+        for pos, prims in rd.client_privacy.items():
+            client_trackers[pos] = PrivacyBudgetTracker.from_dict(prims)
+
+        if rd.exhausted:
+            log(WARNING, "Silo(s) %s out of privacy budget — stopping run at round %d",
+                rd.exhausted, round_num)
+            _send_stop(grid, node_ids, eps_tag)
+            stopped_early = True
+            break
+
+        emb_a, emb_b, labels, node_pos_map = rd.emb_a, rd.emb_b, rd.labels, rd.node_pos_map
 
         if dp["enabled"] and not wrapped:
-            loader = _make_server_loader(emb_a, emb_b, labels)
-            sample_rate = loader.batch_size / len(loader.dataset)
-            # autodp is the authoritative accountant (CLAUDE.md): size the noise against the
-            # SAME accountant that enforces it, over the ACTUAL run length (one optimizer.step
-            # per round => num_rounds steps). This fixes both the horizon mismatch (was calibrating
-            # for dp-epochs, not num_rounds) and the calibrate-with-Opacus/enforce-with-autodp split.
+            # Size the noise against the same accountant that enforces it (autodp),
+            # over the actual run length: one optimizer.step per round.
             sigma = solve_noise_multiplier(
                 target_epsilon=dp["epsilon"],
                 sample_rate=sample_rate,
                 steps=num_rounds,
                 delta=dp["delta"],
             )
-            train_model, train_optimizer, _, priv_engine = make_private_with_noise(
-                model=top_model, optimizer=optimizer, data_loader=loader,
+            expected_batch = max(1, round(sample_rate * rd.n_total)) if rd.n_total else len(labels)
+            train_model, train_optimizer = make_private_with_noise(
+                model=top_model, optimizer=optimizer,
                 noise_multiplier=sigma, max_grad_norm=dp["max_grad_norm"],
+                expected_batch_size=expected_batch,
             )
             wrapped = True
-            log(INFO, "DP wrap OK: N=%d, dp_optimizer=%s, sigma=%.4f, horizon=%d steps",
-                len(loader.dataset), type(train_optimizer).__name__, sigma, num_rounds)
-            privacy_tracker = PrivacyBudgetTracker(
+            log(INFO, "DP wrap OK: expected_batch=%d, sigma=%.4f, horizon=%d steps",
+                expected_batch, sigma, num_rounds)
+            server_tracker = PrivacyBudgetTracker(
                 target_epsilon=dp["epsilon"],
                 sigma=sigma,
                 sample_rate=sample_rate,
                 delta=dp["delta"],
             )
-            
+
+        if server_tracker is not None and server_tracker.would_exceed():
+            log(WARNING, "Server budget would be exceeded — stopping run before round %d step",
+                round_num)
+            _send_stop(grid, node_ids, eps_tag)
+            stopped_early = True
+            break
+
         emb_a = emb_a.detach().requires_grad_(True)
         emb_b = emb_b.detach().requires_grad_(True)
         if dp['enabled']:
@@ -159,31 +178,20 @@ def main(grid: Grid, context: Context) -> None:
         log(INFO, "Round %d — loss: %.4f", round_num, float(loss))
         losses.append((round_num, float(loss)))
 
-        budget_exhausted = False
-        server_epsilon = None
-        if privacy_tracker is not None:
-            try:
-                privacy_tracker.step()
-            except PrivacyBudgetExceededError as err:
-                log(WARNING, "%s — stopping training after round %d", err, round_num)
-                budget_exhausted = True
-            server_epsilon = privacy_tracker.get_epsilon()
-            log(INFO, "Round %d — cumulative server epsilon: %.4f", round_num, server_epsilon)
+        if server_tracker is not None:
+            server_tracker.step()
+        eps_metrics = _epsilon_metrics(server_tracker, client_trackers, dp["delta"])
+        for k, v in eps_metrics.items():
+            log(INFO, "Round %d — %s: %.4f", round_num, k, v)
 
         if track:
-            metrics = {"train/loss": float(loss)}
-            if server_epsilon is not None:
-                metrics["privacy/server_epsilon"] = server_epsilon
-            wandb.log(metrics, step=round_num)
-            if round_num%10==0:
+            wandb.log({"train/loss": float(loss), **eps_metrics}, step=round_num)
+            if round_num%5==0:
                 eval_model = TopModel(embedding_dim=embedding_dim)
                 src = train_model._module if dp["enabled"] else top_model
                 eval_model.load_state_dict(src.state_dict())
                 val_metrics = _run_eval(grid, node_ids, eval_model, split="val")
                 wandb.log({"val/auc": float(val_metrics["auc_roc"])}, step=round_num)
-    
-        if budget_exhausted:
-            break
 
         _send_gradients(
             grid=grid,
@@ -194,6 +202,15 @@ def main(grid: Grid, context: Context) -> None:
             num_rounds=num_rounds,
             eps_tag=eps_tag
         )
+
+        next_combined = _next_round_combined(server_tracker, client_trackers, dp["delta"])
+        if next_combined is not None and next_combined > combined_target:
+            log(WARNING,
+                "Next round would push combined epsilon to %.4f > %.4f — stopping after round %d",
+                next_combined, combined_target, round_num)
+            _send_stop(grid, node_ids, eps_tag)
+            stopped_early = True
+            break
 
     ckpt_dir = Path("experiments/checkpoints") / eps_tag
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -207,11 +224,14 @@ def main(grid: Grid, context: Context) -> None:
     
     meta = {
         "epsilon": dp["epsilon"] if dp["enabled"] else None,
-        "server_epsilon_spent": privacy_tracker.get_epsilon() if privacy_tracker else None,
         "delta": dp["delta"],
         "embedding_dim": embedding_dim,
         "num_rounds": num_rounds,
         "server_dp_enabled": dp["enabled"],
+        "batch_sample_rate": sample_rate,
+        "combined_target_epsilon": combined_target,
+        "stopped_early": stopped_early,
+        "epsilon_spent": _epsilon_metrics(server_tracker, client_trackers, dp["delta"]),
         "metrics": test_metrics,
     }
     (ckpt_dir / "meta.json").write_text(json.dumps(meta, indent=2))
@@ -237,40 +257,101 @@ def _server_dp_config(context: Context) -> dict:
         "epsilon": float(rc.get("server-dp-epsilon", 1.0)),
         "delta": float(rc.get("server-dp-delta", 1e-5)),
         "max_grad_norm": float(rc.get("server-dp-max-grad-norm", 1.0)),
-        "num_epochs": int(rc.get("server-dp-epochs", rc.get("num-server-rounds", 10))),
     }
 
-def _make_server_loader(emb_a: torch.Tensor, emb_b: torch.Tensor, labels: torch.Tensor) -> DataLoader:
-    """One full-batch DataLoader over [emb_a‖emb_b] and labels — gives Opacus the
-    dataset size it needs. Full-batch => sample_rate = 1.0 (see M1)."""
-    X = torch.cat([emb_a, emb_b], dim=1).detach()   # (N, 2*embedding_dim)
-    y = labels.detach().float()                     # (N,)
-    dataset = TensorDataset(X, y)
-    return DataLoader(dataset, batch_size=len(dataset), shuffle=False)
+def _pos_name(pos: int) -> str:
+    return "silo_a" if pos == _SILO_A_POS else "silo_b"
+
+
+def _epsilon_metrics(
+    server_tracker: PrivacyBudgetTracker | None,
+    client_trackers: dict[int, PrivacyBudgetTracker],
+    delta: float,
+) -> dict[str, float]:
+    """Per-source cumulative epsilons plus the composed system total."""
+    metrics: dict[str, float] = {}
+    if server_tracker is not None:
+        metrics["privacy/server_epsilon"] = server_tracker.get_epsilon()
+    for pos, tracker in sorted(client_trackers.items()):
+        metrics[f"privacy/{_pos_name(pos)}_epsilon"] = tracker.get_epsilon()
+    all_trackers = list(client_trackers.values()) + (
+        [server_tracker] if server_tracker is not None else []
+    )
+    if all_trackers:
+        metrics["privacy/combined_epsilon"] = combine_epsilon(all_trackers, delta=delta)
+    return metrics
+
+
+def _next_round_combined(
+    server_tracker: PrivacyBudgetTracker | None,
+    client_trackers: dict[int, PrivacyBudgetTracker],
+    delta: float,
+) -> float | None:
+    """Prospective combined epsilon if every active source spends one more step."""
+    active = list(client_trackers.values()) + (
+        [server_tracker] if server_tracker is not None else []
+    )
+    if not active:
+        return None
+    probes = []
+    for tracker in active:
+        probe = PrivacyBudgetTracker.from_dict(tracker.to_dict())
+        probe.steps += 1
+        probes.append(probe)
+    return combine_epsilon(probes, delta=delta)
+
+
+def _send_stop(grid: Grid, node_ids: list[int], eps_tag: str) -> None:
+    """Tell every SuperNode the run is over (budget gate): checkpoint, no training."""
+    messages = [
+        Message(
+            content=RecordDict(
+                {"config": ConfigRecord({"stop-run": True, "eps-tag": eps_tag})}
+            ),
+            message_type="train.apply_gradients",
+            dst_node_id=nid,
+        )
+        for nid in node_ids
+    ]
+    grid.push_messages(messages)
+
+
+@dataclass
+class _RoundData:
+    """One round's collected client replies."""
+
+    emb_a: torch.Tensor | None = None
+    emb_b: torch.Tensor | None = None
+    labels: torch.Tensor | None = None
+    node_pos_map: dict[int, int] = field(default_factory=dict)
+    n_total: int = 0
+    client_privacy: dict[int, dict] = field(default_factory=dict)
+    exhausted: list[int] = field(default_factory=list)
+
 
 def _get_embeddings(
     grid: Grid,
     node_ids: list[int],
     round_num: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[int, int]]:
-    """Send generate_embeddings query to both SuperNodes and collect replies.
+    batch_seed: int,
+    sample_rate: float,
+) -> _RoundData:
+    """Query both SuperNodes for this round's batch embeddings.
 
-    Args:
-        grid: Flower Grid.
-        node_ids: List of active SuperNode IDs (exactly 2 expected).
-
-    Returns:
-        emb_a: Training embeddings from Silo A, shape (N, embedding_dim).
-        emb_b: Training embeddings from Silo B, shape (N, embedding_dim).
-        labels: Binary labels from Silo A, shape (N,).
-        node_pos_map: Mapping from node_id → partition-id (pos).
+    Sends the shared batch seed + sample rate so both silos Poisson-sample the
+    same rows. Replies carry each silo's privacy-tracker primitives and may flag
+    budget exhaustion instead of returning an embedding.
 
     Raises:
-        RuntimeError: If either silo does not return a valid reply.
+        RuntimeError: If a silo returns neither an embedding nor an exhausted flag.
     """
     messages = [
         Message(
-            content=RecordDict({"config": ConfigRecord({"server-round": round_num})}),
+            content=RecordDict({"config": ConfigRecord({
+                "server-round": round_num,
+                "batch-seed": batch_seed,
+                "batch-sample-rate": sample_rate,
+            })}),
             message_type="query.generate_embeddings",
             dst_node_id=nid,
         )
@@ -281,29 +362,33 @@ def _get_embeddings(
     replies = grid.send_and_receive(messages)
     log(INFO, "\tReceived %d/%d results", len(replies), len(messages))
 
-    emb_a = emb_b = labels = None
-    node_pos_map: dict[int, int] = {}
-
+    rd = _RoundData()
     for reply in replies:
         if not reply.has_content():
             continue
-        pos: int = reply.content["config"]["pos"]
-        node_pos_map[reply.metadata.src_node_id] = pos
+        cfg = reply.content["config"]
+        pos: int = cfg["pos"]
+        rd.node_pos_map[reply.metadata.src_node_id] = pos
+        if "privacy" in reply.content:
+            rd.client_privacy[pos] = dict(reply.content["privacy"])
+        if bool(cfg.get("budget-exhausted", False)):
+            rd.exhausted.append(pos)
+            continue
+        if "n-total" in cfg:
+            rd.n_total = int(cfg["n-total"])
         emb = torch.from_numpy(reply.content["arrays"]["embedding"].numpy())
-
         if pos == _SILO_A_POS:
-            emb_a = emb
-            labels = torch.from_numpy(reply.content["arrays"]["labels"].numpy())
+            rd.emb_a = emb
+            rd.labels = torch.from_numpy(reply.content["arrays"]["labels"].numpy())
         elif pos == _SILO_B_POS:
-            emb_b = emb
+            rd.emb_b = emb
 
-    if emb_a is None or emb_b is None or labels is None:
+    if not rd.exhausted and (rd.emb_a is None or rd.emb_b is None or rd.labels is None):
         raise RuntimeError(
             "Failed to collect embeddings from both silos. "
-            f"Got positions: {list(node_pos_map.values())}"
+            f"Got positions: {list(rd.node_pos_map.values())}"
         )
-
-    return emb_a, emb_b, labels, node_pos_map
+    return rd
 
 
 def _send_gradients(
@@ -336,8 +421,8 @@ def _send_gradients(
                     "gradients": arr_rec,
                     "config": ConfigRecord({
                         "server-round": round_num,
-                        "num-server-rounds": num_rounds,   # H6.2: lets client detect the last round
-                        "eps-tag": eps_tag,                # H6.2: single source of truth for the dir name
+                        "num-server-rounds": num_rounds,  # lets client detect the last round
+                        "eps-tag": eps_tag,               # single source of truth for the dir
                     }),
                 }),
                 message_type="train.apply_gradients",

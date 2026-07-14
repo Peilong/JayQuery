@@ -8,14 +8,17 @@ its own SiloSpec.
 """
 
 import io
+import json
 import time
+from pathlib import Path
 
 import torch
 from flwr.app import Array, ArrayRecord, ConfigRecord, Context, Message, RecordDict
 
 from fl_client.silo_spec import SiloSpec
-from privacy.noise_injection import add_dp_noise_to_embedding
-from utils.wandb_utils import log_client_round, new_run_id
+from privacy.noise_injection import add_gaussian_noise, clip_embedding_rows
+from privacy.privacy_accountant import PrivacyBudgetTracker, solve_noise_multiplier
+from utils.wandb_utils import log_client_rounds, new_run_id
 
 
 def _build_model(spec: SiloSpec, context: Context) -> torch.nn.Module:
@@ -41,7 +44,9 @@ def _full_trainset(spec: SiloSpec, context: Context) -> tuple[torch.Tensor, torc
         ys.append(y)
     return torch.cat(xs).float(), torch.cat(ys).float()
 
-def _eval_set(spec: SiloSpec, context: Context, split: str = "val") -> tuple[torch.Tensor, torch.Tensor]:
+def _eval_set(
+    spec: SiloSpec, context: Context, split: str = "val"
+) -> tuple[torch.Tensor, torch.Tensor]:
     batch_size = context.run_config.get("batch-size", 64)
     _, val_loader, test_loader = spec.load_fn(batch_size=batch_size)
     loader = test_loader if split == "test" else val_loader
@@ -58,11 +63,45 @@ def _cut_noise_config(spec: SiloSpec, context: Context) -> dict:
     rc = context.run_config
     cfg = {
         "enabled": bool(rc.get("cut-noise-enabled", False)),
-        "epsilon": float(rc.get("cut-noise-epsilon", 1.0)),
-        "max_grad_norm": float(rc.get("cut-noise-max-grad-norm", 1.0)),
+        "target_epsilon": float(rc.get("cut-noise-target-epsilon", 1.0)),
+        "delta": float(rc.get("cut-noise-delta", 1e-5)),
+        "max_norm": float(rc.get("cut-noise-max-norm", 1.0)),
     }
     cfg.update(spec.cut_noise_config_fn(context))  # silo-specific overrides
     return cfg
+
+
+def _batch_indices(n: int, cfg: ConfigRecord | None) -> tuple[torch.Tensor, float]:
+    """Poisson-sample this round's rows from the server-sent seed + sample rate.
+
+    Both silos receive the same seed and rate, so they select identical rows
+    of the PSI-aligned training set. Returns (indices, sample_rate).
+    """
+    q = float(cfg["batch-sample-rate"]) if cfg is not None and "batch-sample-rate" in cfg else 1.0
+    if q >= 1.0:
+        return torch.arange(n), 1.0
+    if cfg is None or "batch-seed" not in cfg:
+        raise ValueError("batch-sample-rate < 1.0 requires a batch-seed in the round config")
+    g = torch.Generator().manual_seed(int(cfg["batch-seed"]))
+    idx = (torch.rand(n, generator=g) < q).nonzero(as_tuple=True)[0]
+    if idx.numel() == 0:
+        raise RuntimeError(f"Empty Poisson batch (q={q}, n={n}) — raise batch-sample-rate")
+    return idx, q
+
+
+def _load_tracker(context: Context) -> PrivacyBudgetTracker | None:
+    rec = context.state.get("privacy")
+    return PrivacyBudgetTracker.from_dict(dict(rec)) if rec is not None else None
+
+
+def _save_tracker(context: Context, tracker: PrivacyBudgetTracker) -> None:
+    context.state["privacy"] = ConfigRecord(tracker.to_dict())
+
+
+def _save_checkpoint(spec: SiloSpec, model: torch.nn.Module, eps_tag: str) -> None:
+    ckpt_dir = Path("experiments/checkpoints") / eps_tag
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    torch.save(model.state_dict(), ckpt_dir / f"{spec.wandb_tag}.pt")
 
 def _wandb_config(spec: SiloSpec, context: Context) -> dict:
     rc = context.run_config
@@ -105,16 +144,23 @@ def _round_number(context: Context, msg: Message, *, advance: bool) -> int:
     return r
 
 
-def _log(spec: SiloSpec, context: Context, metrics: dict, step: int) -> None:
-    """Resume this node's wandb run, log metrics at step, finish."""
+def _buffered_entries(context: Context) -> list[list]:
+    rec = context.state.get("wandb_buffer")
+    return json.loads(rec["v"]) if rec is not None else []
+
+
+def _flush_wandb_buffer(spec: SiloSpec, context: Context) -> None:
+    """Upload all buffered rounds in one init/log/finish cycle, then clear."""
     if not _tracking_enabled(context):
+        return
+    entries = _buffered_entries(context)
+    if not entries:
         return
     rc = context.run_config
     rid = _run_id(context)
-    log_client_round(
+    log_client_rounds(
         run_id=rid,
-        metrics=metrics,
-        step=step,
+        entries=entries,
         project=rc.get("wandb-project", "jayquery-vfl"),
         entity=rc.get("wandb-entity", "jayquery"),
         name=rc.get("wandb-run-name", "") or f"{spec.wandb_tag}-{rid[:8]}",
@@ -123,69 +169,115 @@ def _log(spec: SiloSpec, context: Context, metrics: dict, step: int) -> None:
         mode=rc.get("wandb-mode", "online"),
         config=_wandb_config(spec, context),
     )
+    context.state["wandb_buffer"] = ConfigRecord({"v": "[]"})
+
+
+def _log(
+    spec: SiloSpec, context: Context, metrics: dict, step: int, *, flush: bool = False
+) -> None:
+    """Buffer metrics in context.state; upload every wandb-log-interval rounds.
+
+    Two entries accrue per round (generate_embeddings + apply_gradients);
+    interval <= 1 uploads on every call. Pass flush=True on the last round.
+    """
+    if not _tracking_enabled(context):
+        return
+    entries = _buffered_entries(context)
+    entries.append([step, metrics])
+    context.state["wandb_buffer"] = ConfigRecord({"v": json.dumps(entries)})
+
+    interval = int(context.run_config.get("wandb-log-interval", 10))
+    if flush or interval <= 1 or len(entries) >= 2 * interval:
+        _flush_wandb_buffer(spec, context)
 
 
 # ── handlers ─────────────────────────────────────────────────────────────────
 
 
 def generate_embeddings(spec: SiloSpec, msg: Message, context: Context) -> Message:
-    """Round step 1: forward pass -> return embedding (+ labels if spec.sends_labels)."""
+    """Round step 1: forward pass on this round's batch -> return (noised) embedding."""
+    cfg = msg.content.get("config") if msg.content is not None else None
     model = _build_model(spec, context)
     model.train()
 
     X, y = _full_trainset(spec, context)
+    idx, q = _batch_indices(len(X), cfg)
+
+    noise = _cut_noise_config(spec, context)
+    tracker = None
+    if noise["enabled"]:
+        tracker = _load_tracker(context)
+        if tracker is None:
+            sigma = solve_noise_multiplier(
+                target_epsilon=noise["target_epsilon"],
+                sample_rate=q,
+                steps=int(context.run_config.get("num-server-rounds", 1)),
+                delta=noise["delta"],
+            )
+            tracker = PrivacyBudgetTracker(
+                target_epsilon=noise["target_epsilon"],
+                sigma=sigma,
+                sample_rate=q,
+                delta=noise["delta"],
+            )
+        if tracker.would_exceed():
+            _save_tracker(context, tracker)
+            content = RecordDict({
+                "config": ConfigRecord({"pos": spec.partition_id, "budget-exhausted": True}),
+                "privacy": ConfigRecord(tracker.to_dict()),
+            })
+            return Message(content=content, reply_to=msg)
 
     # Snapshot RNG immediately before the forward so apply_gradients can
     # reproduce the same dropout mask.
     rng = torch.get_rng_state()
     t0 = time.perf_counter()
-    embedding = model(X)
+    embedding = model(X[idx])
     fwd_time = time.perf_counter() - t0
 
     buf = io.BytesIO()
     torch.save(rng, buf)
     context.state["rng"] = ConfigRecord({"serialized": buf.getvalue()})
     context.state["model"] = ArrayRecord(model.state_dict())
+    context.state["batch_idx"] = ArrayRecord({"v": Array(idx.numpy())})
 
     emb = embedding.detach()
-    # Stored for the apply_gradients equivalence check below.
+    # Clean embedding for the apply_gradients replay check; clip/noise the sent copy only.
     context.state["sent_embedding"] = ArrayRecord({"v": Array(emb.numpy())})
+
+    sent_emb = emb
+    if tracker is not None:
+        sent_emb = add_gaussian_noise(
+            clip_embedding_rows(emb, noise["max_norm"]),
+            noise_std=tracker.sigma * noise["max_norm"],
+        )
+        tracker.step()
+        _save_tracker(context, tracker)
 
     rnd = _round_number(context, msg, advance=True)
     with torch.no_grad():
-        _log(
-            spec,
-            context,
-            {
-                f"{spec.wandb_tag}/round": rnd,
-                f"{spec.wandb_tag}/forward_time_s": fwd_time,
-                f"{spec.wandb_tag}/embedding_l2": float(emb.norm(p=2).item()),
-                f"{spec.wandb_tag}/embedding_mean": float(emb.mean().item()),
-                f"{spec.wandb_tag}/embedding_std": float(emb.std().item()),
-                f"{spec.wandb_tag}/n_examples": int(emb.shape[0]),
-            },
-            step=rnd,
-        )
+        metrics = {
+            f"{spec.wandb_tag}/round": rnd,
+            f"{spec.wandb_tag}/forward_time_s": fwd_time,
+            f"{spec.wandb_tag}/embedding_l2": float(emb.norm(p=2).item()),
+            f"{spec.wandb_tag}/embedding_mean": float(emb.mean().item()),
+            f"{spec.wandb_tag}/embedding_std": float(emb.std().item()),
+            f"{spec.wandb_tag}/n_examples": int(emb.shape[0]),
+        }
+        if tracker is not None:
+            metrics[f"{spec.wandb_tag}/epsilon"] = tracker.get_epsilon()
+        _log(spec, context, metrics, step=rnd)
 
-    noised_emb = emb
-    noise = _cut_noise_config(spec, context)
-    if noise["enabled"]:
-        noised_emb, sigma = add_dp_noise_to_embedding(
-            embedding = emb,
-            sensitivity = noise["max_grad_norm"],
-            epsilon = noise["epsilon"]
-        )
-        context.state["sigma"] = ConfigRecord({"v": float(sigma)})
-        context.state["sensitivity"] = ConfigRecord({"v": float(noise["max_grad_norm"])})
-        context.state["steps"] = ConfigRecord({"v": int(noise["num_epochs"])})
-
-    arrays = {"embedding": Array(noised_emb.numpy())}
+    arrays = {"embedding": Array(sent_emb.numpy())}
     if spec.sends_labels:
-        arrays["labels"] = Array(y.numpy())
+        arrays["labels"] = Array(y[idx].numpy())
 
-    content = RecordDict(
-        {"arrays": ArrayRecord(arrays), "config": ConfigRecord({"pos": spec.partition_id})}
-    )
+    content = RecordDict({
+        "arrays": ArrayRecord(arrays),
+        "config": ConfigRecord({"pos": spec.partition_id, "n-total": int(len(X))}),
+    })
+    if tracker is not None:
+        content["privacy"] = ConfigRecord(tracker.to_dict())
     return Message(content=content, reply_to=msg)
 
 def generate_eval_embeddings(spec: SiloSpec, msg: Message, context: Context) -> Message:
@@ -196,12 +288,14 @@ def generate_eval_embeddings(spec: SiloSpec, msg: Message, context: Context) -> 
     split = str(cfg["split"]) if cfg is not None and "split" in cfg else "val"
     X, y = _eval_set(spec, context, split)
 
-    t0 = time.perf_counter()
     with torch.no_grad():
         embedding = model(X)
-    fwd_time = time.perf_counter() - t0
 
     emb = embedding.detach()
+    noise = _cut_noise_config(spec, context)
+    if noise["enabled"]:
+        # Match the training distribution the top model sees (clip, no noise).
+        emb = clip_embedding_rows(emb, noise["max_norm"])
 
     arrays = {"embedding": Array(emb.numpy())}
     if spec.sends_labels:
@@ -213,7 +307,14 @@ def generate_eval_embeddings(spec: SiloSpec, msg: Message, context: Context) -> 
     return Message(content=content, reply_to=msg)
 
 def apply_gradients(spec: SiloSpec, msg: Message, context: Context) -> Message:
-    """Round step 3: recompute forward, inject server gradient, step optimizer."""
+    """Round step 3: recompute forward on the same batch, inject server gradient, step."""
+    cfg = msg.content.get("config") if msg.content is not None else None
+    if cfg is not None and bool(cfg.get("stop-run", False)):
+        # Server-side budget gate: checkpoint and stop without training.
+        _save_checkpoint(spec, _build_model(spec, context), str(cfg["eps-tag"]))
+        _flush_wandb_buffer(spec, context)
+        return Message(content=RecordDict(), reply_to=msg)
+
     model = _build_model(spec, context)
     model.train()
 
@@ -227,6 +328,8 @@ def apply_gradients(spec: SiloSpec, msg: Message, context: Context) -> Message:
 
     # Must remain before RNG restore
     X, _ = _full_trainset(spec, context)
+    if (rec := context.state.get("batch_idx")) is not None:
+        X = X[torch.from_numpy(rec["v"].numpy()).long()]
 
     if (rec := context.state.get("rng")) is not None:
         torch.set_rng_state(
@@ -246,8 +349,14 @@ def apply_gradients(spec: SiloSpec, msg: Message, context: Context) -> Message:
                 "RNG/data-order replay is broken."
             )
 
+    noise = _cut_noise_config(spec, context)
     t0 = time.perf_counter()
-    embedding.backward(grad)
+    if noise["enabled"]:
+        # The server's gradient is w.r.t. the clipped embedding — backprop through
+        # the same clip so the bottom model sees the true Jacobian.
+        clip_embedding_rows(embedding, noise["max_norm"]).backward(grad)
+    else:
+        embedding.backward(grad)
     optimizer.step()
     step_time = time.perf_counter() - t0
 
@@ -256,13 +365,13 @@ def apply_gradients(spec: SiloSpec, msg: Message, context: Context) -> Message:
     torch.save(optimizer.state_dict(), buf)
     context.state["optimizer_state"] = ConfigRecord({"serialized": buf.getvalue()})
 
-    cfg = msg.content.get("config")
-    if cfg is not None and "num-server-rounds" in cfg:
-        if int(cfg["server-round"]) >= int(cfg["num-server-rounds"])-1:
-            from pathlib import Path
-            ckpt_dir = Path("experiments/checkpoints") / str(cfg["eps-tag"])
-            ckpt_dir.mkdir(parents=True, exist_ok=True)
-            torch.save(model.state_dict(), ckpt_dir / f"{spec.wandb_tag}.pt")
+    final_round = (
+        cfg is not None
+        and "num-server-rounds" in cfg
+        and int(cfg["server-round"]) >= int(cfg["num-server-rounds"]) - 1
+    )
+    if final_round:
+        _save_checkpoint(spec, model, str(cfg["eps-tag"]))
 
     rnd = _round_number(context, msg, advance=False)
     with torch.no_grad():
@@ -276,6 +385,7 @@ def apply_gradients(spec: SiloSpec, msg: Message, context: Context) -> Message:
                 f"{spec.wandb_tag}/step_time_s": step_time,
             },
             step=rnd,
+            flush=final_round,
         )
 
     return Message(content=RecordDict(), reply_to=msg)

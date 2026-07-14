@@ -1,85 +1,81 @@
 """Differential Privacy unit tests — owned by Wyatt Wilfong.
 
 Run: pytest tests/test_dp.py -v
-
-Tests progress from Week 4 (dp_wrapper) to Week 6 (noise_injection).
 """
 
 import pytest
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset
 
 
-def _make_tiny_model_and_loader() -> tuple[nn.Module, torch.optim.Optimizer, DataLoader]:
-    """Helper: create a tiny 2-layer MLP + Adam + DataLoader for testing."""
+def _make_tiny_model() -> tuple[nn.Module, torch.optim.Optimizer]:
     model = nn.Sequential(nn.Linear(12, 8), nn.ReLU(), nn.Linear(8, 1))
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-
-    X = torch.randn(200, 12)
-    y = torch.randint(0, 2, (200,)).float()
-    dataset = TensorDataset(X, y)
-    loader = DataLoader(dataset, batch_size=32)
-    return model, optimizer, loader
+    return model, optimizer
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Week 4 Tests — DP Wrapper
+# DP wrapper (server top model)
 # ─────────────────────────────────────────────────────────────────────────────
 
 @pytest.mark.dp
 def test_dp_wrapper_basic() -> None:
-    """make_private() returns a wrapped model, optimizer, and loader.
-    Expected: PASSES after Week 4 Step 3.
-    """
-    from privacy.dp_wrapper import make_private
-    model, optimizer, loader = _make_tiny_model_and_loader()
+    """make_private_with_noise() returns a usable (dp_model, dp_optimizer) pair."""
+    from opacus.grad_sample import GradSampleModule
+    from opacus.optimizers import DPOptimizer
 
-    dp_model, dp_optimizer, dp_loader, priv_engine = make_private(
-        model=model, optimizer=optimizer, data_loader=loader,
-        target_epsilon=5.0, target_delta=1e-5,
-        max_grad_norm=1.0, num_epochs=10,
+    from privacy.dp_wrapper import make_private_with_noise
+
+    model, optimizer = _make_tiny_model()
+    dp_model, dp_optimizer = make_private_with_noise(
+        model=model, optimizer=optimizer,
+        noise_multiplier=1.0, max_grad_norm=1.0, expected_batch_size=32,
     )
-
-    assert dp_model is not None, "make_private() returned None for dp_model"
-    assert dp_optimizer is not None, "make_private() returned None for dp_optimizer"
-    assert dp_loader is not None, "make_private() returned None for dp_loader"
-    assert priv_engine is not None, "make_private() returned None for priv_engine"
-    print("\n✅  make_private() PASSED — Everything returned successfully")
+    assert isinstance(dp_model, GradSampleModule)
+    assert isinstance(dp_optimizer, DPOptimizer)
+    assert dp_model._module is model
 
 
 @pytest.mark.dp
-def test_dp_wrapper_rejects_invalid_epsilon() -> None:
-    """make_private() raises ValueError for epsilon <= 0.
-    Expected: PASSES after Week 4 Step 1 (input validation).
-    """
-    from privacy.dp_wrapper import make_private
-    model, optimizer, loader = _make_tiny_model_and_loader()
+def test_dp_wrapper_rejects_invalid_params() -> None:
+    """make_private_with_noise() validates all three DP parameters."""
+    from privacy.dp_wrapper import make_private_with_noise
 
-    with pytest.raises(ValueError, match="epsilon"):
-        make_private(
-            model=model, optimizer=optimizer, data_loader=loader,
-            target_epsilon=-1.0, target_delta=1e-5,
-            max_grad_norm=1.0, num_epochs=5,
-        )
+    model, optimizer = _make_tiny_model()
+    with pytest.raises(ValueError, match="noise_multiplier"):
+        make_private_with_noise(model=model, optimizer=optimizer,
+                                noise_multiplier=0.0, max_grad_norm=1.0,
+                                expected_batch_size=32)
+    with pytest.raises(ValueError, match="max_grad_norm"):
+        make_private_with_noise(model=model, optimizer=optimizer,
+                                noise_multiplier=1.0, max_grad_norm=-1.0,
+                                expected_batch_size=32)
+    with pytest.raises(ValueError, match="expected_batch_size"):
+        make_private_with_noise(model=model, optimizer=optimizer,
+                                noise_multiplier=1.0, max_grad_norm=1.0,
+                                expected_batch_size=0)
 
 
 @pytest.mark.dp
-def test_dp_wrapper_rejects_invalid_delta() -> None:
-    """make_private() raises ValueError for delta <= 0."""
-    from privacy.dp_wrapper import make_private
-    model, optimizer, loader = _make_tiny_model_and_loader()
+def test_dp_wrapper_input_grads_flow() -> None:
+    """The wrapped model still exposes input gradients (the VFL cut-layer grads)."""
+    from privacy.dp_wrapper import make_private_with_noise
 
-    with pytest.raises(ValueError, match="delta"):
-        make_private(
-            model=model, optimizer=optimizer, data_loader=loader,
-            target_epsilon=1.0, target_delta=-1e-5,
-            max_grad_norm=1.0, num_epochs=5,
-        )
+    model, optimizer = _make_tiny_model()
+    dp_model, dp_optimizer = make_private_with_noise(
+        model=model, optimizer=optimizer,
+        noise_multiplier=1.0, max_grad_norm=1.0, expected_batch_size=8,
+    )
+    x = torch.randn(8, 12).requires_grad_(True)
+    dp_optimizer.zero_grad()
+    loss = dp_model(x).square().mean()
+    loss.backward()
+    assert x.grad is not None
+    dp_optimizer.step()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Week 5 Tests — Privacy Accountant
+# Privacy accountant
 # ─────────────────────────────────────────────────────────────────────────────
 
 @pytest.mark.dp
@@ -94,11 +90,9 @@ def test_accountant_budget_exceeded() -> None:
 
     tracker = PrivacyBudgetTracker(target_epsilon=1.0, sigma=1.0, delta=1e-5)
 
-    # Patch get_epsilon to simulate exceeding the budget
     with patch.object(tracker, "get_epsilon", return_value=1.5):
         with pytest.raises(PrivacyBudgetExceededError):
             tracker.step()
-    print("\n✅  PrivacyBudgetExceededError raised correctly")
 
 
 @pytest.mark.dp
@@ -110,7 +104,6 @@ def test_accountant_get_epsilon() -> None:
     tracker.steps = 2
     eps = tracker.get_epsilon()
     assert isinstance(eps, float), f"get_epsilon() returned {type(eps)}, expected float"
-    print(f"\n✅  get_epsilon() returned a float: {eps:.4f}")
 
 
 @pytest.mark.dp
@@ -146,7 +139,6 @@ def test_accountant_subsampling_tightens_epsilon() -> None:
     assert eps_mini < eps_full, (
         f"subsampled eps ({eps_mini:.4f}) should beat full-batch eps ({eps_full:.4f})"
     )
-    print(f"\n✅  50 steps @ sigma=2.0: full-batch eps={eps_full:.4f}, q=0.1 eps={eps_mini:.4f}")
 
 
 @pytest.mark.dp
@@ -182,41 +174,123 @@ def test_accountant_rejects_invalid_params() -> None:
         PrivacyBudgetTracker(target_epsilon=1.0, delta=0.0)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Week 6 Tests — Noise Injection
-# ─────────────────────────────────────────────────────────────────────────────
-
 @pytest.mark.dp
-def test_noise_injection_changes_embedding() -> None:
-    """add_dp_noise_to_embedding() modifies the tensor with low epsilon.
-    Expected: PASSES after Week 6 Step 5.
-    """
-    from privacy.noise_injection import add_dp_noise_to_embedding
-    embedding = torch.ones(4, 32)
-    noisy, _ = add_dp_noise_to_embedding(embedding, sensitivity=1.0, epsilon=0.01)
+def test_accountant_would_exceed_gates_before_spend() -> None:
+    """would_exceed() flags the next step while current epsilon is still within budget."""
+    from privacy.privacy_accountant import PrivacyBudgetTracker
 
-    assert not torch.allclose(embedding, noisy), (
-        "With epsilon=0.01, noise should significantly alter the embedding"
+    tracker = PrivacyBudgetTracker(target_epsilon=1.0, sigma=6.45, sample_rate=1.0, delta=1e-5)
+    while not tracker.would_exceed():
+        tracker.step()
+    assert tracker.get_epsilon() <= tracker.target_epsilon, (
+        "would_exceed() must trip before the budget is actually crossed"
     )
+    assert tracker.steps > 0
 
 
 @pytest.mark.dp
-def test_noise_injection_preserves_shape() -> None:
-    """add_dp_noise_to_embedding() returns a tensor with the same shape."""
-    from privacy.noise_injection import add_dp_noise_to_embedding
-    embedding = torch.randn(16, 32)
-    noisy, _ = add_dp_noise_to_embedding(embedding, sensitivity=1.0, epsilon=1.0)
-    assert noisy.shape == embedding.shape, (
-        f"Shape mismatch: input {embedding.shape}, output {noisy.shape}"
-    )
+def test_solve_noise_multiplier_fits_budget() -> None:
+    """Solved sigma stays within budget over the horizon, and tightly so."""
+    from privacy.privacy_accountant import PrivacyBudgetTracker, solve_noise_multiplier
+
+    for q in (1.0, 0.1):
+        sigma = solve_noise_multiplier(target_epsilon=1.0, sample_rate=q, steps=50, delta=1e-5)
+        tracker = PrivacyBudgetTracker(target_epsilon=1.0, sigma=sigma, sample_rate=q, delta=1e-5)
+        tracker.steps = 50
+        eps = tracker.get_epsilon()
+        assert eps <= 1.0, f"q={q}: eps={eps:.4f} exceeds budget"
+        assert eps > 0.9, f"q={q}: eps={eps:.4f} — sigma is wastefully large"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Combined (client + server) epsilon
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.dp
+def test_combine_epsilon_dominates_each_source() -> None:
+    """The composed total exceeds every individual source's epsilon."""
+    from privacy.privacy_accountant import PrivacyBudgetTracker, combine_epsilon
+
+    silo_a = PrivacyBudgetTracker(target_epsilon=1e6, sigma=2.0, sample_rate=0.1, delta=1e-5)
+    silo_b = PrivacyBudgetTracker(target_epsilon=1e6, sigma=3.0, sample_rate=0.1, delta=1e-5)
+    server = PrivacyBudgetTracker(target_epsilon=1e6, sigma=2.0, sample_rate=1.0, delta=1e-5)
+    silo_a.steps = silo_b.steps = server.steps = 50
+
+    combined = combine_epsilon([silo_a, silo_b, server], delta=1e-5)
+    for t in (silo_a, silo_b, server):
+        assert combined >= t.get_epsilon(), (
+            f"combined ({combined:.4f}) must dominate source ({t.get_epsilon():.4f})"
+        )
 
 
 @pytest.mark.dp
-def test_noise_injection_high_epsilon_near_original() -> None:
-    """With very high epsilon (little privacy), noise should be near zero."""
-    from privacy.noise_injection import add_dp_noise_to_embedding
-    embedding = torch.ones(8, 32)
-    noisy, _ = add_dp_noise_to_embedding(embedding, sensitivity=1.0, epsilon=1e6)
-    # Mean absolute difference should be tiny
-    mad = (noisy - embedding).abs().mean().item()
-    assert mad < 0.01, f"With epsilon=1e6, noise should be near 0, got mean abs diff = {mad:.6f}"
+def test_combine_epsilon_single_tracker_matches_get_epsilon() -> None:
+    from privacy.privacy_accountant import PrivacyBudgetTracker, combine_epsilon
+
+    tracker = PrivacyBudgetTracker(target_epsilon=1e6, sigma=2.0, sample_rate=0.2, delta=1e-5)
+    tracker.steps = 10
+    assert combine_epsilon([tracker], delta=1e-5) == pytest.approx(tracker.get_epsilon())
+
+
+@pytest.mark.dp
+def test_combine_epsilon_ignores_inactive_trackers() -> None:
+    """Zero-step trackers contribute nothing; no active trackers means zero epsilon."""
+    from privacy.privacy_accountant import PrivacyBudgetTracker, combine_epsilon
+
+    idle = PrivacyBudgetTracker(target_epsilon=1.0, sigma=1.0)
+    active = PrivacyBudgetTracker(target_epsilon=1e6, sigma=2.0)
+    active.steps = 5
+
+    assert combine_epsilon([], delta=1e-5) == 0.0
+    assert combine_epsilon([idle], delta=1e-5) == 0.0
+    assert combine_epsilon([idle, active], delta=1e-5) == pytest.approx(active.get_epsilon())
+
+
+@pytest.mark.dp
+def test_combine_epsilon_rejects_invalid_delta() -> None:
+    from privacy.privacy_accountant import combine_epsilon
+
+    with pytest.raises(ValueError, match="delta"):
+        combine_epsilon([], delta=0.0)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cut-layer noise (client mechanism)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.dp
+def test_clip_embedding_rows_enforces_bound() -> None:
+    """Rows over the bound are scaled to it; rows under it are untouched."""
+    from privacy.noise_injection import clip_embedding_rows
+
+    emb = torch.zeros(2, 4)
+    emb[0, 0] = 10.0   # norm 10 -> clipped to 1
+    emb[1, 0] = 0.5    # norm 0.5 -> unchanged
+    clipped = clip_embedding_rows(emb, max_norm=1.0)
+
+    norms = clipped.norm(p=2, dim=1)
+    assert norms[0] == pytest.approx(1.0)
+    assert torch.allclose(clipped[1], emb[1])
+    assert (norms <= 1.0 + 1e-6).all()
+
+
+@pytest.mark.dp
+def test_add_gaussian_noise_changes_and_preserves_shape() -> None:
+    from privacy.noise_injection import add_gaussian_noise
+
+    emb = torch.ones(16, 32)
+    noisy = add_gaussian_noise(emb, noise_std=1.0)
+    assert noisy.shape == emb.shape
+    assert not torch.allclose(emb, noisy)
+    assert torch.allclose(emb, torch.ones(16, 32)), "input must not be modified in place"
+
+
+@pytest.mark.dp
+def test_noise_fns_reject_invalid_params() -> None:
+    from privacy.noise_injection import add_gaussian_noise, clip_embedding_rows
+
+    emb = torch.ones(2, 4)
+    with pytest.raises(ValueError, match="max_norm"):
+        clip_embedding_rows(emb, max_norm=0.0)
+    with pytest.raises(ValueError, match="noise_std"):
+        add_gaussian_noise(emb, noise_std=0.0)
