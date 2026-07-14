@@ -113,3 +113,61 @@ class PrivacyBudgetTracker:
         )
         tracker.steps = int(state["steps"])
         return tracker
+
+
+def solve_noise_multiplier(
+    target_epsilon: float,
+    sample_rate: float,
+    steps: int,
+    delta: float = 1e-5,
+    sigma_hi: float = 1e3,
+    tol: float = 1e-3,
+) -> float:
+    """Smallest sigma whose autodp-composed epsilon over ``steps`` stays within budget.
+
+    Uses the exact accounting of :class:`PrivacyBudgetTracker`, so a run of exactly
+    ``steps`` steps at the returned sigma will not trip the tracker. ``get_epsilon`` is
+    monotone decreasing in sigma (more noise -> less epsilon), so we bisect for the least
+    noise (best utility) that is still feasible.
+
+    Args:
+        target_epsilon: Budget ceiling to stay within.
+        sample_rate: Per-step sampling probability (batch_size / dataset_size).
+        steps: Number of optimizer steps that will actually run.
+        delta: DP delta.
+        sigma_hi: Upper bracket for the search; must be feasible.
+        tol: Absolute tolerance on the returned sigma.
+
+    Returns:
+        The least sigma with composed epsilon <= target_epsilon over ``steps`` steps.
+
+    Raises:
+        ValueError: If ``steps`` <= 0, or if ``sigma_hi`` is still over budget.
+    """
+    if steps <= 0:
+        raise ValueError(f"steps must be > 0, got {steps}")
+
+    def eps_at(sigma: float) -> float:
+        tracker = PrivacyBudgetTracker(
+            target_epsilon=target_epsilon,
+            sigma=sigma,
+            sample_rate=sample_rate,
+            delta=delta,
+        )
+        tracker.steps = steps
+        return tracker.get_epsilon()
+
+    if eps_at(sigma_hi) > target_epsilon:
+        raise ValueError(
+            f"sigma_hi={sigma_hi} still exceeds budget "
+            f"(eps={eps_at(sigma_hi):.4f} > {target_epsilon}); raise sigma_hi."
+        )
+
+    lo, hi = 1e-3, sigma_hi
+    while hi - lo > tol:
+        mid = 0.5 * (lo + hi)
+        if eps_at(mid) > target_epsilon:
+            lo = mid  # not enough noise -> need larger sigma
+        else:
+            hi = mid  # feasible -> try less noise
+    return hi  # feasible endpoint

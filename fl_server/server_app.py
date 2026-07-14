@@ -40,9 +40,13 @@ from fl_server.top_model import TopModel
 from baselines.eval_utils import compute_metrics
 from torch.utils.data import TensorDataset, DataLoader
 
-from privacy.dp_wrapper import make_private
+from privacy.dp_wrapper import make_private_with_noise
 
-from privacy.privacy_accountant import PrivacyBudgetExceededError, PrivacyBudgetTracker
+from privacy.privacy_accountant import (
+    PrivacyBudgetExceededError,
+    PrivacyBudgetTracker,
+    solve_noise_multiplier,
+)
 
 app = ServerApp()
 
@@ -109,17 +113,28 @@ def main(grid: Grid, context: Context) -> None:
 
         if dp["enabled"] and not wrapped:
             loader = _make_server_loader(emb_a, emb_b, labels)
-            train_model, train_optimizer, _, priv_engine = make_private(
+            sample_rate = loader.batch_size / len(loader.dataset)
+            # autodp is the authoritative accountant (CLAUDE.md): size the noise against the
+            # SAME accountant that enforces it, over the ACTUAL run length (one optimizer.step
+            # per round => num_rounds steps). This fixes both the horizon mismatch (was calibrating
+            # for dp-epochs, not num_rounds) and the calibrate-with-Opacus/enforce-with-autodp split.
+            sigma = solve_noise_multiplier(
+                target_epsilon=dp["epsilon"],
+                sample_rate=sample_rate,
+                steps=num_rounds,
+                delta=dp["delta"],
+            )
+            train_model, train_optimizer, _, priv_engine = make_private_with_noise(
                 model=top_model, optimizer=optimizer, data_loader=loader,
-                target_epsilon=dp["epsilon"], target_delta=dp["delta"],
-                max_grad_norm=dp["max_grad_norm"], num_epochs=dp["num_epochs"],
+                noise_multiplier=sigma, max_grad_norm=dp["max_grad_norm"],
             )
             wrapped = True
-            log(INFO, "DP wrap OK: N=%d, dp_optimizer=%s", len(loader.dataset), type(train_optimizer).__name__)
+            log(INFO, "DP wrap OK: N=%d, dp_optimizer=%s, sigma=%.4f, horizon=%d steps",
+                len(loader.dataset), type(train_optimizer).__name__, sigma, num_rounds)
             privacy_tracker = PrivacyBudgetTracker(
                 target_epsilon=dp["epsilon"],
-                sigma=float(train_optimizer.noise_multiplier),
-                sample_rate=loader.batch_size / len(loader.dataset),
+                sigma=sigma,
+                sample_rate=sample_rate,
                 delta=dp["delta"],
             )
             
