@@ -507,6 +507,45 @@ def log_client_round(
         mode: "online", "offline", or "disabled". Use "offline"/"disabled" in CI
               or when no wandb login is available.
     """
+    log_client_rounds(
+        run_id,
+        [[step, metrics]],
+        project=project,
+        config=config,
+        name=name,
+        entity=entity,
+        tags=tags,
+        group=group,
+        mode=mode,
+    )
+
+
+def log_client_rounds(
+    run_id: str,
+    entries: list[list],
+    *,
+    project: str,
+    config: dict[str, Any] | None = None,
+    name: str | None = None,
+    entity: str | None = "jayquery",
+    tags: list[str] | None = None,
+    group: str | None = None,
+    mode: str = "online",
+) -> None:
+    """Batched variant of log_client_round: one init/log/finish for many rounds.
+
+    Each entry is a ``[step, metrics]`` pair; steps must be monotonically
+    increasing across the batch. Buffer entries client-side and flush them here
+    every few rounds — the init/finish network cycle dominates per-call cost,
+    so batching cuts wall-clock overhead roughly by the batch size.
+
+    Args:
+        run_id: Stable run id; the same value must be used for every flush.
+        entries: List of [step, metrics] pairs, oldest first.
+        (remaining args as in log_client_round)
+    """
+    if not entries:
+        return
     wandb = _require_wandb()
     run = None
     try:
@@ -522,13 +561,14 @@ def log_client_round(
             mode=mode,
             settings=wandb.Settings(reinit="create_new"),
         )
-        kwargs = {"step": step} if step is not None else {}
-        run.log(metrics, **kwargs)
+        for step, metrics in entries:
+            kwargs = {"step": int(step)} if step is not None else {}
+            run.log(metrics, **kwargs)
     except Exception:  # noqa: BLE001 — telemetry must not break the FL round
         logger.warning(
-            "wandb client-round logging failed (run_id=%s, step=%s); continuing.",
+            "wandb client-round logging failed (run_id=%s, %d entries); continuing.",
             run_id,
-            step,
+            len(entries),
             exc_info=True,
         )
     finally:

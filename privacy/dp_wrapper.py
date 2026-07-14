@@ -1,156 +1,69 @@
-"""Opacus Differential Privacy wrapper for Bottom Model optimizers.
+"""Opacus DP-SGD wrapper for the SERVER top model.
 
 Owner: Wyatt Wilfong
-Status: SCAFFOLD — implement make_private() in Week 4.
 
-This module wraps a PyTorch model+optimizer pair with Opacus PrivacyEngine,
-enabling DP-SGD training with per-sample gradient clipping and Gaussian noise.
+The noise multiplier is chosen by the caller (via
+``privacy.privacy_accountant.solve_noise_multiplier``) so that autodp — the
+accountant that ENFORCES the budget — is also the one that sizes the noise.
+No Opacus PrivacyEngine or DataLoader is involved: the server drives its own
+training loop, so the model/optimizer are wrapped directly.
 
 References:
   - Abadi et al. 2016 (CCS) — DP-SGD algorithm
-  - Opacus docs: https://opacus.ai/tutorials/
-  - CLAUDE.md DP Wrapper Contract (Section "Key Interfaces")
 """
 
+import warnings
 
 import torch
 import torch.nn as nn
-from opacus import PrivacyEngine
 from opacus.grad_sample import GradSampleModule
 from opacus.optimizers import DPOptimizer
-from torch.utils.data import DataLoader
 
-
-def make_private(
-    model: nn.Module,
-    optimizer: torch.optim.Optimizer,
-    data_loader: DataLoader,
-    target_epsilon: float,
-    target_delta: float,
-    max_grad_norm: float,
-    num_epochs: int,
-) -> tuple[GradSampleModule, DPOptimizer, DataLoader, PrivacyEngine]:
-    """Wrap model, optimizer, and data_loader with Opacus PrivacyEngine.
-
-    After calling this function, use the returned dp_model, dp_optimizer, and
-    dp_loader IN PLACE of the originals. The dp_optimizer automatically adds
-    calibrated Gaussian noise and clips per-sample gradients.
-
-    Args:
-        model: The Bottom Model to wrap (must be a standard nn.Module with no
-               custom autograd functions — Opacus requirement).
-        optimizer: The Adam/SGD optimizer for the model.
-        data_loader: Training DataLoader (will be replaced with Opacus version
-                     that uses UniformWithReplacementSampler).
-        target_epsilon: Target privacy budget (e.g., 1.0). Lower = more private.
-        target_delta: Probability of epsilon-DP failure (e.g., 1e-5).
-        max_grad_norm: Per-sample gradient clipping threshold (e.g., 1.0).
-        num_epochs: Total training epochs (needed to compute noise_multiplier).
-
-    Returns:
-        Tuple of (dp_model, dp_optimizer, dp_loader).
-
-    Raises:
-        ValueError: If target_epsilon <= 0 or target_delta <= 0.
-        RuntimeError: If the model contains incompatible layers (e.g., BatchNorm
-                      must be replaced with GroupNorm for Opacus compatibility).
-
-    Example (from CLAUDE.md):
-        dp_model, dp_optimizer, dp_loader = make_private(
-            model=self.model, optimizer=self.optimizer,
-            data_loader=self.train_loader,
-            target_epsilon=1.0, target_delta=1e-5,
-            max_grad_norm=1.0, num_epochs=10,
-        )
-
-    TODO (Wyatt, Week 4 — Steps 2–3 in CLAUDE.md DP guide):
-        1. Validate inputs: raise ValueError if epsilon <= 0 or delta <= 0.
-        2. Create PrivacyEngine instance.
-        3. Call privacy_engine.make_private_with_epsilon() with all parameters.
-        4. Return (dp_model, dp_optimizer, dp_loader).
-
-        Exact Opacus call pattern (from CLAUDE.md):
-            privacy_engine = PrivacyEngine()
-            dp_model, dp_optimizer, dp_loader = privacy_engine.make_private_with_epsilon(
-                module=model,
-                optimizer=optimizer,
-                data_loader=data_loader,
-                target_epsilon=target_epsilon,
-                target_delta=target_delta,
-                epochs=num_epochs,
-                max_grad_norm=max_grad_norm,
-            )
-
-    NOTE: If Opacus raises 'BatchNorm not supported', tell Alex — he will replace
-          BatchNorm1d with GroupNorm in the Bottom Models.
-    """
-    if target_epsilon <= 0:
-        raise ValueError(f"target_epsilon must be > 0, got {target_epsilon}")
-    if target_delta <= 0:
-        raise ValueError(f"target_delta must be > 0, got {target_delta}")
-    
-    priv_engine = PrivacyEngine()
-    dp_model, dp_optimizer, dp_loader = priv_engine.make_private_with_epsilon(module = model, 
-                                                                              optimizer = optimizer, 
-                                                                              data_loader = data_loader, 
-                                                                              target_epsilon = target_epsilon, 
-                                                                              target_delta = target_delta, 
-                                                                              epochs = num_epochs, 
-                                                                              max_grad_norm = max_grad_norm)
-    return dp_model, dp_optimizer, dp_loader, priv_engine
+# Opacus GradSampleModule registers non-full backward hooks by design and never
+# reads the grad_input the deprecation warning is about — safe to silence.
+warnings.filterwarnings(
+    "ignore", message="Using a non-full backward hook", category=FutureWarning
+)
 
 
 def make_private_with_noise(
     model: nn.Module,
     optimizer: torch.optim.Optimizer,
-    data_loader: DataLoader,
     noise_multiplier: float,
     max_grad_norm: float,
-) -> tuple[GradSampleModule, DPOptimizer, DataLoader, PrivacyEngine]:
-    """Wrap with a caller-chosen noise multiplier (autodp owns the accounting).
+    expected_batch_size: int,
+) -> tuple[GradSampleModule, DPOptimizer]:
+    """Wrap model + optimizer for DP-SGD with a caller-chosen noise multiplier.
 
-    Unlike :func:`make_private` (which calls ``make_private_with_epsilon`` and lets Opacus
-    size the noise with its own accountant), this pins ``noise_multiplier`` so the accountant
-    that ENFORCES the budget (autodp ``PrivacyBudgetTracker``) is the same one used to CHOOSE
-    the noise. Pair it with ``privacy.privacy_accountant.solve_noise_multiplier``.
+    Use the returned pair in place of the originals; unwrap saved weights via
+    ``dp_model._module.state_dict()``. Accounting is autodp's job — pass the same
+    ``noise_multiplier`` and sample rate to ``PrivacyBudgetTracker``.
 
     Args:
-        model: The top model to wrap (standard nn.Module, no custom autograd Functions).
-        optimizer: The Adam/SGD optimizer for the model.
-        data_loader: Training DataLoader (Opacus replaces the sampler).
-        noise_multiplier: sigma = noise_std / max_grad_norm. Must be > 0.
-        max_grad_norm: Per-sample gradient clipping threshold. Must be > 0.
+        model: Top model (standard nn.Module, no custom autograd Functions).
+        optimizer: Optimizer for the model.
+        noise_multiplier: sigma = noise_std / max_grad_norm.
+        max_grad_norm: Per-sample gradient clipping threshold.
+        expected_batch_size: Expected rows per step (sample_rate * dataset size).
 
     Returns:
-        Tuple of (dp_model, dp_optimizer, dp_loader, priv_engine).
+        Tuple of (dp_model, dp_optimizer).
 
     Raises:
-        ValueError: If noise_multiplier <= 0 or max_grad_norm <= 0.
+        ValueError: If noise_multiplier, max_grad_norm, or expected_batch_size is <= 0.
     """
     if noise_multiplier <= 0:
         raise ValueError(f"noise_multiplier must be > 0, got {noise_multiplier}")
     if max_grad_norm <= 0:
         raise ValueError(f"max_grad_norm must be > 0, got {max_grad_norm}")
+    if expected_batch_size <= 0:
+        raise ValueError(f"expected_batch_size must be > 0, got {expected_batch_size}")
 
-    priv_engine = PrivacyEngine()
-    dp_model, dp_optimizer, dp_loader = priv_engine.make_private(
-        module=model,
+    dp_model = GradSampleModule(model)
+    dp_optimizer = DPOptimizer(
         optimizer=optimizer,
-        data_loader=data_loader,
         noise_multiplier=noise_multiplier,
         max_grad_norm=max_grad_norm,
+        expected_batch_size=expected_batch_size,
     )
-    return dp_model, dp_optimizer, dp_loader, priv_engine
-
-
-def get_current_epsilon(priv_engine: PrivacyEngine, delta: float = 1e-5) -> float:
-    """Query the current epsilon expenditure from a DP-wrapped optimizer.
-
-    Args:
-        priv_engine: A PrivacyEngine instance.
-        delta: The delta value used during training (should match target_delta).
-
-    Returns:
-        Current epsilon (float). Increases monotonically with training steps.
-    """
-    return priv_engine.get_epsilon(delta=delta)  # type: ignore[return-value]
+    return dp_model, dp_optimizer

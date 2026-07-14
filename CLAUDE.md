@@ -37,7 +37,7 @@ Current design:
    *before send*, in `fl_client/common.py:generate_embeddings`, gated on a config flag. Implemented in
    `privacy/noise_injection.py`. This is the client-side DP mechanism.
 2. **Server → DP-SGD.** The top model has a real `loss.backward()`, so Opacus DP-SGD works there
-   unmodified. `privacy/dp_wrapper.py:make_private` is applied in `fl_server/`. Firm deliverable.
+   unmodified. `privacy/dp_wrapper.py:make_private_with_noise` is applied in `fl_server/`. Firm deliverable.
 3. **No client-side Opacus.** Bottom models are plain `nn.Module`s trained via injected gradients.
 4. **Accounting → autodp.** Cumulative epsilon is composed with autodp over persisted *primitives*
    (`sigma`, `sensitivity`, `steps`). **Never persist a live `PrivacyEngine`** — `context.state` holds
@@ -77,7 +77,7 @@ jayquery/
 ├── privacy/                    ← cut-layer noise, autodp budget tracker, server DP-SGD wrapper   [Wyatt]
 │   ├── noise_injection.py      ← cut-layer Gaussian noise (client DP mechanism)
 │   ├── privacy_accountant.py   ← PrivacyBudgetTracker (autodp-based)
-│   └── dp_wrapper.py           ← make_private (Opacus) — applied to the SERVER top model
+│   └── dp_wrapper.py           ← make_private_with_noise (Opacus) — applied to the SERVER top model
 ├── attack/                     ← iDLG inversion attack, label inference, gradient monitor   [Wyatt]
 ├── baselines/                  ← centralized ML baselines, eval utilities   [Alex]
 ├── utils/                      ← reproducibility seed, wandb helpers, config loader   [Shared]
@@ -186,25 +186,39 @@ pytest tests/ -v --cov=. --cov-report=term-missing
 
 Current keys (defaults):
 ```
-num-server-rounds = 50
-learning-rate     = 1e-3
-embedding-dim     = 32
-input-dim-a       = 18      # 6 encoded + 12 region one-hots (drop-first) — matches prepare_silos.py
-input-dim-b       = 27      # 7 assessment/VLE stats + 20 vle_clicks_* — matches prepare_silos.py
-processed-dir     = "data/processed"
-dp-enabled        = false   # ⚠ see note
-dp-epsilon        = 1.0
-dp-delta          = 1e-5
-dp-max-grad-norm  = 1.0
-dp-epochs         = 10
+num-server-rounds        = 50
+learning-rate            = 1e-2
+embedding-dim            = 32
+input-dim-a              = 18     # 6 encoded + 12 region one-hots (drop-first) — matches prepare_silos.py
+input-dim-b              = 27     # 7 assessment/VLE stats + 20 vle_clicks_* — matches prepare_silos.py
+processed-dir            = "data/processed"
+seed                     = 42     # also seeds the per-round batch selection
+batch-sample-rate        = 0.1    # Poisson sampling rate q; 1.0 = full-batch rounds
+server-dp-enabled        = true   # server DP-SGD (Opacus mechanics, autodp accounting)
+server-dp-epsilon        = 1.0
+server-dp-delta          = 1e-5
+server-dp-max-grad-norm  = 1.0
+cut-noise-enabled        = true   # client cut-layer noise
+cut-noise-target-epsilon = 1.0
+cut-noise-delta          = 1e-5
+cut-noise-max-norm       = 1.0    # per-row embedding L2 clip = the mechanism's sensitivity
+combined-target-epsilon  = 3.0    # backstop on the composed (all-sources) epsilon
+track-wandb              = true
+wandb-log-interval       = 10     # client wandb flush cadence (rounds); <=1 = every round
 ```
 
-> **⚠ Config in flux — names NOT final.** `dp-enabled` currently gated the (now-removed) client-side DP
-> block in `common.py`. Under the redesign the client mechanism is cut-layer noise, so `dp-enabled` is a
-> stale usage site and will likely be **replaced** by a client `cut-noise-*` flag (e.g. `cut-noise-enabled`,
-> `cut-noise-epsilon`, `cut-noise-sensitivity`) plus a separate server `dp-*` flag for the M8 DP-SGD path.
-> Do not treat these key names as settled; confirm against `pyproject.toml` when wiring, and update this
-> section when they're finalized.
+Mini-batching: the server sends a per-round `batch-seed` + `batch-sample-rate`; both silos
+Poisson-sample the **same** rows of the PSI-aligned training set from that seed. Both accountants
+carry the same `sample_rate`, so subsampling amplification keeps the composed epsilon low. Noise for
+both mechanisms is sized with `solve_noise_multiplier` over the full `num-server-rounds` horizon.
+Budget gating: each source checks `would_exceed()` before spending, and the server additionally
+gates on the prospective **combined** epsilon (`combined-target-epsilon`) at the end of each round;
+if ANY gate trips, the server stops the whole run and pushes a `stop-run` message so clients
+checkpoint. The clip is part of the training graph: `apply_gradients` backprops through
+`clip_embedding_rows`, and eval embeddings are clipped (not noised) so the top model sees the
+training distribution at eval. Client wandb metrics are buffered in `context.state` and uploaded
+in one resume-by-id cycle every `wandb-log-interval` rounds (plus a forced flush on the final
+round and on `stop-run`).
 
 ---
 
@@ -212,11 +226,13 @@ dp-epochs         = 10
 
 ### Cut-layer noise (`privacy/noise_injection.py`) — CLIENT DP mechanism
 ```python
-def add_dp_noise_to_embedding(
-    embedding: torch.Tensor, sensitivity: float, epsilon: float, delta: float = 1e-5,
-) -> torch.Tensor:
-    """Gaussian mechanism: sigma = sensitivity * sqrt(2*ln(1.25/delta)) / epsilon.
-    Returns a NEW noised tensor (no in-place mod). Applied in generate_embeddings before send."""
+def clip_embedding_rows(embedding: torch.Tensor, max_norm: float) -> torch.Tensor:
+    """Row-wise L2 clip enforcing the DP sensitivity bound. Returns a NEW tensor."""
+
+def add_gaussian_noise(embedding: torch.Tensor, noise_std: float) -> torch.Tensor:
+    """Gaussian noise at fixed std = sigma * max_norm, where sigma comes from
+    solve_noise_multiplier over the run horizon. Returns a NEW tensor. Applied
+    (after clipping) in generate_embeddings to the SENT embedding only."""
 ```
 
 ### Privacy accounting (`privacy/privacy_accountant.py`)
@@ -227,18 +243,27 @@ class PrivacyBudgetTracker:
     noise multiplier (noise_std / sensitivity — caller does the division; the server passes the
     DP optimizer's noise_multiplier). sample_rate < 1.0 applies Poisson-subsampling amplification
     (mini-batch); 1.0 uses exact Gaussian composition. step() advances a round; raises
-    PrivacyBudgetExceededError (defined HERE, not dp_wrapper) past target_epsilon.
-    to_dict()/from_dict() persist plain primitives for context.state."""
+    PrivacyBudgetExceededError (defined HERE, not dp_wrapper) past target_epsilon;
+    would_exceed(n=1) gates BEFORE spending. to_dict()/from_dict() persist plain
+    primitives for context.state."""
+
+def solve_noise_multiplier(target_epsilon, sample_rate, steps, delta=1e-5, ...) -> float:
+    """Least sigma whose autodp-composed epsilon over `steps` stays within budget."""
+
+def combine_epsilon(trackers: Sequence[PrivacyBudgetTracker], delta: float) -> float:
+    """The system's true guarantee: composed epsilon across ALL sources
+    (silo A + silo B cut noise + server DP-SGD). This is the reported total."""
 ```
 
 ### Server DP-SGD wrapper (`privacy/dp_wrapper.py`) — SERVER top model only
 ```python
-def make_private(
-    model: nn.Module, optimizer: torch.optim.Optimizer, data_loader: DataLoader,
-    target_epsilon: float, target_delta: float, max_grad_norm: float, num_epochs: int,
-) -> tuple[GradSampleModule, DPOptimizer, DataLoader, PrivacyEngine]:
-    """Returns a 4-TUPLE (dp_model, dp_optimizer, dp_loader, priv_engine). Raises ValueError if
-    epsilon <= 0. NOT used on the clients — bottom models use cut-layer noise instead."""
+def make_private_with_noise(
+    model: nn.Module, optimizer: torch.optim.Optimizer,
+    noise_multiplier: float, max_grad_norm: float, expected_batch_size: int,
+) -> tuple[GradSampleModule, DPOptimizer]:
+    """Loader-free Opacus wrap with a caller-chosen sigma (from solve_noise_multiplier),
+    so autodp both sizes AND enforces the budget. NOT used on the clients — bottom
+    models use cut-layer noise instead. Unwrap weights via dp_model._module."""
 ```
 
 ### Embedding / cut layer

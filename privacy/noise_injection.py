@@ -1,59 +1,48 @@
-"""Manual Gaussian noise injection for embeddings — alternative to DP-SGD.
+"""Cut-layer noise for embeddings — the CLIENT-side DP mechanism.
 
 Owner: Wyatt Wilfong
-Status: SCAFFOLD — implement add_dp_noise_to_embedding() in Week 6.
 
-This module provides a simpler (but less tight) DP mechanism:
-inject noise directly into the embedding tensor at the cut layer,
-rather than using Opacus DP-SGD on the optimizer.
-
-Used in: Experiment 4 (Gaussian vs. Laplace noise comparison).
+Applied in fl_client/common.py:generate_embeddings to the sent embedding only.
+The noise std is sigma * max_norm, where sigma comes from
+``privacy.privacy_accountant.solve_noise_multiplier`` and ``clip_embedding_rows``
+enforces the sensitivity bound the accounting assumes.
 
 References:
   - Dwork & Roth 2014 — Gaussian mechanism (Chapter 3)
-  - CLAUDE.md DP guide Step 5
 """
-
-import math
 
 import torch
 
 
-def add_dp_noise_to_embedding(
-    embedding: torch.Tensor,
-    sensitivity: float,
-    epsilon: float,
-    delta: float = 1e-5,
-) -> tuple[torch.Tensor,float]:
-    """Add calibrated Gaussian noise to an embedding tensor.
-
-    Uses the Gaussian mechanism: noise ~ N(0, sigma^2 * I) where
-    sigma = sensitivity * sqrt(2 * ln(1.25/delta)) / epsilon
+def clip_embedding_rows(embedding: torch.Tensor, max_norm: float) -> torch.Tensor:
+    """Clip each row to L2 norm <= max_norm (enforces the DP sensitivity bound).
 
     Args:
-        embedding: The cut-layer embedding tensor, shape (batch_size, embedding_dim).
-        sensitivity: L2 sensitivity of the embedding function (e.g., max_grad_norm).
-        epsilon: Privacy budget for this noise addition.
-        delta: DP delta parameter. Default 1e-5.
+        embedding: Cut-layer embedding, shape (batch_size, embedding_dim).
+        max_norm: Per-row L2 bound. Must be > 0.
 
     Returns:
-        Noisy embedding tensor of the same shape.
-
-    Raises:
-        ValueError: If epsilon <= 0 or sensitivity <= 0.
-
-    Example:
-        noisy_emb = add_dp_noise_to_embedding(embedding, sensitivity=1.0, epsilon=1.0)
+        A new clipped tensor of the same shape.
     """
+    if max_norm <= 0:
+        raise ValueError(f"max_norm must be > 0, got {max_norm}")
+    norms = embedding.norm(p=2, dim=1, keepdim=True).clamp(min=1e-12)
+    return embedding * (max_norm / norms).clamp(max=1.0)
 
-    if epsilon <= 0:
-        raise ValueError(f"epsilon must be > 0, got {epsilon}")
-    if sensitivity <= 0:
-        raise ValueError(f"sensitivity must be > 0, got {sensitivity}")
 
-    sigma = sensitivity * math.sqrt(2 * math.log(1.25 / delta)) / epsilon
-    noise = torch.randn_like(embedding) * sigma
-    return embedding + noise, sigma
+def add_gaussian_noise(embedding: torch.Tensor, noise_std: float) -> torch.Tensor:
+    """Add Gaussian noise at a fixed std (sigma * sensitivity, caller-computed).
+
+    Args:
+        embedding: Cut-layer embedding tensor (clip rows first).
+        noise_std: Noise standard deviation. Must be > 0.
+
+    Returns:
+        A new noised tensor of the same shape.
+    """
+    if noise_std <= 0:
+        raise ValueError(f"noise_std must be > 0, got {noise_std}")
+    return embedding + torch.randn_like(embedding) * noise_std
 
 
 def add_laplace_noise_to_embedding(
@@ -61,21 +50,15 @@ def add_laplace_noise_to_embedding(
     sensitivity: float,
     epsilon: float,
 ) -> torch.Tensor:
-    """Add calibrated Laplace noise to an embedding tensor.
-
-    Uses the Laplace mechanism: noise ~ Laplace(0, sensitivity/epsilon).
-    Provides pure epsilon-DP (no delta term).
+    """Laplace mechanism (pure epsilon-DP) — kept for the noise-comparison experiment.
 
     Args:
-        embedding: The cut-layer embedding tensor.
+        embedding: Cut-layer embedding tensor.
         sensitivity: L1 sensitivity of the embedding function.
         epsilon: Privacy budget.
 
     Returns:
-        Noisy embedding tensor of the same shape.
-
-    TODO (Wyatt, Week 6): implement using torch.distributions.Laplace.
+        A new noised tensor of the same shape.
     """
     laplace = torch.distributions.Laplace(loc=0.0, scale=sensitivity / epsilon)
-    noise = laplace.sample(embedding.shape)
-    return embedding + noise
+    return embedding + laplace.sample(embedding.shape)

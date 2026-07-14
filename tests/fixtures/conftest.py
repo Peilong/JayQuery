@@ -162,26 +162,27 @@ def make_fake_load_fn(n_rows=20, input_dim=5, seed=0):
 
 @pytest.fixture
 def wandb_calls(monkeypatch):
-    """Spies on the REAL utils.wandb_utils.log_client_round (does not stub the
+    """Spies on the REAL utils.wandb_utils.log_client_rounds (does not stub the
     module — if utils.wandb_utils doesn't exist or its signature has changed,
     this fixture will fail loudly via ImportError/AttributeError, as it should).
 
-    Returns a list that fills with one dict of kwargs per log_client_round call.
+    Returns a list that fills with one dict of kwargs per log_client_rounds
+    call (one call per buffer flush; kwargs["entries"] is [step, metrics] pairs).
     """
     import utils.wandb_utils as wandb_utils_module
 
     calls: list[dict] = []
 
-    def _spy(**kwargs):
-        calls.append(kwargs)
+    def _spy(run_id, entries, **kwargs):
+        calls.append({"run_id": run_id, "entries": entries, **kwargs})
 
-    monkeypatch.setattr(wandb_utils_module, "log_client_round", _spy)
-    # common.py does `from utils.wandb_utils import log_client_round` — patch
+    monkeypatch.setattr(wandb_utils_module, "log_client_rounds", _spy)
+    # common.py does `from utils.wandb_utils import log_client_rounds` — patch
     # the bound name inside fl_client.common too, since rebinding the
     # attribute on the source module doesn't affect an already-imported name.
     import fl_client.common as common_module
 
-    monkeypatch.setattr(common_module, "log_client_round", _spy)
+    monkeypatch.setattr(common_module, "log_client_rounds", _spy)
     return calls
 
 
@@ -211,6 +212,7 @@ def fresh_context():
                 "embedding-dim": 4,
                 "track-wandb": True,
                 "wandb-mode": "offline",
+                "wandb-log-interval": 1,  # tests observe every _log immediately
                 **(run_config or {}),
             },
             node_config=node_config or {},
