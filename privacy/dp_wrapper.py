@@ -100,6 +100,49 @@ def make_private(
     return dp_model, dp_optimizer, dp_loader, priv_engine
 
 
+def make_private_with_noise(
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    data_loader: DataLoader,
+    noise_multiplier: float,
+    max_grad_norm: float,
+) -> tuple[GradSampleModule, DPOptimizer, DataLoader, PrivacyEngine]:
+    """Wrap with a caller-chosen noise multiplier (autodp owns the accounting).
+
+    Unlike :func:`make_private` (which calls ``make_private_with_epsilon`` and lets Opacus
+    size the noise with its own accountant), this pins ``noise_multiplier`` so the accountant
+    that ENFORCES the budget (autodp ``PrivacyBudgetTracker``) is the same one used to CHOOSE
+    the noise. Pair it with ``privacy.privacy_accountant.solve_noise_multiplier``.
+
+    Args:
+        model: The top model to wrap (standard nn.Module, no custom autograd Functions).
+        optimizer: The Adam/SGD optimizer for the model.
+        data_loader: Training DataLoader (Opacus replaces the sampler).
+        noise_multiplier: sigma = noise_std / max_grad_norm. Must be > 0.
+        max_grad_norm: Per-sample gradient clipping threshold. Must be > 0.
+
+    Returns:
+        Tuple of (dp_model, dp_optimizer, dp_loader, priv_engine).
+
+    Raises:
+        ValueError: If noise_multiplier <= 0 or max_grad_norm <= 0.
+    """
+    if noise_multiplier <= 0:
+        raise ValueError(f"noise_multiplier must be > 0, got {noise_multiplier}")
+    if max_grad_norm <= 0:
+        raise ValueError(f"max_grad_norm must be > 0, got {max_grad_norm}")
+
+    priv_engine = PrivacyEngine()
+    dp_model, dp_optimizer, dp_loader = priv_engine.make_private(
+        module=model,
+        optimizer=optimizer,
+        data_loader=data_loader,
+        noise_multiplier=noise_multiplier,
+        max_grad_norm=max_grad_norm,
+    )
+    return dp_model, dp_optimizer, dp_loader, priv_engine
+
+
 def get_current_epsilon(priv_engine: PrivacyEngine, delta: float = 1e-5) -> float:
     """Query the current epsilon expenditure from a DP-wrapped optimizer.
 
