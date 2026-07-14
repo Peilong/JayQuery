@@ -21,10 +21,6 @@ from opacus.optimizers import DPOptimizer
 from torch.utils.data import DataLoader
 
 
-class PrivacyBudgetExceededError(Exception):
-    """Raised when the cumulative epsilon expenditure exceeds the target budget."""
-
-
 def make_private(
     model: nn.Module,
     optimizer: torch.optim.Optimizer,

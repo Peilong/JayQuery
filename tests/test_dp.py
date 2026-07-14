@@ -85,40 +85,101 @@ def test_dp_wrapper_rejects_invalid_delta() -> None:
 @pytest.mark.dp
 def test_accountant_budget_exceeded() -> None:
     """PrivacyBudgetTracker raises PrivacyBudgetExceededError when over budget.
-    Expected: PASSES after Week 5 step() implementation.
 
     NOTE: This test mocks get_epsilon() to force a budget exceeded condition.
     """
     from unittest.mock import patch
 
-    from privacy.dp_wrapper import PrivacyBudgetExceededError
-    from privacy.privacy_accountant import PrivacyBudgetTracker
+    from privacy.privacy_accountant import PrivacyBudgetExceededError, PrivacyBudgetTracker
 
-    tracker = PrivacyBudgetTracker(
-        target_epsilon=1.0, delta=1e-5,
-        num_epochs=5, batch_size=32, dataset_size=200,
-    )
-    
+    tracker = PrivacyBudgetTracker(target_epsilon=1.0, sigma=1.0, delta=1e-5)
+
     # Patch get_epsilon to simulate exceeding the budget
     with patch.object(tracker, "get_epsilon", return_value=1.5):
         with pytest.raises(PrivacyBudgetExceededError):
             tracker.step()
     print("\n✅  PrivacyBudgetExceededError raised correctly")
 
+
 @pytest.mark.dp
 def test_accountant_get_epsilon() -> None:
-    """PrivacyBudgetTracker.get_epsilon() returns a float.
-    """
+    """PrivacyBudgetTracker.get_epsilon() returns a float."""
     from privacy.privacy_accountant import PrivacyBudgetTracker
 
-    tracker = PrivacyBudgetTracker(
-        target_epsilon=1.0, delta=1e-5,
-        num_epochs=5, batch_size=32, dataset_size=200,
-    )
-    tracker._round = 1
+    tracker = PrivacyBudgetTracker(target_epsilon=1.0, sigma=1.0, delta=1e-5)
+    tracker.steps = 2
     eps = tracker.get_epsilon()
     assert isinstance(eps, float), f"get_epsilon() returned {type(eps)}, expected float"
     print(f"\n✅  get_epsilon() returned a float: {eps:.4f}")
+
+
+@pytest.mark.dp
+def test_accountant_epsilon_monotone_sublinear() -> None:
+    """Epsilon grows monotonically and sub-linearly in steps (composition sanity)."""
+    from privacy.privacy_accountant import PrivacyBudgetTracker
+
+    tracker = PrivacyBudgetTracker(target_epsilon=1e6, sigma=2.0, delta=1e-5)
+    assert tracker.get_epsilon() == 0.0, "epsilon must be 0.0 before any step"
+
+    eps_seen = []
+    for _ in range(100):
+        tracker.step()
+        eps_seen.append(tracker.get_epsilon())
+
+    assert all(b >= a for a, b in zip(eps_seen, eps_seen[1:])), "epsilon must be monotone"
+    assert eps_seen[99] < 100 * eps_seen[0], (
+        f"eps(100)={eps_seen[99]:.4f} must be < 100 * eps(1)={eps_seen[0]:.4f} — "
+        "composition should grow sub-linearly"
+    )
+
+
+@pytest.mark.dp
+def test_accountant_subsampling_tightens_epsilon() -> None:
+    """Mini-batch (sample_rate < 1) yields lower epsilon than full-batch at equal sigma/steps."""
+    from privacy.privacy_accountant import PrivacyBudgetTracker
+
+    full = PrivacyBudgetTracker(target_epsilon=1e6, sigma=2.0, sample_rate=1.0, delta=1e-5)
+    mini = PrivacyBudgetTracker(target_epsilon=1e6, sigma=2.0, sample_rate=0.1, delta=1e-5)
+    full.steps = mini.steps = 50
+
+    eps_full, eps_mini = full.get_epsilon(), mini.get_epsilon()
+    assert eps_mini < eps_full, (
+        f"subsampled eps ({eps_mini:.4f}) should beat full-batch eps ({eps_full:.4f})"
+    )
+    print(f"\n✅  50 steps @ sigma=2.0: full-batch eps={eps_full:.4f}, q=0.1 eps={eps_mini:.4f}")
+
+
+@pytest.mark.dp
+def test_accountant_state_roundtrip() -> None:
+    """to_dict()/from_dict() rebuild an identical tracker from plain primitives."""
+    from privacy.privacy_accountant import PrivacyBudgetTracker
+
+    tracker = PrivacyBudgetTracker(target_epsilon=5.0, sigma=1.5, sample_rate=0.25, delta=1e-5)
+    tracker.steps = 7
+
+    state = tracker.to_dict()
+    assert all(isinstance(v, int | float) for v in state.values()), (
+        "persisted state must be plain primitives only"
+    )
+
+    restored = PrivacyBudgetTracker.from_dict(state)
+    assert restored.steps == tracker.steps
+    assert restored.get_epsilon() == pytest.approx(tracker.get_epsilon())
+
+
+@pytest.mark.dp
+def test_accountant_rejects_invalid_params() -> None:
+    """Constructor validates target_epsilon, sigma, sample_rate, and delta."""
+    from privacy.privacy_accountant import PrivacyBudgetTracker
+
+    with pytest.raises(ValueError, match="target_epsilon"):
+        PrivacyBudgetTracker(target_epsilon=0.0)
+    with pytest.raises(ValueError, match="sigma"):
+        PrivacyBudgetTracker(target_epsilon=1.0, sigma=-1.0)
+    with pytest.raises(ValueError, match="sample_rate"):
+        PrivacyBudgetTracker(target_epsilon=1.0, sample_rate=1.5)
+    with pytest.raises(ValueError, match="delta"):
+        PrivacyBudgetTracker(target_epsilon=1.0, delta=0.0)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -23,7 +23,7 @@ TODO:
 - Implement Validation Rounds
 """
 
-from logging import INFO
+from logging import INFO, WARNING
 
 import torch
 from flwr.app import Array, ArrayRecord, ConfigRecord, Context, Message, RecordDict
@@ -42,7 +42,7 @@ from torch.utils.data import TensorDataset, DataLoader
 
 from privacy.dp_wrapper import make_private
 
-from privacy.privacy_accountant import PrivacyBudgetTracker
+from privacy.privacy_accountant import PrivacyBudgetExceededError, PrivacyBudgetTracker
 
 app = ServerApp()
 
@@ -92,11 +92,7 @@ def main(grid: Grid, context: Context) -> None:
         
     eps_tag = f"eps_{dp['epsilon']}" if dp["enabled"] else "eps_inf"
 
-    dp = _server_dp_config(context)      # the Step 1 config helper
-    train_model, train_optimizer, priv_engine = top_model, optimizer, None
-    wrapped = False 
-    privacy_tracker = PrivacyBudgetTracker()
-    sample_rate = 1.0  # full-batch training on server, so sample_rate = 1.0
+    privacy_tracker: PrivacyBudgetTracker | None = None
 
     for round_num in range(1, num_rounds + 1):
         log(INFO, "")
@@ -120,6 +116,12 @@ def main(grid: Grid, context: Context) -> None:
             )
             wrapped = True
             log(INFO, "DP wrap OK: N=%d, dp_optimizer=%s", len(loader.dataset), type(train_optimizer).__name__)
+            privacy_tracker = PrivacyBudgetTracker(
+                target_epsilon=dp["epsilon"],
+                sigma=float(train_optimizer.noise_multiplier),
+                sample_rate=loader.batch_size / len(loader.dataset),
+                delta=dp["delta"],
+            )
             
         emb_a = emb_a.detach().requires_grad_(True)
         emb_b = emb_b.detach().requires_grad_(True)
@@ -142,8 +144,22 @@ def main(grid: Grid, context: Context) -> None:
         log(INFO, "Round %d — loss: %.4f", round_num, float(loss))
         losses.append((round_num, float(loss)))
 
+        budget_exhausted = False
+        server_epsilon = None
+        if privacy_tracker is not None:
+            try:
+                privacy_tracker.step()
+            except PrivacyBudgetExceededError as err:
+                log(WARNING, "%s — stopping training after round %d", err, round_num)
+                budget_exhausted = True
+            server_epsilon = privacy_tracker.get_epsilon()
+            log(INFO, "Round %d — cumulative server epsilon: %.4f", round_num, server_epsilon)
+
         if track:
-            wandb.log({"train/loss": float(loss)}, step=round_num)
+            metrics = {"train/loss": float(loss)}
+            if server_epsilon is not None:
+                metrics["privacy/server_epsilon"] = server_epsilon
+            wandb.log(metrics, step=round_num)
             if round_num%10==0:
                 eval_model = TopModel(embedding_dim=embedding_dim)
                 src = train_model._module if dp["enabled"] else top_model
@@ -151,6 +167,9 @@ def main(grid: Grid, context: Context) -> None:
                 val_metrics = _run_eval(grid, node_ids, eval_model, split="val")
                 wandb.log({"val/auc": float(val_metrics["auc_roc"])}, step=round_num)
     
+        if budget_exhausted:
+            break
+
         _send_gradients(
             grid=grid,
             node_pos_map=node_pos_map,
@@ -173,6 +192,7 @@ def main(grid: Grid, context: Context) -> None:
     
     meta = {
         "epsilon": dp["epsilon"] if dp["enabled"] else None,
+        "server_epsilon_spent": privacy_tracker.get_epsilon() if privacy_tracker else None,
         "delta": dp["delta"],
         "embedding_dim": embedding_dim,
         "num_rounds": num_rounds,

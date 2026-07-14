@@ -222,9 +222,13 @@ def add_dp_noise_to_embedding(
 ### Privacy accounting (`privacy/privacy_accountant.py`)
 ```python
 class PrivacyBudgetTracker:
-    """autodp-based cumulative-epsilon accountant. Holds plain primitives (sigma, sensitivity,
-    steps); does NOT hold a live PrivacyEngine. step() advances a round; get_epsilon() composes
-    a GaussianMechanism via autodp Composition; raises PrivacyBudgetExceededError past target_epsilon."""
+    """autodp-based cumulative-epsilon accountant. Holds plain primitives (sigma, sample_rate,
+    steps, delta, target_epsilon); does NOT hold a live PrivacyEngine. sigma is the normalized
+    noise multiplier (noise_std / sensitivity — caller does the division; the server passes the
+    DP optimizer's noise_multiplier). sample_rate < 1.0 applies Poisson-subsampling amplification
+    (mini-batch); 1.0 uses exact Gaussian composition. step() advances a round; raises
+    PrivacyBudgetExceededError (defined HERE, not dp_wrapper) past target_epsilon.
+    to_dict()/from_dict() persist plain primitives for context.state."""
 ```
 
 ### Server DP-SGD wrapper (`privacy/dp_wrapper.py`) — SERVER top model only

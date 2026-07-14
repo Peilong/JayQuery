@@ -1,66 +1,67 @@
-"""Privacy Budget Accountant — tracks cumulative epsilon across training rounds.
+"""Privacy budget accountant — composes cumulative epsilon with autodp.
 
 Owner: Wyatt Wilfong
-Status: SCAFFOLD — implement PrivacyBudgetTracker in Week 5.
+
+Epsilon is always recomputed from plain primitives (sigma, sample_rate, steps),
+never accumulated, so tracker state survives serialization in context.state.
 
 References:
   - Mironov 2017 (CSF) — Rényi DP composition
 """
 
-from privacy.dp_wrapper import PrivacyBudgetExceededError
-from autodp import mechanism_zoo
-from autodp import transformer_zoo
+from __future__ import annotations
+
+from autodp import mechanism_zoo, transformer_zoo
+
+
+class PrivacyBudgetExceededError(Exception):
+    """Raised when the cumulative epsilon expenditure exceeds the target budget."""
+
 
 class PrivacyBudgetTracker:
-    """Tracks per-round epsilon expenditure and raises an error when budget is exhausted.
+    """autodp-based cumulative-epsilon accountant over plain primitives.
 
-    Usage:
-        tracker = PrivacyBudgetTracker(
-            target_epsilon=1.0, delta=1e-5,
-            num_epochs=10, batch_size=64, dataset_size=5000
-        )
-        for round in range(num_rounds):
-            tracker.step()
-            current_eps = tracker.get_epsilon()
-            print(f"Round {round}: epsilon = {current_eps:.4f}")
+    ``sigma`` is the normalized noise multiplier (noise_std / sensitivity) —
+    callers do the division: the server passes the DP optimizer's
+    ``noise_multiplier``; the client cut layer passes ``noise_std / sensitivity``.
+    ``sample_rate < 1.0`` applies Poisson-subsampling amplification (mini-batch);
+    ``1.0`` uses exact Gaussian composition (full-batch).
 
     Args:
-        target_epsilon: Maximum allowable epsilon. Training stops when exceeded.
-        delta: DP delta parameter (e.g., 1e-5).
-        num_epochs: Total training epochs.
-        batch_size: Mini-batch size.
-        dataset_size: Total number of training samples.
-
+        target_epsilon: Budget ceiling; step() raises past it.
+        sigma: Noise multiplier of the per-step Gaussian mechanism.
+        sample_rate: Per-step sampling probability (batch_size / dataset_size).
+        delta: DP delta parameter.
     """
 
     def __init__(
         self,
         target_epsilon: float,
         sigma: float = 1.0,
-        sensitivity: float = 1.0,
+        sample_rate: float = 1.0,
         delta: float = 1e-5,
-        num_epochs: int = 10,
-        batch_size: int = 64,
-        dataset_size: int = 5000,
     ) -> None:
+        if target_epsilon <= 0:
+            raise ValueError(f"target_epsilon must be > 0, got {target_epsilon}")
+        if sigma <= 0:
+            raise ValueError(f"sigma must be > 0, got {sigma}")
+        if not 0.0 < sample_rate <= 1.0:
+            raise ValueError(f"sample_rate must be in (0, 1], got {sample_rate}")
+        if not 0.0 < delta < 1.0:
+            raise ValueError(f"delta must be in (0, 1), got {delta}")
         self.target_epsilon = target_epsilon
-        self.delta = delta
-        self.num_epochs = num_epochs
-        self.batch_size = batch_size
-        self.dataset_size = dataset_size
-        self._round = 0
         self.sigma = sigma
-
-        # TODO (Wyatt, Week 7): initialize autodp accountant.
+        self.sample_rate = sample_rate
+        self.delta = delta
+        self.steps = 0
 
     def step(self) -> None:
-        """Advance the accountant by one training round.
+        """Advance one training step and enforce the budget.
 
         Raises:
-            PrivacyBudgetExceededError: If current epsilon > target_epsilon after this step.
-
+            PrivacyBudgetExceededError: If cumulative epsilon exceeds target_epsilon.
         """
-        self._round += 1
+        self.steps += 1
         current = self.get_epsilon()
         if current > self.target_epsilon:
             raise PrivacyBudgetExceededError(
@@ -68,19 +69,47 @@ class PrivacyBudgetTracker:
             )
 
     def get_epsilon(self) -> float:
-        """Return current cumulative epsilon expenditure.
+        """Recompute cumulative epsilon from the primitives (pure — no mutation).
 
         Returns:
-            Current epsilon as a float.
-
+            Cumulative epsilon at ``delta`` after ``steps`` compositions.
         """
-        if self._round == 0:
+        if self.steps == 0:
             return 0.0
         base = mechanism_zoo.GaussianMechanism(sigma=self.sigma)
-        composed = transformer_zoo.ComposeGaussian().compose(mechanism_list = [base], coeff_list = [self._round])
-        return composed.get_eps(delta=self.delta)
+        if self.sample_rate == 1.0:
+            # Exact composition for homogeneous Gaussians — tighter than the
+            # subsampled RDP bound at q=1.
+            composed = transformer_zoo.ComposeGaussian().compose(
+                mechanism_list=[base], coeff_list=[self.steps]
+            )
+        else:
+            subsampled = transformer_zoo.AmplificationBySampling(PoissonSampling=True)(
+                base, self.sample_rate, improved_bound_flag=True
+            )
+            composed = transformer_zoo.Composition().compose(
+                mechanism_list=[subsampled], coeff_list=[self.steps]
+            )
+        return float(composed.get_eps(delta=self.delta))
 
-    @property
-    def rounds_completed(self) -> int:
-        """Number of training rounds completed so far."""
-        return self._round
+    def to_dict(self) -> dict[str, float | int]:
+        """Plain-primitive state for context.state persistence."""
+        return {
+            "target_epsilon": self.target_epsilon,
+            "sigma": self.sigma,
+            "sample_rate": self.sample_rate,
+            "delta": self.delta,
+            "steps": self.steps,
+        }
+
+    @classmethod
+    def from_dict(cls, state: dict[str, float | int]) -> PrivacyBudgetTracker:
+        """Rebuild a tracker from to_dict() output."""
+        tracker = cls(
+            target_epsilon=float(state["target_epsilon"]),
+            sigma=float(state["sigma"]),
+            sample_rate=float(state["sample_rate"]),
+            delta=float(state["delta"]),
+        )
+        tracker.steps = int(state["steps"])
+        return tracker
