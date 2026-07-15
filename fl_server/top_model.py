@@ -16,19 +16,22 @@ class TopModel(nn.Module):
         embedding_dim: Size of each silo's embedding vector. Default 32.
             The model input will be 2 * embedding_dim.
         dropout_rate: Dropout probability in the hidden layer. Default 0.2.
+        hidden_dim: First hidden layer width; second layer is hidden_dim // 2. Default 64.
     """
 
-    def __init__(self, embedding_dim: int = 32, dropout_rate: float = 0.2) -> None:
+    def __init__(
+        self, embedding_dim: int = 32, dropout_rate: float = 0.2, hidden_dim: int = 64
+    ) -> None:
         super().__init__()
         input_dim = embedding_dim * 2  # concatenate emb_a and emb_b
 
         self.net = nn.Sequential(
-            nn.Linear(input_dim, 64),
+            nn.Linear(input_dim, hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout_rate),
-            nn.Linear(64, 32),
+            nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
-            nn.Linear(32, 1),
+            nn.Linear(hidden_dim // 2, 1),
             # NOTE: no Sigmoid — BCEWithLogitsLoss applies it internally
         )
 

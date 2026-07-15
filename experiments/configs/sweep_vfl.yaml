@@ -1,0 +1,42 @@
+# wandb sweep over the VFL run — consumed by scripts/run_sweep.py.
+# Every key except cutoff-week maps 1:1 to a [tool.flwr.app.config] run-config key;
+# cutoff-week is translated to a per-week processed-dir by prepare_cutoff_week().
+# Metric: val/auc_best, read from the server's meta.json after each trial.
+name: vfl-hparam-sweep
+method: bayes
+metric:
+  name: val/auc_best
+  goal: maximize
+parameters:
+  learning-rate:
+    distribution: log_uniform_values
+    min: 0.0001
+    max: 0.01
+  embedding-dim:
+    values: [16, 32, 64]
+  hidden-dim-a:
+    values: [32, 64, 128]
+  hidden-dim-b:
+    values: [64, 128, 256]
+  hidden-dim-top:
+    values: [32, 64, 128]
+  dropout-a:
+    distribution: uniform
+    min: 0.0
+    max: 0.5
+  dropout-b:
+    distribution: uniform
+    min: 0.0
+    max: 0.5
+  dropout-top:
+    distribution: uniform
+    min: 0.0
+    max: 0.4
+  batch-sample-rate:
+    values: [0.05, 0.1, 0.2, 0.5]
+  grad-clip-norm:
+    values: [0.0, 0.5, 1.0, 2.0]
+  lr-warmup-rounds:
+    values: [0, 10, 25]
+  cutoff-week:
+    values: [1, 3, 5, 8, 10]

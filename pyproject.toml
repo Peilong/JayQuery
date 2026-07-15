@@ -15,8 +15,8 @@ authors = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["utils*", "psi*", "silo_a*", "silo_b*", "baselines*", "fl_client*", "fl_server*", "privacy*", "proto*"]
-exclude = ["data*", "notebooks*", "scripts*", "experiments*", "attack*"]
+include = ["utils*", "psi*", "silo_a*", "silo_b*", "baselines*", "fl_client*", "fl_server*", "privacy*", "proto*", "scripts*"]
+exclude = ["data*", "notebooks*", "experiments*", "attack*"]
 
 [tool.ruff]
 line-length = 100
@@ -29,7 +29,7 @@ lint.ignore = ["ANN101", "ANN102"]
 "notebooks/*" = ["ANN", "E501"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["psi", "silo_a", "silo_b", "fl_server", "fl_client", "privacy", "baselines", "utils", "proto"]
+known-first-party = ["psi", "silo_a", "silo_b", "fl_server", "fl_client", "privacy", "baselines", "utils", "proto", "scripts"]
 
 [tool.mypy]
 python_version = "3.11"
@@ -76,22 +76,44 @@ serverapp = "fl_server.server_app:app"
 clientapp = "fl_client.client_app:app"
 
 [tool.flwr.app.config]
-num-server-rounds = 50
-learning-rate = 1e-2
+num-server-rounds = 150
+learning-rate = 1e-4
 embedding-dim = 32
 input-dim-a = 18
 input-dim-b = 27
+hidden-dim-a = 64
+hidden-dim-b = 128
+hidden-dim-top = 64
+dropout-a = 0.3
+dropout-b = 0.3
+dropout-top = 0.2
+batch-size = 64
 processed-dir = "data/processed"
+run-tag = ""
 seed = 42
-batch-sample-rate = 1
-server-dp-enabled = false
+batch-sample-rate = 0.1
+server-dp-enabled = true
 server-dp-epsilon = 1.0
 server-dp-delta = 1e-5
 server-dp-max-grad-norm = 1.0
-cut-noise-enabled = false
+cut-noise-enabled = true
 cut-noise-target-epsilon = 1.0
 cut-noise-delta = 1e-5
 cut-noise-max-norm = 1.0
 combined-target-epsilon = 3.0
 track-wandb = true
 wandb-log-interval = 25
+wandb-entity = "jayquery"
+wandb-project = "jayquery-vfl"
+wandb-run-name = ""
+wandb-group = ""
+wandb-mode = "online"
+eval-every = 5
+early-stop-patience = 10
+early-stop-min-delta = 0.0001
+lr-warmup-rounds = 25
+lr-warmup-start-factor = 0.1
+lr-plateau-factor = 0.5
+lr-plateau-patience = 3
+lr-min = 0.000001
+grad-clip-norm = 1.0

@@ -13,17 +13,19 @@ from silo_b.data_loader_b import load_silo_b
 SPEC = SiloSpec(
     partition_id=1,  # MUST match _SILO_B_POS in server_app.py
     model_cls=BottomModelB,
-    # NOTE: confirm BottomModelB's actual constructor kwargs match this —
-    # taken from the research plan spec, not verified against real code yet.
     model_kwargs_fn=lambda rc: {
         "input_dim": rc.run_config.get("input-dim-b", 27),
         "embedding_dim": rc.run_config.get("embedding-dim", 32),
+        "dropout_rate": rc.run_config.get("dropout-b", 0.3),
+        "hidden_dim": rc.run_config.get("hidden-dim-b", 128),
     },
     load_fn=load_silo_b,
     sends_labels=False,  # Silo A holds the labels
     wandb_tag="silo_b",
     extra_wandb_config_fn=lambda rc: {
         "input-dim-b": rc.run_config.get("input-dim-b", 27),
+        "dropout-b": rc.run_config.get("dropout-b", 0.3),
+        "hidden-dim-b": rc.run_config.get("hidden-dim-b", 128),
     },
 )
 

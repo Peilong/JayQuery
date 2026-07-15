@@ -59,8 +59,10 @@ def load_silo_b(
     g = torch.Generator()
     g.manual_seed(seed)
 
+    # shuffle=False keeps rows in PSI order — must match Silo A for VFL alignment
+    # and the apply_gradients replay check.
     return (
-        DataLoader(train_ds, batch_size=batch_size, shuffle=True, generator=g),
+        DataLoader(train_ds, batch_size=batch_size, shuffle=False, generator=g),
         DataLoader(val_ds, batch_size=batch_size, shuffle=False),
         DataLoader(test_ds, batch_size=batch_size, shuffle=False),
     )

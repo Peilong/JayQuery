@@ -16,14 +16,16 @@ SPEC = SiloSpec(
     model_kwargs_fn=lambda rc: {
         "input_dim": rc.run_config.get("input-dim-a", 18),
         "embedding_dim": rc.run_config.get("embedding-dim", 32),
-        "dropout_rate": rc.run_config.get("dropout-rate", 0.3),
+        "dropout_rate": rc.run_config.get("dropout-a", 0.3),
+        "hidden_dim": rc.run_config.get("hidden-dim-a", 64),
     },
     load_fn=load_silo_a,
     sends_labels=True,  # Silo A is the active (label-holding) party
     wandb_tag="silo_a",
     extra_wandb_config_fn=lambda rc: {
         "input-dim-a": rc.run_config.get("input-dim-a", 18),
-        "dropout-rate": rc.run_config.get("dropout-rate", 0.3),
+        "dropout-a": rc.run_config.get("dropout-a", 0.3),
+        "hidden-dim-a": rc.run_config.get("hidden-dim-a", 64),
     },
 )
 

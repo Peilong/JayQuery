@@ -26,6 +26,7 @@ class BottomModelA(nn.Module):
         input_dim: Number of input features. Default 18.
         embedding_dim: Output embedding dimension. Default 32.
         dropout_rate: Dropout probability. Default 0.3.
+        hidden_dim: Width of both hidden layers. Default 64.
     """
 
     def __init__(
@@ -33,18 +34,19 @@ class BottomModelA(nn.Module):
         input_dim: int = 18,
         embedding_dim: int = 32,
         dropout_rate: float = 0.3,
+        hidden_dim: int = 64,
     ) -> None:
         super().__init__()
 
         self.encoder = nn.Sequential(
-            nn.Linear(input_dim, 64),
-            nn.BatchNorm1d(64),
+            nn.Linear(input_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout_rate),
-            nn.Linear(64, 64),
-            nn.BatchNorm1d(64),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
             nn.ReLU(),
-            nn.Linear(64, embedding_dim),
+            nn.Linear(hidden_dim, embedding_dim),
             # NOTE: NO activation here — raw embedding for cut layer
         )
 
