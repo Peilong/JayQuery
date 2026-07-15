@@ -14,6 +14,21 @@ Output:
 Usage:
   python scripts/prepare_silos.py
   python scripts/prepare_silos.py --module AAA_2013J --seed 99
+  python scripts/prepare_silos.py --cutoff_week 5           # de-leaked baseline
+  for K in 1 3 5 8 10; do                                   # Experiment 11 sweep
+      python scripts/prepare_silos.py --cutoff_week $K
+  done
+
+TEMPORAL CENSORING (--cutoff_week K)
+    Silo B's VLE and assessment features are aggregated over ALL ~39 course
+    weeks by default, which leaks the label: a student who withdrew in week 4
+    shows near-zero clicks / no submissions for the rest of the term, so the
+    features encode the outcome rather than predict it. Passing --cutoff_week K
+    restricts every Silo B feature to records dated on or before week K, i.e.
+    only what a real early-alert system could know at that point in the term.
+    Leaving it unset reproduces the original (leaky) full-course behavior and is
+    only useful as a deliberate upper-reference; do NOT quote those numbers as a
+    baseline.
 """
 
 import argparse
@@ -51,7 +66,7 @@ def prepare_silo_a_data(module: str, student_info: pd.DataFrame) -> pd.DataFrame
     Returns:
         DataFrame indexed by id_student with encoded features and a binary label column.
     """
-    
+
     df = student_info.copy()
     df["label"] = df["final_result"].isin(["Withdrawn", "Fail"]).astype(int)
     m_code, p_code = module.split("_")
@@ -100,6 +115,7 @@ def prepare_silo_b_data(
     vle: pd.DataFrame,
     assessments: pd.DataFrame,
     student_assessment: pd.DataFrame,
+    cutoff_week: int | None = None,
 ) -> pd.DataFrame:
     """Filter, engineer, and merge Silo B features from studentVle and studentAssessment CSVs.
 
@@ -112,11 +128,18 @@ def prepare_silo_b_data(
         vle: Raw vle DataFrame.
         assessments: Raw assessments DataFrame.
         student_assessment: Raw studentAssessment DataFrame.
+        cutoff_week: If set, only records dated on or before this course week are
+            used (temporal censoring). OULAD dates are days-from-course-start, so
+            the cutoff is cutoff_week * 7 days. If None, all ~39 weeks are used
+            (original full-course behavior — leaks the label; see module docstring).
 
     Returns:
         DataFrame with one row per student containing assessment and VLE features.
+        Output columns are identical regardless of cutoff_week, so all downstream
+        alignment/scaling code is unaffected — only their VALUES are windowed.
     """
     m_code, p_code = module.split("_")
+    cutoff_day = None if cutoff_week is None else cutoff_week * 7
 
     # Derive VLE click columns from all activity types across all modules so the
     # feature set is consistent regardless of which module is being processed.
@@ -133,6 +156,16 @@ def prepare_silo_b_data(
         .drop(columns=["code_module", "code_presentation"])
     )
 
+    # ---- TEMPORAL CENSORING · VLE --------------------------------------------
+    # studentVle.date is days-from-course-start. Keeping only interactions on or
+    # before the cutoff makes every VLE aggregate below "knowable by week K" and
+    # removes the post-withdrawal silence that leaked the label. This single
+    # filter censors BOTH the per-activity click pivot AND the student_stats
+    # block, because both are derived from `merged`.
+    if cutoff_day is not None:
+        merged = merged[merged["date"] <= cutoff_day]
+    # --------------------------------------------------------------------------
+
     activity_clicks = (
         merged.groupby(["id_student", "activity_type"], as_index=False)
         .agg(sum_click=("sum_click", "sum"))
@@ -143,6 +176,8 @@ def prepare_silo_b_data(
     )
 
     student_stats = merged.groupby("id_student", as_index=False).agg(
+        # end_date/active_days/sum_click are now bounded to [.., cutoff_day], so
+        # they no longer encode a late-term withdrawal week.
         start_date=("date", "min"),
         end_date=("date", "max"),
         active_days=("date", "nunique"),
@@ -151,29 +186,55 @@ def prepare_silo_b_data(
 
     vle_df = student_stats.merge(activity_clicks, on="id_student", how="left")
 
+    # ---- TEMPORAL CENSORING · Assessments ------------------------------------
+    # assessments.date is the DUE date (days-from-start). We keep it long enough
+    # to filter on, THEN drop it. Under a cutoff we keep only assessments due on
+    # or before week K; NaN-dated items (typically the final exam) are excluded
+    # since we can't claim they were due by K.
+    assess = student_assessment.merge(assessments, on="id_assessment", how="left").query(
+        "code_module == @m_code and code_presentation == @p_code"
+    )
+    if cutoff_day is not None:
+        assess = assess[assess["date"].notna() & (assess["date"] <= cutoff_day)]
+
+    # Total assessment weight AVAILABLE by the cutoff (constant across students
+    # within a module). This replaces the old hard-coded /200 (whole-course)
+    # denominator, which itself leaked by measuring "fraction of the ENTIRE
+    # course completed" — a value only knowable in hindsight.
+    mod_assess = assessments.query("code_module == @m_code and code_presentation == @p_code")
+    due = mod_assess
+    if cutoff_day is not None:
+        due = mod_assess[mod_assess["date"].notna() & (mod_assess["date"] <= cutoff_day)]
+    total_weight_available = float(due["weight"].sum()) or 1.0  # guard divide-by-zero at tiny K
+
     assessment_df = (
-        student_assessment.merge(assessments, on="id_assessment", how="left")
-        .query("code_module == @m_code and code_presentation == @p_code")
-        .drop(columns=["is_banked", "code_module", "code_presentation", "date"])
+        assess.drop(columns=["is_banked", "code_module", "code_presentation", "date"])
         .assign(weighted_score=lambda x: (x["score"] * x["weight"]) / 100)
         .groupby("id_student", as_index=False)
         .agg(
             weighted_score=("weighted_score", "sum"),
             total_weight=("weight", "sum"),
+            # nunique of submitted assessments — now "# submitted BY week K",
+            # bounded by how many were even due, so it can't encode a late exit.
             num_assessments=("id_assessment", "nunique"),
         )
         .assign(
-            participation_rate=lambda x: x["total_weight"] / 200,
-            weighted_score_pct=lambda x: x["weighted_score"] / 200,
+            participation_rate=lambda x: x["total_weight"] / total_weight_available,
+            weighted_score_pct=lambda x: x["weighted_score"] / total_weight_available,
         )
         .drop(columns=["total_weight", "weighted_score"])
     )
 
-    return assessment_df.merge(vle_df, on="id_student", how="left")
+    # OUTER join: at small K many students have clicked but not yet submitted an
+    # assessment (or, rarely, the reverse). The original LEFT join on the
+    # assessment table silently dropped VLE-only students, zeroing out their real
+    # early-engagement signal. Outer keeps the union; genuinely-absent features
+    # become NaN and are filled with 0 in build_silo_b().
+    return assessment_df.merge(vle_df, on="id_student", how="outer")
 
 
 def build_silo_a(
-    prepared_silo_a: pd.DataFrame, 
+    prepared_silo_a: pd.DataFrame,
     intersection_ids: list[str]
 ) -> tuple[np.ndarray, np.ndarray]:
     """Align Silo A to PSI intersection order and extract feature and label arrays.
@@ -290,6 +351,13 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--val_size", type=float, default=0.1)
     parser.add_argument("--test_size", type=float, default=0.1)
+    parser.add_argument(
+        "--cutoff_week",
+        type=int,
+        default=None,
+        help="Restrict Silo B features to records on/before this course week "
+        "(temporal censoring). Unset = full course (leaks the label — see docstring).",
+    )
     args = parser.parse_args()
 
     seed_everything(args.seed)
@@ -302,8 +370,20 @@ def main() -> None:
     student_ass  = pd.read_csv(RAW_DIR / "studentAssessment.csv")
     assessments  = pd.read_csv(RAW_DIR / "assessments.csv")
 
+    if args.cutoff_week is None:
+        print(
+            "[Silo Prep] WARNING: --cutoff_week not set. Silo B features use the "
+            "FULL course and leak the label. Do not use these numbers as a baseline; "
+            "pass e.g. --cutoff_week 5 for a de-leaked run."
+        )
+    else:
+        print(f"[Silo Prep] Temporal censoring ON: Silo B uses weeks <= {args.cutoff_week} "
+              f"(days <= {args.cutoff_week * 7}).")
+
     silo_a_prep = prepare_silo_a_data(args.module, student_info)
-    silo_b_prep = prepare_silo_b_data(args.module, student_vle, vle, student_ass, assessments)
+    silo_b_prep = prepare_silo_b_data(
+        args.module, student_vle, vle, assessments, student_ass, cutoff_week=args.cutoff_week
+    )
     print(f"[Silo Prep] Module {args.module}: {len(silo_a_prep)} students")
 
     # Load PSI intersection order (written by psi_client.py)
@@ -352,12 +432,15 @@ def main() -> None:
             "X_test":  X_full[idx_test],
             "y_test":  y_a[idx_test],
             "intersection_ids": intersection_ids,
+            "cutoff_week": args.cutoff_week,  # provenance for the temporal sweep
         }
         out_path = PROCESSED_DIR / f"{name}.pkl"
         with open(out_path, "wb") as f:
             pickle.dump(data, f)
-        print(f"[Silo Prep] Saved {out_path} — train={len(y_train)},\
- val={len(y_a[idx_val])}, test={len(y_a[idx_test])}")
+        print(
+            f"[Silo Prep] Saved {out_path} — train={len(y_train)}, "
+            f"val={len(y_a[idx_val])}, test={len(y_a[idx_test])}"
+        )
 
 
 if __name__ == "__main__":

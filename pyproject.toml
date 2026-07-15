@@ -94,4 +94,4 @@ cut-noise-delta = 1e-5
 cut-noise-max-norm = 1.0
 combined-target-epsilon = 3.0
 track-wandb = true
-wandb-log-interval = 2
+wandb-log-interval = 25
