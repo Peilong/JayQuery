@@ -74,14 +74,16 @@ REST OF READING
 ## Week 7
 
 ### Fredrikson et al. 2015 (ACM CCS)
-1. What it does: 
-2. Surprising: 
-3. Relates to: 
+NOT FULL READING (Sections 1-4)
+1. What it does: The first 2 sections of the paper are purely background and some theory. The third section is also theory, specifically for the attack proposed by the paper. While it does not provide any actual usable data, section 4 gives the usage of the attack described by the paper.
+2. Surprising: I was not aware of a black box/white box idea when it comes to security.
+3. Relates to: This is mostly theory for our red-teaming, giving a solid preface for how some of it all works.
 
 ### Zhao et al. 2020 (NeurIPS)
-1. What it does: 
-2. Surprising: 
-3. Relates to: 
+(Focus on algorithm 1)
+1. What it does: This paper provides good coverage on methodology to start on attacking. The algorithm, with a little bit of reading for context beforehand, is fairly understandable compared to what other papers have provided on their topics.
+2. Surprising: Seeing a physical difference between DLG and the paper's iDLG is very surprising, DLG took until around iteration 150 to have a fairly readable picture, while iDLG only took 60 to get to practically the same point.
+3. Relates to: This is our primary method for attacking.
 
 ## Week 8
 
@@ -92,7 +94,6 @@ NOT FULL READING (Sections 1-4)
 3. Relates to: 
 
 ### Li et al. 2022 (ICLR)
-NOT FULL READING
 1. What it does: 
 2. Surprising: 
 3. Relates to: 
