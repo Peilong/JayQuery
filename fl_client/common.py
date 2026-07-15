@@ -5,6 +5,15 @@ Owner: Alex Pellet
 Generalized from the original client_a_new.py. Behavior is unchanged from
 that file for Silo A; Silo B (and any future silo) gets the same logic via
 its own SiloSpec.
+
+Best-state checkpointing (added):
+    The server drives it. On a round whose val/auc set a new best it flags the
+    gradient message with `save-best`; apply_gradients then snapshots THIS
+    silo's current bottom weights (the exact state val/auc was measured on)
+    into context.state["model_best"], BEFORE applying that round's gradient.
+    At the end the server's final test eval carries `restore-best`; that path
+    loads model_best, forwards the test split with it, and writes the
+    definitive bottom checkpoint. Bottom weights never leave the node.
 """
 
 import io
@@ -29,6 +38,31 @@ def _build_model(spec: SiloSpec, context: Context) -> torch.nn.Module:
     return model
 
 
+def _build_best_model(spec: SiloSpec, context: Context) -> torch.nn.Module | None:
+    """Construct the silo's BEST-snapshot model, or None if no best was recorded.
+
+    Used only by the final restore-best eval. Falls back (via None) to the
+    working model when the run never produced an eval-driven best (e.g.
+    num_rounds < eval_every), mirroring the server's own best-or-last fallback.
+    """
+    rec = context.state.get("model_best")
+    if rec is None:
+        return None
+    model = spec.model_cls(**spec.model_kwargs_fn(context))
+    model.load_state_dict(rec.to_torch_state_dict())
+    return model
+
+
+def _loaders(spec: SiloSpec, context: Context) -> tuple:
+    """Build this silo's loaders from run_config (processed-dir enables dataset sweeps)."""
+    rc = context.run_config
+    return spec.load_fn(
+        processed_dir=rc.get("processed-dir", "data/processed"),
+        batch_size=rc.get("batch-size", 64),
+        seed=rc.get("seed", 42),
+    )
+
+
 def _full_trainset(spec: SiloSpec, context: Context) -> tuple[torch.Tensor, torch.Tensor]:
     """Materialize the silo's entire training set as one (X, y) pair.
 
@@ -36,8 +70,7 @@ def _full_trainset(spec: SiloSpec, context: Context) -> tuple[torch.Tensor, torc
     fixed sampler) — row order must match across rounds for apply_gradients
     to reproduce the embedding sent in generate_embeddings.
     """
-    batch_size = context.run_config.get("batch-size", 64)
-    train_loader, _, _ = spec.load_fn(batch_size=batch_size)
+    train_loader, _, _ = _loaders(spec, context)
     xs, ys = [], []
     for x, y in train_loader:
         xs.append(x)
@@ -47,8 +80,7 @@ def _full_trainset(spec: SiloSpec, context: Context) -> tuple[torch.Tensor, torc
 def _eval_set(
     spec: SiloSpec, context: Context, split: str = "val"
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    batch_size = context.run_config.get("batch-size", 64)
-    _, val_loader, test_loader = spec.load_fn(batch_size=batch_size)
+    _, val_loader, test_loader = _loaders(spec, context)
     loader = test_loader if split == "test" else val_loader
     xs, ys = [], []
     for x, y in loader:
@@ -281,10 +313,17 @@ def generate_embeddings(spec: SiloSpec, msg: Message, context: Context) -> Messa
     return Message(content=content, reply_to=msg)
 
 def generate_eval_embeddings(spec: SiloSpec, msg: Message, context: Context) -> Message:
-    model = _build_model(spec, context)
+    cfg = msg.content.get("config")
+    restore_best = bool(cfg.get("restore-best", False)) if cfg is not None else False
+
+    if restore_best:
+        model = _build_best_model(spec, context) or _build_model(spec, context)
+        _save_checkpoint(spec, model, str(cfg.get("eps-tag", "eps_inf")))
+        _flush_wandb_buffer(spec, context)
+    else:
+        model = _build_model(spec, context)
     model.eval()
 
-    cfg = msg.content.get("config")
     split = str(cfg["split"]) if cfg is not None and "split" in cfg else "val"
     X, y = _eval_set(spec, context, split)
 
@@ -315,16 +354,23 @@ def apply_gradients(spec: SiloSpec, msg: Message, context: Context) -> Message:
         _flush_wandb_buffer(spec, context)
         return Message(content=RecordDict(), reply_to=msg)
 
+    if cfg is not None and bool(cfg.get("save-best", False)):
+        if (rec := context.state.get("model")) is not None:
+            context.state["model_best"] = ArrayRecord(rec.to_torch_state_dict())
+
     model = _build_model(spec, context)
     model.train()
 
-    optimizer = torch.optim.Adam(
-        model.parameters(), lr=context.run_config.get("learning-rate", 1e-3)
-    )
+    lr = float(cfg["lr"]) if (cfg is not None and "lr" in cfg and float(cfg["lr"]) > 0) \
+        else float(context.run_config.get("learning-rate", 1e-3))
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     if (rec := context.state.get("optimizer_state")) is not None:
         optimizer.load_state_dict(
             torch.load(io.BytesIO(rec["serialized"]), weights_only=False)
         )
+    for g in optimizer.param_groups:
+        g["lr"] = lr
 
     # Must remain before RNG restore
     X, _ = _full_trainset(spec, context)
@@ -339,7 +385,7 @@ def apply_gradients(spec: SiloSpec, msg: Message, context: Context) -> Message:
     grad = torch.from_numpy(msg.content["gradients"]["local-gradients"].numpy())
 
     optimizer.zero_grad()
-    embedding = model(X)  # same weights + same RNG -> reproduces the sent embedding
+    embedding = model(X)
 
     if (rec := context.state.get("sent_embedding")) is not None:
         sent = torch.from_numpy(rec["v"].numpy())
@@ -352,11 +398,12 @@ def apply_gradients(spec: SiloSpec, msg: Message, context: Context) -> Message:
     noise = _cut_noise_config(spec, context)
     t0 = time.perf_counter()
     if noise["enabled"]:
-        # The server's gradient is w.r.t. the clipped embedding — backprop through
-        # the same clip so the bottom model sees the true Jacobian.
         clip_embedding_rows(embedding, noise["max_norm"]).backward(grad)
     else:
         embedding.backward(grad)
+    clip_norm = float(context.run_config.get("grad-clip-norm", 0.0))
+    if clip_norm > 0:
+        torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
     optimizer.step()
     step_time = time.perf_counter() - t0
 
@@ -370,8 +417,6 @@ def apply_gradients(spec: SiloSpec, msg: Message, context: Context) -> Message:
         and "num-server-rounds" in cfg
         and int(cfg["server-round"]) >= int(cfg["num-server-rounds"]) - 1
     )
-    if final_round:
-        _save_checkpoint(spec, model, str(cfg["eps-tag"]))
 
     rnd = _round_number(context, msg, advance=False)
     with torch.no_grad():

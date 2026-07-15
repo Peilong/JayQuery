@@ -10,6 +10,17 @@ Orchestrates the SplitNN VFL training loop each round:
 The TopModel and its optimizer live entirely on the server; bottom-model
 weights stay on each SuperNode (persisted in context.state).
 
+Early stopping + best-state checkpointing (added):
+    The server tracks the best val/auc across eval rounds. On a new best it
+    (a) snapshots the UNWRAPPED top-model state in memory and (b) flags the
+    round's gradient message with `save-best` so each client snapshots its own
+    bottom model (bottoms never leave the node — threat-model safe). Training
+    stops after `early-stop-patience` eval events without improvement. At the
+    end the server writes the best top model and the final test eval carries
+    `restore-best`, so clients restore + checkpoint their best bottoms in the
+    same round-trip and the reported test metric reflects the peak, not the
+    collapsed last state.
+
 Usage (simulation mode — 2 virtual SuperNodes):
     flwr run . --run-config "num-server-rounds=10"
 
@@ -18,9 +29,6 @@ Usage (deployment mode — three separate processes):
     flwr supernode --partition-id 0 &
     flwr supernode --partition-id 1 &
     flwr run .
-    
-TODO: 
-- Implement Validation Rounds
 """
 
 import json
@@ -61,7 +69,12 @@ def main(grid: Grid, context: Context) -> None:
     embedding_dim: int = context.run_config["embedding-dim"]
     lr: float = context.run_config["learning-rate"]
 
-    top_model = TopModel(embedding_dim=embedding_dim)
+    top_kwargs = {
+        "embedding_dim": embedding_dim,
+        "dropout_rate": float(context.run_config.get("dropout-top", 0.2)),
+        "hidden_dim": int(context.run_config.get("hidden-dim-top", 64)),
+    }
+    top_model = TopModel(**top_kwargs)
     optimizer = torch.optim.Adam(top_model.parameters(), lr=lr)
     top_model.train()
 
@@ -84,12 +97,17 @@ def main(grid: Grid, context: Context) -> None:
                 "num-server-rounds": num_rounds,
                 "learning-rate": lr,
                 "embedding-dim": embedding_dim,
+                "dropout-top": top_kwargs["dropout_rate"],
+                "hidden-dim-top": top_kwargs["hidden_dim"],
                 "server-dp-enabled": dp["enabled"],
             },
             resume="never",
         )
-        
-    eps_tag = f"eps_{dp['epsilon']}" if dp["enabled"] else "eps_inf"
+
+    # run-tag (e.g. a sweep trial id) isolates this run's checkpoints + meta.json.
+    eps_tag = str(context.run_config.get("run-tag", "")) or (
+        f"eps_{dp['epsilon']}" if dp["enabled"] else "eps_inf"
+    )
 
     sample_rate = float(context.run_config.get("batch-sample-rate", 1.0))
     seed = int(context.run_config.get("seed", 42))
@@ -97,6 +115,24 @@ def main(grid: Grid, context: Context) -> None:
     server_tracker: PrivacyBudgetTracker | None = None
     client_trackers: dict[int, PrivacyBudgetTracker] = {}
     stopped_early = False
+
+    eval_every = int(context.run_config.get("eval-every", 5))
+    patience = int(context.run_config.get("early-stop-patience", 8))
+    min_delta = float(context.run_config.get("early-stop-min-delta", 1e-4))
+    best_val_auc = float("-inf")
+    best_round = 0
+    best_top_state: dict | None = None
+    evals_since_improve = 0
+
+    base_lr = lr
+    warmup_rounds = int(context.run_config.get("lr-warmup-rounds", 0))
+    warmup_start = float(context.run_config.get("lr-warmup-start-factor", 0.1))
+    plateau_factor = float(context.run_config.get("lr-plateau-factor", 0.5))
+    plateau_patience = int(context.run_config.get("lr-plateau-patience", 3))  # eval events
+    lr_min = float(context.run_config.get("lr-min", 1e-6))
+    grad_clip = float(context.run_config.get("grad-clip-norm", 0.0))  # 0 disables
+    plateau_scale = 1.0
+    current_lr = base_lr
 
     for round_num in range(1, num_rounds + 1):
         log(INFO, "")
@@ -126,8 +162,6 @@ def main(grid: Grid, context: Context) -> None:
         emb_a, emb_b, labels, node_pos_map = rd.emb_a, rd.emb_b, rd.labels, rd.node_pos_map
 
         if dp["enabled"] and not wrapped:
-            # Size the noise against the same accountant that enforces it (autodp),
-            # over the actual run length: one optimizer.step per round.
             sigma = solve_noise_multiplier(
                 target_epsilon=dp["epsilon"],
                 sample_rate=sample_rate,
@@ -157,6 +191,11 @@ def main(grid: Grid, context: Context) -> None:
             stopped_early = True
             break
 
+        current_lr = max(lr_min, base_lr * _warmup_factor(round_num, warmup_rounds, warmup_start)
+                         * plateau_scale)
+        for g in train_optimizer.param_groups:
+            g["lr"] = current_lr
+
         emb_a = emb_a.detach().requires_grad_(True)
         emb_b = emb_b.detach().requires_grad_(True)
         if dp['enabled']:
@@ -172,6 +211,9 @@ def main(grid: Grid, context: Context) -> None:
                 "Opacus GradSampleModule is not exposing input gradients — "
                 "escalate before relying on the DP path."
             )
+            
+        if grad_clip > 0 and not dp["enabled"]:
+            torch.nn.utils.clip_grad_norm_(top_model.parameters(), grad_clip)
         train_optimizer.step()
         grad_a, grad_b = emb_a.grad.clone(), emb_b.grad.clone()
 
@@ -185,13 +227,34 @@ def main(grid: Grid, context: Context) -> None:
             log(INFO, "Round %d — %s: %.4f", round_num, k, v)
 
         if track:
-            wandb.log({"train/loss": float(loss), **eps_metrics}, step=round_num)
-            if round_num%5==0:
-                eval_model = TopModel(embedding_dim=embedding_dim)
-                src = train_model._module if dp["enabled"] else top_model
-                eval_model.load_state_dict(src.state_dict())
-                val_metrics = _run_eval(grid, node_ids, eval_model, split="val")
-                wandb.log({"val/auc": float(val_metrics["auc_roc"])}, step=round_num)
+            wandb.log({"train/loss": float(loss), "train/lr": current_lr, **eps_metrics},
+                      step=round_num)
+
+        save_best_now = False
+        if round_num % eval_every == 0:
+            src = train_model._module if dp["enabled"] else top_model
+            eval_model = TopModel(**top_kwargs)
+            eval_model.load_state_dict(src.state_dict())
+            val_auc = float(_run_eval(grid, node_ids, eval_model, split="val")["auc_roc"])
+            if track:
+                wandb.log({"val/auc": val_auc}, step=round_num)
+            log(INFO, "Round %d — val/auc: %.4f (best %.4f @ round %d)",
+                round_num, val_auc, best_val_auc, best_round)
+
+            if val_auc > best_val_auc + min_delta:
+                best_val_auc, best_round = val_auc, round_num
+                best_top_state = {
+                    k: v.detach().cpu().clone() for k, v in src.state_dict().items()
+                }
+                evals_since_improve = 0
+                save_best_now = True
+            else:
+                evals_since_improve += 1
+                if (round_num > warmup_rounds and plateau_patience > 0
+                        and evals_since_improve % plateau_patience == 0):
+                    plateau_scale *= plateau_factor
+                    log(INFO, "LR plateau reduce: scale=%.4g (next lr ~ %.2e)",
+                        plateau_scale, max(lr_min, base_lr * plateau_scale))
 
         _send_gradients(
             grid=grid,
@@ -200,8 +263,17 @@ def main(grid: Grid, context: Context) -> None:
             grad_b=grad_b,
             round_num=round_num,
             num_rounds=num_rounds,
-            eps_tag=eps_tag
+            eps_tag=eps_tag,
+            save_best=save_best_now,
+            lr=current_lr,
         )
+
+        if evals_since_improve >= patience:
+            log(INFO,
+                "Early stop: no val/auc gain for %d evals (best %.4f @ round %d, now round %d)",
+                patience, best_val_auc, best_round, round_num)
+            stopped_early = True
+            break
 
         next_combined = _next_round_combined(server_tracker, client_trackers, dp["delta"])
         if next_combined is not None and next_combined > combined_target:
@@ -214,14 +286,22 @@ def main(grid: Grid, context: Context) -> None:
 
     ckpt_dir = Path("experiments/checkpoints") / eps_tag
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-    
-    top_sd = train_model._module.state_dict() if dp["enabled"] else top_model.state_dict()
+
+    if best_top_state is not None:
+        top_sd = best_top_state
+        log(INFO, "Checkpointing BEST top model: val/auc %.4f @ round %d", best_val_auc, best_round)
+    else:
+        top_sd = (train_model._module if dp["enabled"] else top_model).state_dict()
+        log(WARNING, "No eval happened — checkpointing LAST top model instead of best.")
     torch.save(top_sd, ckpt_dir / "top.pt")
-    
-    final_eval = TopModel(embedding_dim=embedding_dim)
-    final_eval.load_state_dict((train_model._module if dp["enabled"] else top_model).state_dict())
-    test_metrics = _run_eval(grid, node_ids, final_eval, split="test")
-    
+
+    final_eval = TopModel(**top_kwargs)
+    final_eval.load_state_dict(top_sd)
+    test_metrics = _run_eval(
+        grid, node_ids, final_eval, split="test",
+        extra_cfg={"restore-best": True, "eps-tag": eps_tag},
+    )
+
     meta = {
         "epsilon": dp["epsilon"] if dp["enabled"] else None,
         "delta": dp["delta"],
@@ -231,6 +311,8 @@ def main(grid: Grid, context: Context) -> None:
         "batch_sample_rate": sample_rate,
         "combined_target_epsilon": combined_target,
         "stopped_early": stopped_early,
+        "best_val_auc": None if best_val_auc == float("-inf") else best_val_auc,
+        "best_round": best_round,
         "epsilon_spent": _epsilon_metrics(server_tracker, client_trackers, dp["delta"]),
         "metrics": test_metrics,
     }
@@ -241,9 +323,14 @@ def main(grid: Grid, context: Context) -> None:
     for r, loss_val in losses:
         log(INFO, "  Round %3d — loss: %.4f", r, loss_val)
     if track:
+        summary = {f"test/{k}": v for k, v in test_metrics.items() if isinstance(v, int | float)}
+        if best_val_auc != float("-inf"):
+            summary["val/auc_best"] = best_val_auc
+        wandb.log(summary)
         wandb.finish()
-        
-    log(INFO, "Final test metrics: %s", test_metrics)
+
+    log(INFO, "Best val/auc: %.4f @ round %d", best_val_auc, best_round)
+    log(INFO, "Final test metrics (best state): %s", test_metrics)
 
 def _server_dp_config(context: Context) -> dict:
     """Server-side DP-SGD params from run_config (Step 1 keys in pyproject.toml).
@@ -258,6 +345,17 @@ def _server_dp_config(context: Context) -> dict:
         "delta": float(rc.get("server-dp-delta", 1e-5)),
         "max_grad_norm": float(rc.get("server-dp-max-grad-norm", 1.0)),
     }
+
+def _warmup_factor(round_num: int, warmup_rounds: int, start_factor: float) -> float:
+    """Linear LR warmup multiplier: ramps start_factor -> 1.0 over warmup_rounds.
+
+    Returns 1.0 once past warmup (or if warmup is disabled). Warming the LR from
+    near-zero avoids the early wrong-direction steps that dig the U-shaped dip.
+    """
+    if warmup_rounds <= 0 or round_num >= warmup_rounds:
+        return 1.0
+    return start_factor + (1.0 - start_factor) * (round_num / warmup_rounds)
+
 
 def _pos_name(pos: int) -> str:
     return "silo_a" if pos == _SILO_A_POS else "silo_b"
@@ -399,6 +497,8 @@ def _send_gradients(
     round_num: int,
     num_rounds: int,
     eps_tag: str,
+    save_best: bool = False,
+    lr: float | None = None,
 ) -> None:
     """Push per-silo embedding gradients back to each SuperNode.
 
@@ -410,6 +510,9 @@ def _send_gradients(
         node_pos_map: Mapping from node_id → partition-id.
         grad_a: Gradient w.r.t. Silo A embedding, shape (N, embedding_dim).
         grad_b: Gradient w.r.t. Silo B embedding, shape (N, embedding_dim).
+        save_best: If True, the client should snapshot its CURRENT bottom model
+            (the state this round's val/auc was measured on) as best-so-far,
+            BEFORE applying the gradient in this message.
     """
     pos_to_grad = {_SILO_A_POS: grad_a, _SILO_B_POS: grad_b}
     messages = []
@@ -421,8 +524,10 @@ def _send_gradients(
                     "gradients": arr_rec,
                     "config": ConfigRecord({
                         "server-round": round_num,
-                        "num-server-rounds": num_rounds,  # lets client detect the last round
-                        "eps-tag": eps_tag,               # single source of truth for the dir
+                        "num-server-rounds": num_rounds,
+                        "eps-tag": eps_tag,
+                        "save-best": save_best,
+                        "lr": float(lr) if lr is not None else -1.0,
                     }),
                 }),
                 message_type="train.apply_gradients",
@@ -433,12 +538,26 @@ def _send_gradients(
     log(INFO, "Sending gradients to %d nodes...", len(messages))
     grid.push_messages(messages)
 
-def _run_eval(grid: Grid, node_ids: list[int], top_model: TopModel, split: str) -> dict:
+def _run_eval(
+    grid: Grid,
+    node_ids: list[int],
+    top_model: TopModel,
+    split: str,
+    extra_cfg: dict | None = None,
+) -> dict:
+    """Distributed eval round: both silos forward `split` embeddings, server scores.
+
+    Args:
+        extra_cfg: Optional extra config merged into the query (e.g.
+            {"restore-best": True, "eps-tag": ...} to have clients restore and
+            checkpoint their best bottom model in this same round-trip).
+    """
+    cfg = {"split": split}
+    if extra_cfg:
+        cfg.update(extra_cfg)
     messages = [
         Message(
-            content=RecordDict({"config": ConfigRecord({
-                "split":split,
-            })}),
+            content=RecordDict({"config": ConfigRecord(cfg)}),
             message_type="query.generate_eval_embeddings",
             dst_node_id=nid,
         )
@@ -473,7 +592,7 @@ def _run_eval(grid: Grid, node_ids: list[int], top_model: TopModel, split: str) 
 
     top_model.eval()
     with torch.no_grad():
-        logits = top_model(emb_a, emb_b).squeeze(1)    
+        logits = top_model(emb_a, emb_b).squeeze(1)
     probs = torch.sigmoid(logits)
     
     return compute_metrics(labels.numpy(), probs.numpy())

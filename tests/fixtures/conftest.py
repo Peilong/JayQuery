@@ -151,7 +151,7 @@ def make_fake_load_fn(n_rows=20, input_dim=5, seed=0):
     X = torch.randn(n_rows, input_dim, generator=g)
     y = (torch.rand(n_rows, generator=g) > 0.5).float()
 
-    def load_fn(batch_size=64):
+    def load_fn(batch_size=64, **_kwargs):
         return _FakeLoader(X, y), None, None
 
     return load_fn

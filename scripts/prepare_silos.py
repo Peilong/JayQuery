@@ -358,10 +358,19 @@ def main() -> None:
         help="Restrict Silo B features to records on/before this course week "
         "(temporal censoring). Unset = full course (leaks the label — see docstring).",
     )
+    parser.add_argument(
+        "--out_dir",
+        type=Path,
+        default=PROCESSED_DIR,
+        help="Output directory for silo pkls/scalers (e.g. data/processed/week05 for "
+        "a cutoff-week sweep). ordered_id_list.json is still read from data/processed "
+        "and copied alongside the outputs.",
+    )
     args = parser.parse_args()
 
     seed_everything(args.seed)
-    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    out_dir: Path = args.out_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     print("[Silo Prep] Loading raw OULAD CSVs ...")
     student_info = pd.read_csv(RAW_DIR / "studentInfo.csv")
@@ -392,6 +401,8 @@ def main() -> None:
         with open(id_list_path) as f:
             intersection_ids = json.load(f)
         print(f"[Silo Prep] Using PSI intersection: {len(intersection_ids)} students")
+        if out_dir != PROCESSED_DIR:
+            (out_dir / "ordered_id_list.json").write_text(id_list_path.read_text())
     else:
         intersection_ids = silo_a_prep.index.tolist()
         print("[Silo Prep] WARNING: ordered_id_list.json not found — using all IDs (no PSI)")
@@ -414,9 +425,9 @@ def main() -> None:
     n_vle_cols = sum(1 for col in silo_b_prep.columns if col.startswith("vle_clicks_"))
     X_a, X_b, scaler_a, scaler_b = fit_and_scale(X_a, X_b, idx_train, n_vle_cols)
 
-    joblib.dump(scaler_a, PROCESSED_DIR / "scaler_a.pkl")
-    joblib.dump(scaler_b, PROCESSED_DIR / "scaler_b.pkl")
-    print("[Silo Prep] Scalers saved to data/processed/scaler_a.pkl and scaler_b.pkl")
+    joblib.dump(scaler_a, out_dir / "scaler_a.pkl")
+    joblib.dump(scaler_b, out_dir / "scaler_b.pkl")
+    print(f"[Silo Prep] Scalers saved to {out_dir}/scaler_a.pkl and scaler_b.pkl")
 
     # Apply SMOTE to training set only
     smote = SMOTE(random_state=args.seed)
@@ -434,7 +445,7 @@ def main() -> None:
             "intersection_ids": intersection_ids,
             "cutoff_week": args.cutoff_week,  # provenance for the temporal sweep
         }
-        out_path = PROCESSED_DIR / f"{name}.pkl"
+        out_path = out_dir / f"{name}.pkl"
         with open(out_path, "wb") as f:
             pickle.dump(data, f)
         print(

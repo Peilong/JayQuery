@@ -76,7 +76,6 @@ from __future__ import annotations
 
 import functools
 import logging
-import os
 from collections.abc import Callable
 from typing import Any
 
@@ -590,97 +589,68 @@ def _fmt_run_config_value(v: Any) -> str:
 
 def build_flwr_sweep_fn(
     *,
-    project: str,
     app: str = ".",
     federation: str | None = None,
-    entity: str | None = "jayquery",
     extra_run_config: dict[str, Any] | None = None,
+    pre_trial_fn: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    meta_dir: str = "experiments/checkpoints",
     flwr_bin: str = "flwr",
 ) -> Callable[[], None]:
-    """Return a zero-arg sweep trial fn (for wandb.agent) that runs a full
-    federated `flwr run` with hyperparameters drawn from wandb.config.
+    """Zero-arg sweep-trial fn for wandb.agent(): one federated `flwr run` per trial.
 
-    Why this exists
-    ---------------
-    The VFL training loop spans a ServerApp + ClientApps across separate
-    processes, so it cannot be swept by calling a single in-process train_fn
-    (that is wandb_sweep_fn, for the centralized baselines). Instead, each trial
-    launches `flwr run` as a subprocess and passes the sampled hyperparameters
-    via --run-config.
+    The VFL loop spans ServerApp + ClientApps across processes, so a trial can't
+    call an in-process train_fn (that's wandb_sweep_fn, for the centralized
+    baselines). Instead each trial submits `flwr run` with the sampled params via
+    --run-config, tagged with run-tag=<trial run id> so the ServerApp writes its
+    checkpoints + meta.json under meta_dir/<run id>/. The swept metric
+    ("val/auc_best") and test metrics are then read from that meta.json and
+    logged to the trial run. Env vars can NOT carry the run id — the ServerApp
+    executes under the SuperLink, not under `flwr run`.
 
-    How the metric gets back to the sweep
-    -------------------------------------
-    The optimisation target (e.g. validation AUC) is produced by the ServerApp,
-    in the subprocess. This function exports WANDB_RUN_ID / WANDB_PROJECT /
-    WANDB_ENTITY / WANDB_RESUME into the subprocess environment, so the ServerApp
-    must call wandb.init(resume="allow") (no explicit id needed — it reads the
-    env) and log the metric there. That attaches the server's metric to THIS
-    trial's run, which is what wandb.agent reads to drive the sweep. The
-    client-side log_client_round() calls will land in the same run when the
-    clients are given the same run id (e.g. via a "wandb-run-name"/env shared by
-    the server). For a clean correlation, set the sweep metric name to whatever
-    key the ServerApp logs (e.g. "val/auc_roc").
-
-    Args:
-        project: wandb project the sweep lives in.
-        app: Path to the Flower app (passed positionally to `flwr run`).
-        federation: Optional federation name from pyproject.toml.
-        entity: wandb entity.
-        extra_run_config: Fixed run-config overrides merged under the swept ones.
-        flwr_bin: The flwr executable (override if not on PATH).
-
-    Returns:
-        A zero-argument callable suitable for wandb.agent().
-
-    Example:
-        sweep_config = {
-            "method": "bayes",
-            "metric": {"name": "val/auc_roc", "goal": "maximize"},
-            "parameters": {
-                "learning-rate": {"min": 1e-4, "max": 5e-3},
-                "dropout-rate":  {"values": [0.1, 0.2, 0.3]},
-                "embedding-dim": {"values": [16, 32, 64]},
-            },
-        }
-        sweep_id = wandb.sweep(sweep_config, project="jayquery-vfl")
-        wandb.agent(
-            sweep_id,
-            build_flwr_sweep_fn(project="jayquery-vfl", federation="local-sim"),
-            count=20,
-        )
+    pre_trial_fn(params) may pop params that are not run-config keys (e.g.
+    "cutoff-week") and return extra run-config overrides (e.g. "processed-dir").
     """
+    import json
     import subprocess
+    from pathlib import Path
 
     def _trial() -> None:
         wandb = _require_wandb()
-        run = wandb.run  # wandb.agent already started this run for us
-        if run is None:
-            raise RuntimeError(
-                "build_flwr_sweep_fn() must be invoked by wandb.agent(), which "
-                "creates the active run."
-            )
+        run = wandb.run or wandb.init()  # agent-provided, else init picks up sweep params
 
-        cfg: dict[str, Any] = dict(extra_run_config or {})
-        cfg.update(dict(wandb.config))
-        run_config_str = " ".join(
-            f"{k}={_fmt_run_config_value(v)}" for k, v in cfg.items()
-        )
+        try:
+            params: dict[str, Any] = dict(run.config)
+            cfg: dict[str, Any] = dict(extra_run_config or {})
+            if pre_trial_fn is not None:
+                cfg.update(pre_trial_fn(params))
+            cfg.update(params)
+            cfg["run-tag"] = run.id
+            cfg.setdefault("wandb-group", f"sweep-{getattr(run, 'sweep_id', None) or run.id}")
+            cfg.setdefault("wandb-run-name", f"{run.id}-server")
 
-        env = dict(os.environ)
-        env["WANDB_RUN_ID"] = run.id
-        env["WANDB_PROJECT"] = project
-        env["WANDB_RESUME"] = "allow"
-        if entity:
-            env["WANDB_ENTITY"] = entity
+            run_config_str = " ".join(f"{k}={_fmt_run_config_value(v)}" for k, v in cfg.items())
+            cmd = [flwr_bin, "run", app]
+            if federation:
+                cmd.append(federation)
+            cmd += ["--run-config", run_config_str, "--stream"]
 
-        cmd = [flwr_bin, "run", app]
-        if federation:
-            cmd.append(federation)
-        cmd += ["--run-config", run_config_str]
+            logger.info("sweep trial %s -> %s", run.id, " ".join(cmd))
+            # check=True so a failed trial surfaces to the agent rather than
+            # being silently scored as a missing metric.
+            subprocess.run(cmd, check=True)
 
-        logger.info("sweep trial -> %s", " ".join(cmd))
-        # check=True so a failed trial surfaces to the agent rather than being
-        # silently scored as a missing metric.
-        subprocess.run(cmd, check=True, env=env)
+            meta = json.loads((Path(meta_dir) / run.id / "meta.json").read_text())
+            summary: dict[str, Any] = {
+                f"test/{k}": v
+                for k, v in (meta.get("metrics") or {}).items()
+                if isinstance(v, int | float)
+            }
+            if meta.get("best_val_auc") is not None:
+                summary["val/auc_best"] = meta["best_val_auc"]
+            summary.update(meta.get("epsilon_spent") or {})
+            run.log(summary)
+            log_params(cfg, run=run)
+        finally:
+            finish_run(run)
 
     return _trial

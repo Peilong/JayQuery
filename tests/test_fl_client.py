@@ -435,7 +435,7 @@ class TestMiniBatching:
 
         base = make_fake_load_fn(n_rows=20)
 
-        def load3(batch_size=64):
+        def load3(batch_size=64, **_kwargs):
             loader, _, _ = base(batch_size)
             return loader, loader, loader
 
