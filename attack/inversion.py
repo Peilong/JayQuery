@@ -83,7 +83,7 @@ def run_inversion_attack(
                 success = (predicted == true_imd_band)
     """
     dummy_input = torch.randn(1, 12, requires_grad = True)
-    optimizer_attack = torch.optim.lbfgs([dummy_input], lr = lr)
+    optimizer_attack = torch.optim.LBFGS([dummy_input], lr = lr)
     for i in range(num_iters):
         def closure():
             optimizer_attack.zero_grad()
@@ -91,12 +91,11 @@ def run_inversion_attack(
             loss = ((dummy_emb - real_embedding.detach()) ** 2).sum()
             loss.backward()
             return loss
-        optimizer_attack.step(closure())
-        end_loss = closure()
+        end_loss = optimizer_attack.step(closure)
     predicted = dummy_input[0, IMD_BAND_COL_IDX].round().clamp(0, 9).int().item()
     success = (predicted == true_imd_band)
 
-    return {"success" : success, "predicted_imd_band" : predicted, "true_imd_band" : true_imd_band, "final_loss" : end_loss, "iters" : num_iters}
+    return {"success" : success, "predicted_imd_band" : predicted, "true_imd_band" : true_imd_band, "final_loss" : end_loss.item(), "iters" : num_iters}
 
 
 
