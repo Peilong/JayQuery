@@ -82,7 +82,22 @@ def run_inversion_attack(
         Step 5: predicted = dummy_input[0, IMD_BAND_COL_IDX].round().clamp(0, 9).int().item()
                 success = (predicted == true_imd_band)
     """
-    raise NotImplementedError("TODO (Wyatt, Week 8): implement run_inversion_attack()")
+    dummy_input = torch.randn(1, 12, requires_grad = True)
+    optimizer_attack = torch.optim.lbfgs([dummy_input], lr = lr)
+    for i in range(num_iters):
+        def closure():
+            optimizer_attack.zero_grad()
+            dummy_emb = model(dummy_input)
+            loss = ((dummy_emb - real_embedding.detach()) ** 2).sum()
+            loss.backward()
+            return loss
+        optimizer_attack.step(closure())
+        end_loss = closure()
+    predicted = dummy_input[0, IMD_BAND_COL_IDX].round().clamp(0, 9).int().item()
+    success = (predicted == true_imd_band)
+
+    return {"success" : success, "predicted_imd_band" : predicted, "true_imd_band" : true_imd_band, "final_loss" : end_loss, "iters" : num_iters}
+
 
 
 def evaluate_attack_across_epsilon(
