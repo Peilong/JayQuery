@@ -1,5 +1,7 @@
 # 22-05-26 [AMXP] - Updated requirements with new versions of the packages.
 # [update] - autodp uncommented (0.2.3.1, not 0.2.3 — see note) + scipy pinned for numpy 1.26 compat.
+# 18-07-26 [AMXP] - Pruned unused deps (shap, pycryptodome, grpcio-tools, protobuf, omegaconf,
+#                   plotly, tqdm, typer, rich) after dead-code removal (proto/, utils/config.py).
 
 # ── Build ────────────────────────────────────────────────────────
 setuptools>=77
@@ -24,27 +26,21 @@ pandas==2.2.3
 scikit-learn==1.5.2
 xgboost==2.1.1
 imbalanced-learn==0.12.4
-shap==0.46.0
 
 # ── Cryptography (PSI) ───────────────────────────────────────────
 cryptography==46.0.5
-pycryptodome==3.20.0
 
 # ── Networking ───────────────────────────────────────────────────
-grpcio==1.80.0
-grpcio-tools==1.80.0
-protobuf>=5.28.0
+grpcio==1.80.0         # flwr transport (transitive dep; pinned for reproducibility)
 
 # ── Experiment Tracking ──────────────────────────────────────────
 wandb==0.27.0
-omegaconf==2.3.0
 pyyaml==6.0.2
 types-PyYAML
 
 # ── Visualization ────────────────────────────────────────────────
 matplotlib==3.9.2
 seaborn==0.13.2
-plotly==5.24.1
 
 # ── Testing & Quality ────────────────────────────────────────────
 pytest==8.3.3
@@ -53,7 +49,4 @@ ruff==0.7.1
 mypy==1.11.2
 
 # ── Utilities ────────────────────────────────────────────────────
-tqdm==4.66.5
 python-dotenv==1.0.1
-typer>=0.13.0
-rich==13.9.2

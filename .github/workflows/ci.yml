@@ -34,9 +34,9 @@ jobs:
       - name: Install remaining dependencies
         run: |
           pip install flwr opacus autodp numpy pandas scikit-learn \
-            xgboost imbalanced-learn cryptography pycryptodome \
-            grpcio protobuf wandb omegaconf pyyaml tqdm \
-            pytest pytest-cov python-dotenv rich
+            xgboost imbalanced-learn cryptography \
+            wandb pyyaml \
+            pytest pytest-cov python-dotenv
       - name: Run unit tests (skip slow / integration)
         env:
           WANDB_MODE: offline

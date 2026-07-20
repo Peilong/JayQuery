@@ -65,6 +65,8 @@ def main(grid: Grid, context: Context) -> None:
         grid: Flower Grid object for communicating with SuperNodes.
         context: Flower context providing run_config.
     """
+    log(INFO, ("server run_config:", dict(context.run_config)))
+
     num_rounds: int = context.run_config["num-server-rounds"]
     embedding_dim: int = context.run_config["embedding-dim"]
     lr: float = context.run_config["learning-rate"]
@@ -87,12 +89,16 @@ def main(grid: Grid, context: Context) -> None:
     wrapped = False
 
     if track:
+        tags = ["vfl","server"]
+        sweep_tag = context.run_config.get("wandb-sweep-tag","")
+        if sweep_tag:
+            tags.append(sweep_tag)
         wandb.init(
             entity=context.run_config.get("wandb-entity", "jayquery"),
             project=context.run_config.get("wandb-project", "jayquery-vfl"),
             name=context.run_config.get("wandb-run-name", "") or "server",
             group=context.run_config.get("wandb-group", "") or None,
-            tags=["vfl", "server"],
+            tags=tags,
             config={
                 "num-server-rounds": num_rounds,
                 "learning-rate": lr,
@@ -133,6 +139,9 @@ def main(grid: Grid, context: Context) -> None:
     grad_clip = float(context.run_config.get("grad-clip-norm", 0.0))  # 0 disables
     plateau_scale = 1.0
     current_lr = base_lr
+    
+    loss_ema = None
+    loss_ema_alpha = float(context.run_config.get("loss-ema-alpha", 0.1))
 
     for round_num in range(1, num_rounds + 1):
         log(INFO, "")
@@ -219,6 +228,9 @@ def main(grid: Grid, context: Context) -> None:
 
         log(INFO, "Round %d — loss: %.4f", round_num, float(loss))
         losses.append((round_num, float(loss)))
+        loss_ema = float(loss) if loss_ema is None else (
+            loss_ema_alpha * float(loss) + (1.0 - loss_ema_alpha) * loss_ema
+        )
 
         if server_tracker is not None:
             server_tracker.step()
@@ -227,8 +239,8 @@ def main(grid: Grid, context: Context) -> None:
             log(INFO, "Round %d — %s: %.4f", round_num, k, v)
 
         if track:
-            wandb.log({"train/loss": float(loss), "train/lr": current_lr, **eps_metrics},
-                      step=round_num)
+            wandb.log({"train/loss": float(loss), "train/loss_ema": loss_ema,
+                       "train/lr": current_lr, **eps_metrics}, step=round_num)
 
         save_best_now = False
         if round_num % eval_every == 0:

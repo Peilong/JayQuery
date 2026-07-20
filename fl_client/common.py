@@ -190,6 +190,10 @@ def _flush_wandb_buffer(spec: SiloSpec, context: Context) -> None:
         return
     rc = context.run_config
     rid = _run_id(context)
+    tags = ["vfl", spec.wandb_tag, "client"]
+    sweep_tag = rc.get("wandb-sweep-tag", "")
+    if sweep_tag:
+        tags.append(sweep_tag)
     log_client_rounds(
         run_id=rid,
         entries=entries,
@@ -197,7 +201,7 @@ def _flush_wandb_buffer(spec: SiloSpec, context: Context) -> None:
         entity=rc.get("wandb-entity", "jayquery"),
         name=rc.get("wandb-run-name", "") or f"{spec.wandb_tag}-{rid[:8]}",
         group=rc.get("wandb-group", "") or None,
-        tags=["vfl", spec.wandb_tag, "client"],
+        tags=tags,
         mode=rc.get("wandb-mode", "online"),
         config=_wandb_config(spec, context),
     )
