@@ -17,6 +17,7 @@ References:
   - CLAUDE.md "Implementing the Model Inversion Attack" step-by-step box
 """
 
+import csv
 from pathlib import Path
 
 import torch
@@ -120,4 +121,56 @@ def evaluate_attack_across_epsilon(
     TODO (Wyatt, Week 9): loop over epsilon_values, load checkpoint, run attack
                           on first n_students samples, record ASR in output_csv.
     """
-    raise NotImplementedError("TODO (Wyatt, Week 9): implement evaluate_attack_across_epsilon()")
+    checkpoint_dir = Path(checkpoint_dir)
+    results: list[dict] = []  # one summary row per epsilon
+
+    # OUTER LOOP: one trained checkpoint per privacy level.
+    for eps in epsilon_values:
+        # The trainer tags no-privacy runs "eps_inf" and DP runs "eps_{epsilon}"
+        # (see fl_server/server_app.py). Rebuild that tag to find the subdir.
+        tag = "eps_inf" if eps == float("inf") else f"eps_{eps}"
+        model, _ = load_checkpoint(checkpoint_dir / tag / "model.pt")
+
+        attacked = 0
+        successes = 0
+        losses: list[float] = []
+
+        # MIDDLE LOOP: draw students from the Silo A test set. The loader's
+        # label is the dropout target, NOT imd_band, so it is ignored here.
+        for features, _dropout_label in test_loader:
+            # INNER LOOP: features is a batch; attack one row at a time.
+            for row in features:
+                if attacked >= n_students:
+                    break
+
+                # The embedding an honest-but-curious server would observe.
+                real_embedding = model(row.unsqueeze(0))
+                # Ground-truth imd_band lives inside the feature row itself.
+                true_imd_band = int(row[IMD_BAND_COL_IDX].round().item())
+
+                result = run_inversion_attack(model, real_embedding, true_imd_band)
+                successes += int(result["success"])
+                losses.append(result["final_loss"])
+                attacked += 1
+
+            if attacked >= n_students:
+                break
+
+        results.append(
+            {
+                "epsilon": eps,
+                "asr": successes / attacked if attacked else 0.0,
+                "n_students": attacked,
+                "mean_final_loss": sum(losses) / len(losses) if losses else 0.0,
+            }
+        )
+
+    # Write one row per epsilon to the results CSV.
+    output_csv = Path(output_csv)
+    output_csv.parent.mkdir(parents=True, exist_ok=True)
+    with output_csv.open("w", newline="") as f:
+        writer = csv.DictWriter(
+            f, fieldnames=["epsilon", "asr", "n_students", "mean_final_loss"]
+        )
+        writer.writeheader()
+        writer.writerows(results)
