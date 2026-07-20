@@ -1,3 +1,22 @@
+# ── STATUS (2026-07-18): NOT WIRED TO THE CURRENT WORKFLOW ──────────────────
+# Nothing consumes this file. VFL runs are configured by [tool.flwr.app.config]
+# in pyproject.toml and launched via `python scripts/run_deployment.py`; the old
+# `python -m fl_server.server --config <this file>` entry point never existed.
+#
+# How this file SHOULD be consumed: run_deployment.py gains a small YAML loader
+# that translates these values into a `flwr run --run-config` override string
+# (it already does this for --rounds → num-server-rounds).
+#
+# What must change to match the current workflow:
+#   - Rename keys to the run-config names: num_rounds → num-server-rounds,
+#     learning_rate → learning-rate, etc. (see pyproject [tool.flwr.app.config]).
+#   - Fix stale values: input_dim_a is now 18, input_dim_b is now 27, default
+#     module is CCC_2014J, learning rate default is 1e-2.
+#   - Replace the `privacy:` block with the split-design keys:
+#     server-dp-enabled=false, cut-noise-enabled=false (this is the no-DP run).
+#   - Drop `server:` (run_deployment.py manages SuperLink host/ports) and
+#     `batch_size` (batching is Poisson via batch-sample-rate).
+# ─────────────────────────────────────────────────────────────────────────────
 experiment:
   id: 2
   name: vfl_no_dp

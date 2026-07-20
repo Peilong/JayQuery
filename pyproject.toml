@@ -15,7 +15,7 @@ authors = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["utils*", "psi*", "silo_a*", "silo_b*", "baselines*", "fl_client*", "fl_server*", "privacy*", "proto*", "scripts*"]
+include = ["utils*", "psi*", "silo_a*", "silo_b*", "baselines*", "fl_client*", "fl_server*", "privacy*", "scripts*"]
 exclude = ["data*", "notebooks*", "experiments*", "attack*"]
 
 [tool.ruff]
@@ -29,7 +29,7 @@ lint.ignore = ["ANN101", "ANN102"]
 "notebooks/*" = ["ANN", "E501"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["psi", "silo_a", "silo_b", "fl_server", "fl_client", "privacy", "baselines", "utils", "proto", "scripts"]
+known-first-party = ["psi", "silo_a", "silo_b", "fl_server", "fl_client", "privacy", "baselines", "utils", "scripts"]
 
 [tool.mypy]
 python_version = "3.11"
@@ -77,21 +77,21 @@ clientapp = "fl_client.client_app:app"
 
 [tool.flwr.app.config]
 num-server-rounds = 150
-learning-rate = 1e-4
-embedding-dim = 32
+learning-rate = 0.00658
+embedding-dim = 64
 input-dim-a = 18
 input-dim-b = 27
-hidden-dim-a = 64
-hidden-dim-b = 128
-hidden-dim-top = 64
-dropout-a = 0.3
-dropout-b = 0.3
-dropout-top = 0.2
+hidden-dim-a = 32
+hidden-dim-b = 256
+hidden-dim-top = 128
+dropout-a = 0.483
+dropout-b = 0.333
+dropout-top = 0.237
 batch-size = 64
 processed-dir = "data/processed"
 run-tag = ""
 seed = 42
-batch-sample-rate = 0.1
+batch-sample-rate = 0.05
 server-dp-enabled = true
 server-dp-epsilon = 1.0
 server-dp-delta = 1e-5
@@ -106,8 +106,10 @@ wandb-log-interval = 25
 wandb-entity = "jayquery"
 wandb-project = "jayquery-vfl"
 wandb-run-name = ""
-wandb-group = ""
+wandb-group = "presentation-data"
+wandb-sweep-tag = ""
 wandb-mode = "online"
+loss-ema-alpha = 0.1
 eval-every = 5
 early-stop-patience = 10
 early-stop-min-delta = 0.0001
@@ -116,4 +118,4 @@ lr-warmup-start-factor = 0.1
 lr-plateau-factor = 0.5
 lr-plateau-patience = 3
 lr-min = 0.000001
-grad-clip-norm = 1.0
+grad-clip-norm = 2

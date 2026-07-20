@@ -1,3 +1,23 @@
+# ── STATUS (2026-07-18): NOT WIRED TO THE CURRENT WORKFLOW ──────────────────
+# Nothing consumes this file. VFL runs are configured by [tool.flwr.app.config]
+# in pyproject.toml and launched via `python scripts/run_deployment.py`; the old
+# `python -m fl_server.server --config <this file> --epsilon <eps>` entry point
+# never existed.
+#
+# How this file SHOULD be consumed: reproduce_all.sh (or run_deployment.py with
+# a YAML loader) iterates `epsilon_grid` below, launching one deployment run per
+# epsilon with `--run-config "server-dp-epsilon=<eps> cut-noise-target-epsilon=<eps>"`
+# and exporting a checkpoint bundle per run for the attack code.
+#
+# What must change to match the current workflow:
+#   - Rename keys to the run-config names in pyproject [tool.flwr.app.config].
+#   - Fix stale values: input_dim_a → 18, input_dim_b → 27, module → CCC_2014J.
+#   - Replace the single `privacy:` block with the split design: server-dp-*
+#     (DP-SGD) AND cut-noise-* (cut-layer Gaussian) keys, plus
+#     combined-target-epsilon — the grid must decide how each point splits its
+#     budget between the two mechanisms.
+#   - checkpoint_dir naming should follow experiments/checkpoints/exp03_eps{eps}/.
+# ─────────────────────────────────────────────────────────────────────────────
 experiment:
   id: 3
   name: dp_epsilon_grid

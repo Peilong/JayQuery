@@ -14,7 +14,7 @@ Dataset (OULAD) as a proxy for FERPA-protected campus data.
 **Stack (see `requirements.txt` for exact pins):** Python 3.11 · PyTorch 2.4.1 · Flower (flwr[simulation]) 1.28.0 · Opacus 1.5.2 · autodp · scikit-learn 1.5.2 · XGBoost 2.1.1 · wandb 0.27.0
 
 > **Architecture note:** The DP design was revised — see **DP Architecture (READ FIRST)** below and
-> `project_plan_new.md` (authoritative). Short version: client privacy is **cut-layer Gaussian noise**,
+> `docs/Updated_Project_Plan.md` (authoritative). Short version: client privacy is **cut-layer Gaussian noise**,
 > the server's top model uses **Opacus DP-SGD**, there is **no client-side Opacus**, and budget is tracked
 > with **autodp**, not a persisted `PrivacyEngine`.
 
@@ -56,15 +56,12 @@ protected by institutional trust boundaries (an attacker who can read them can r
 jayquery/
 ├── CLAUDE.md                   ← you are here
 ├── README.md                   ← project entry point
-├── project_plan_new.md         ← authoritative architecture & goals (supersedes DOCX where they differ)
 ├── pyproject.toml              ← flwr app config, run-config defaults, ruff/mypy/pytest
-├── run_deployment.py           ← launches SuperLink + 2 SuperNodes + submits the run
 ├── data/raw/                   ← OULAD CSVs (gitignored, never commit)
 ├── data/processed/             ← silo_{a,b}.pkl, scaler_{a,b}.pkl, ordered_id_list.json (gitignored)
 ├── fl_server/                  ← ServerApp loop, Top Model, server-side DP-SGD wiring   [Alex]
-│   ├── server_app.py           ← @app.main VFL round loop (persistent in-memory)
+│   ├── server_app.py           ← @app.main VFL round loop (persistent in-memory) — the live path
 │   └── top_model.py            ← TopModel + compute_loss_and_gradients
-│                                 (vfl_strategy.py is dead — remove; server_app.py is the live path)
 ├── fl_client/                  ← client dispatcher + generic handlers   [Alex]
 │   ├── client_app.py           ← thin dispatcher: partition-id → silo handlers
 │   ├── common.py               ← generic generate_embeddings / apply_gradients (+ cut-layer noise hook)
@@ -80,15 +77,19 @@ jayquery/
 │   └── dp_wrapper.py           ← make_private_with_noise (Opacus) — applied to the SERVER top model
 ├── attack/                     ← iDLG inversion attack, label inference, gradient monitor   [Wyatt]
 ├── baselines/                  ← centralized ML baselines, eval utilities   [Alex]
-├── utils/                      ← reproducibility seed, wandb helpers, config loader   [Shared]
+├── utils/                      ← reproducibility seed, wandb helpers   [Shared]
 ├── experiments/configs/        ← YAML experiment configs   [Alex]
+│                                 (exp01 is live via run_baselines; exp02/exp03 are NOT consumed yet —
+│                                  see their STATUS headers for how to wire them to the current workflow)
 ├── experiments/checkpoints/    ← saved model checkpoints (gitignored)
 ├── notebooks/                  ← EDA notebook (Alex), testing notebook (Wyatt)
 ├── tests/                      ← pytest unit tests (test_loaders, test_models, test_dp, test_psi)
 ├── tests/fixtures/             ← synthetic OULAD CSVs committed for CI
 ├── docs/                       ← design docs, paper notes, weekly reports, original DOCX
-├── proto/                      ← gRPC protobuf definitions
-└── scripts/                    ← download_oulad.sh, prepare_silos.py, reproduce_all.sh
+│                                 (Updated_Project_Plan.md = authoritative architecture & goals)
+└── scripts/                    ← download_oulad.sh, prepare_silos.py, run_deployment.py,
+                                  run_sweep.py, reproduce_all.sh (exps 2–5 stubbed pending
+                                  a --run-config passthrough in run_deployment.py)
 ```
 
 ---
@@ -161,7 +162,7 @@ python scripts/prepare_silos.py                 # default module CCC_2014J, seed
 
 ### 6 — Run VFL training (deployment: SuperLink + 2 SuperNodes)
 ```bash
-python run_deployment.py --rounds 50
+python scripts/run_deployment.py --rounds 50
 # run_deployment.py starts flower-superlink + one flower-supernode per silo
 # (partition-id 0 = Silo A, 1 = Silo B), registers the connection in ~/.flwr/config.toml,
 # then submits `flwr run`. This is the supported run path — prefer it over a bare `flwr run .`,
@@ -176,7 +177,8 @@ python -m baselines.run_baselines --config experiments/configs/exp01_centralized
 
 ### 8 — All experiments / tests
 ```bash
-bash scripts/reproduce_all.sh
+bash scripts/reproduce_all.sh   # currently only Exp 1 (baselines) is live; exps 2–5 are
+                                # stubbed pending a --run-config passthrough in run_deployment.py
 pytest tests/ -v --cov=. --cov-report=term-missing
 ```
 
