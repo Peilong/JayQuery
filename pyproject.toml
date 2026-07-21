@@ -76,8 +76,9 @@ serverapp = "fl_server.server_app:app"
 clientapp = "fl_client.client_app:app"
 
 [tool.flwr.app.config]
+pos-weight = 0 # -1 = auto (n_neg/n_pos), 0 = disabled, >0 = explicit override
 num-server-rounds = 150
-learning-rate = 0.00658
+learning-rate = 0.0005
 embedding-dim = 64
 input-dim-a = 18
 input-dim-b = 27
@@ -106,12 +107,12 @@ wandb-log-interval = 25
 wandb-entity = "jayquery"
 wandb-project = "jayquery-vfl"
 wandb-run-name = ""
-wandb-group = "presentation-data"
+wandb-group = "testing-1"
 wandb-sweep-tag = ""
 wandb-mode = "online"
 loss-ema-alpha = 0.1
 eval-every = 5
-early-stop-patience = 10
+early-stop-patience = 5
 early-stop-min-delta = 0.0001
 lr-warmup-rounds = 25
 lr-warmup-start-factor = 0.1

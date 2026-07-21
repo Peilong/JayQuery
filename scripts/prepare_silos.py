@@ -443,7 +443,7 @@ def main() -> None:
             "idx_val":   idx_val,
             "idx_test":  idx_test,
             "X_train": X_train,
-            "y_train": y_train,
+            "y_train": y_train, #TODO: Should be removed in silo b
             "X_val":   X_full[idx_val],
             "y_val":   y_a[idx_val],
             "X_test":  X_full[idx_test],

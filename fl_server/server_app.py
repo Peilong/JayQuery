@@ -83,6 +83,8 @@ def main(grid: Grid, context: Context) -> None:
     losses: list[tuple[int, float]] = []
     
     track = bool(context.run_config.get("track-wandb", True))
+    
+    pos_weight_cfg = float(context.run_config.get("pos-weight", -1.0))
 
     dp = _server_dp_config(context)
     train_model, train_optimizer = top_model, optimizer
@@ -106,6 +108,7 @@ def main(grid: Grid, context: Context) -> None:
                 "dropout-top": top_kwargs["dropout_rate"],
                 "hidden-dim-top": top_kwargs["hidden_dim"],
                 "server-dp-enabled": dp["enabled"],
+                "pos-weight": pos_weight_cfg,
             },
             resume="never",
         )
@@ -169,11 +172,16 @@ def main(grid: Grid, context: Context) -> None:
             break
 
         emb_a, emb_b, labels, node_pos_map = rd.emb_a, rd.emb_b, rd.labels, rd.node_pos_map
-        
+
         if round_num == 1:
-            top_model.set_pos_weight(n_neg=rd.n_neg, n_pos=rd.n_pos)
-            
-        log(INFO, "pos_weight set to %.4f (n_neg=%d, n_pos=%d)", float(top_model.pos_weight), rd.n_neg, rd.n_pos)
+            if pos_weight_cfg < 0:
+                top_model.set_pos_weight(n_neg=rd.n_neg, n_pos=rd.n_pos)
+            elif pos_weight_cfg == 0:
+                top_model.set_pos_weight(n_neg=1, n_pos=1)   # weight = 1.0, i.e. off
+            else:
+                top_model.set_pos_weight(n_neg=int(pos_weight_cfg * 1000), n_pos=1000)
+            log(INFO, "pos_weight = %.4f (mode=%s, n_neg=%d, n_pos=%d)",
+                float(top_model.pos_weight), pos_weight_cfg, rd.n_neg, rd.n_pos)
 
         if dp["enabled"] and not wrapped:
             sigma = solve_noise_multiplier(
@@ -615,5 +623,7 @@ def _run_eval(
     with torch.no_grad():
         logits = top_model(emb_a, emb_b).squeeze(1)
     probs = torch.sigmoid(logits)
+    log(INFO, "probs: min=%.4f max=%.4f mean=%.4f | frac>0.5=%.4f | labels mean=%.4f",
+        probs.min(), probs.max(), probs.mean(), (probs > 0.5).float().mean(), labels.float().mean())
     
     return compute_metrics(labels.numpy(), probs.numpy())

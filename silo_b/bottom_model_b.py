@@ -26,7 +26,7 @@ class BottomModelB(nn.Module):
     be washed out by the larger hidden layer.
 
     Args:
-        input_dim: Number of input features. Default 22.
+        input_dim: Number of input features. Default 26.
         embedding_dim: Output embedding dimension. Default 32.
         dropout_rate: Dropout probability. Default 0.3.
         hidden_dim: Expand-layer width; compress layer is hidden_dim // 2. Default 128.
@@ -51,16 +51,14 @@ class BottomModelB(nn.Module):
 
         compress_dim = hidden_dim // 2
 
-        # Layer 1: expand
         self.layer1 = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
-            nn.BatchNorm1d(hidden_dim),
+            nn.LayerNorm(hidden_dim),
             nn.ReLU(),
         )
-        # Layer 2: compress
         self.layer2 = nn.Sequential(
             nn.Linear(hidden_dim, compress_dim),
-            nn.BatchNorm1d(compress_dim),
+            nn.LayerNorm(compress_dim),
             nn.ReLU(),
         )
         # Skip projection to match layer2 output
