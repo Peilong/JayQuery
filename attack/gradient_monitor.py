@@ -39,7 +39,12 @@ class GradientNormMonitor:
                is_anomalous = (norm > self.threshold * running_mean)
             4. Return (norm, is_anomalous).
         """
-        raise NotImplementedError("TODO (Wyatt, Week 9): implement update()")
+        norm = gradient.norm(p = 2).item()
+        self._history.append(norm)
+        if len(self._history) >= 3:
+            running_mean = torch.mean(self._history[:-1])
+            is_anomalous = (norm > self.threshold * running_mean)
+        return (norm, is_anomalous)
 
     @property
     def history(self) -> list[float]:
