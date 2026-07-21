@@ -430,12 +430,18 @@ def main() -> None:
     print(f"[Silo Prep] Scalers saved to {out_dir}/scaler_a.pkl and scaler_b.pkl")
 
     # Apply SMOTE to training set only
-    smote = SMOTE(random_state=args.seed)
-    X_a_train, y_train = smote.fit_resample(X_a[idx_train], y_a[idx_train])
-    X_b_train, _       = smote.fit_resample(X_b[idx_train], y_a[idx_train])
+    #smote = SMOTE(random_state=args.seed)
+    #X_a_train, y_train = smote.fit_resample(X_a[idx_train], y_a[idx_train])
+    #X_b_train, _       = smote.fit_resample(X_b[idx_train], y_a[idx_train])
+
+    X_a_train, X_b_train = X_a[idx_train], X_b[idx_train]
+    y_train = y_a[idx_train]
 
     for name, X_train, X_full in [("silo_a", X_a_train, X_a), ("silo_b", X_b_train, X_b)]:
         data = {
+            "idx_train": idx_train,
+            "idx_val":   idx_val,
+            "idx_test":  idx_test,
             "X_train": X_train,
             "y_train": y_train,
             "X_val":   X_full[idx_val],

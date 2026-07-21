@@ -10,6 +10,19 @@ SILO_A_FEATURES = 18
 SILO_B_FEATURES = 26
 EMBEDDING_DIM = 32
 
+def _server_backward(top, emb_a, emb_b, labels):
+    """Mirror of the server's inline forward/backward (server_app.py).
+
+    The server detaches incoming embeddings, owns the backward (required for
+    Opacus), and returns dL/d_emb per silo.
+    """
+    da = emb_a.detach().requires_grad_(True)
+    db = emb_b.detach().requires_grad_(True)
+    logits = top(da, db).squeeze(1)
+    loss = top.loss_fn(logits, labels.float())
+    loss.backward()
+    return loss.detach(), da.grad.clone(), db.grad.clone()
+
 @pytest.mark.model
 def test_bottom_model_a_output_shape() -> None:
     """BottomModelA outputs (batch, embedding_dim) with correct shape."""
@@ -60,7 +73,7 @@ def test_top_model_gradient_flow() -> None:
     emb_b = torch.randn(16, EMBEDDING_DIM)
     labels = torch.randint(0, 2, (16,)).float()
 
-    loss, grad_a, grad_b = model.compute_loss_and_gradients(emb_a, emb_b, labels)
+    loss, grad_a, grad_b = _server_backward(model,emb_a, emb_b, labels)
 
     assert loss.item() > 0, "Loss should be positive"
     assert grad_a.shape == emb_a.shape, f"grad_a shape {grad_a.shape} != emb_a shape {emb_a.shape}"
@@ -68,6 +81,26 @@ def test_top_model_gradient_flow() -> None:
     assert not torch.all(grad_a == 0), "grad_a is all zeros — gradient not flowing"
     assert not torch.all(grad_b == 0), "grad_b is all zeros — gradient not flowing"
 
+@pytest.mark.model
+def test_pos_weight_affects_loss() -> None:
+    """set_pos_weight() actually changes the loss the server optimizes."""
+    from fl_server.top_model import TopModel
+
+    top = TopModel(embedding_dim=EMBEDDING_DIM)
+    top.eval()
+    torch.manual_seed(0)
+    emb_a = torch.randn(16, EMBEDDING_DIM)
+    emb_b = torch.randn(16, EMBEDDING_DIM)
+    labels = torch.cat([torch.ones(4), torch.zeros(12)])
+
+    with torch.no_grad():
+        logits = top(emb_a, emb_b).squeeze(1)   # computed once, reused
+
+    baseline = top.loss_fn(logits, labels).item()
+    top.set_pos_weight(n_neg=12, n_pos=4)
+
+    assert float(top.pos_weight) == pytest.approx(3.0)
+    assert top.loss_fn(logits, labels).item() > baseline
 
 @pytest.mark.model
 def test_bottom_model_a_get_embedding_matches_forward() -> None:
@@ -160,7 +193,7 @@ def test_integration_bottom_models_receive_gradients() -> None:
     emb_b = model_b(x_b)
 
     # Server returns the per-silo embedding gradients (it detaches internally).
-    _loss, grad_a, grad_b = top.compute_loss_and_gradients(emb_a, emb_b, labels)
+    _loss, grad_a, grad_b = _server_backward(top, emb_a, emb_b, labels)
     assert grad_a.shape == emb_a.shape, "grad_a shape must match emb_a"
     assert grad_b.shape == emb_b.shape, "grad_b shape must match emb_b"
 
@@ -224,7 +257,7 @@ def test_integration_full_round_trip() -> None:
     assert emb_b.shape == (batch, EMBEDDING_DIM), f"emb_b shape {emb_b.shape}"
 
     # --- Step 2: server forward + loss + per-silo gradients ---
-    loss, grad_a, grad_b = top.compute_loss_and_gradients(emb_a, emb_b, labels)
+    loss, grad_a, grad_b = _server_backward(top, emb_a, emb_b, labels)
     assert loss.item() > 0, "Top model loss should be positive"
     assert grad_a.shape == emb_a.shape, "grad_a shape mismatch"
     assert grad_b.shape == emb_b.shape, "grad_b shape mismatch"
