@@ -169,6 +169,11 @@ def main(grid: Grid, context: Context) -> None:
             break
 
         emb_a, emb_b, labels, node_pos_map = rd.emb_a, rd.emb_b, rd.labels, rd.node_pos_map
+        
+        if round_num == 1:
+            top_model.set_pos_weight(n_neg=rd.n_neg, n_pos=rd.n_pos)
+            
+        log(INFO, "pos_weight set to %.4f (n_neg=%d, n_pos=%d)", float(top_model.pos_weight), rd.n_neg, rd.n_pos)
 
         if dp["enabled"] and not wrapped:
             sigma = solve_noise_multiplier(
@@ -435,6 +440,8 @@ class _RoundData:
     labels: torch.Tensor | None = None
     node_pos_map: dict[int, int] = field(default_factory=dict)
     n_total: int = 0
+    n_neg: int = 0
+    n_pos: int = 0
     client_privacy: dict[int, dict] = field(default_factory=dict)
     exhausted: list[int] = field(default_factory=list)
 
@@ -486,6 +493,8 @@ def _get_embeddings(
             continue
         if "n-total" in cfg:
             rd.n_total = int(cfg["n-total"])
+        if pos == _SILO_A_POS and "n-pos" in cfg:
+            rd.n_pos, rd.n_neg = int(cfg["n-pos"]), int(cfg["n-neg"])
         emb = torch.from_numpy(reply.content["arrays"]["embedding"].numpy())
         if pos == _SILO_A_POS:
             rd.emb_a = emb

@@ -37,7 +37,6 @@ class TopModel(nn.Module):
 
         # Class-imbalance weight (set externally before training)
         self.register_buffer("pos_weight", torch.tensor(1.0))
-        self._loss_fn = nn.BCEWithLogitsLoss(pos_weight=self.pos_weight)
 
     def forward(self, emb_a: torch.Tensor, emb_b: torch.Tensor) -> torch.Tensor:
         """Forward pass through the aggregation network.
@@ -60,50 +59,10 @@ class TopModel(nn.Module):
         """Compute BCE-with-logits loss using the current pos_weight.
 
         Exposed so the server loop can run the forward/backward itself (required
-        for Opacus DP-SGD, which must own the backward), instead of routing
-        through compute_loss_and_gradients.
+        for Opacus DP-SGD, which must own the backward)
         """
         loss_fn = nn.BCEWithLogitsLoss(pos_weight=self.pos_weight.to(logits.device))
         return loss_fn(logits, labels.float())
-    
-    def compute_loss_and_gradients(
-        self,
-        emb_a: torch.Tensor,
-        emb_b: torch.Tensor,
-        labels: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Run forward + backward and return loss + per-silo embedding gradients.
-
-        This is the KEY interface called each Flower round. The returned gradients
-        are sent back to silo clients so they can update their Bottom Models.
-
-        Args:
-            emb_a: Detached embedding from Silo A, shape (batch_size, embedding_dim).
-                   Will have requires_grad=True set internally.
-            emb_b: Detached embedding from Silo B, shape (batch_size, embedding_dim).
-            labels: Binary float labels (0=not-at-risk, 1=at-risk), shape (batch_size,).
-
-        Returns:
-            Tuple of (loss_scalar, grad_emb_a, grad_emb_b) where gradients have the
-            same shape as their respective embedding inputs.
-        """
-        # Enable gradient tracking on incoming embeddings
-        emb_a = emb_a.detach().requires_grad_(True)
-        emb_b = emb_b.detach().requires_grad_(True)
-
-        # Forward pass
-        logits = self.forward(emb_a, emb_b).squeeze(1)
-
-        # Update pos_weight in loss (in case it changed externally)
-        loss = self.loss_fn(logits, labels.float())
-
-        # Backward pass — gradients accumulate on emb_a and emb_b
-        loss.backward()
-
-        assert emb_a.grad is not None, "grad_emb_a is None — check requires_grad"
-        assert emb_b.grad is not None, "grad_emb_b is None — check requires_grad"
-
-        return loss.detach(), emb_a.grad.clone(), emb_b.grad.clone()
 
     def set_pos_weight(self, n_neg: int, n_pos: int) -> None:
         """Set class imbalance weight. Call before training.

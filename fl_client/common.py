@@ -308,9 +308,17 @@ def generate_embeddings(spec: SiloSpec, msg: Message, context: Context) -> Messa
     if spec.sends_labels:
         arrays["labels"] = Array(y[idx].numpy())
 
+    n_pos = int((y == 1).sum())
+    n_neg = int(len(y) - n_pos)
+    
     content = RecordDict({
         "arrays": ArrayRecord(arrays),
-        "config": ConfigRecord({"pos": spec.partition_id, "n-total": int(len(X))}),
+        "config": ConfigRecord({
+            "pos": spec.partition_id,
+            "n-total": int(len(X)),
+            "n-neg":n_neg,
+            "n-pos":n_pos,
+        }),
     })
     if tracker is not None:
         content["privacy"] = ConfigRecord(tracker.to_dict())
