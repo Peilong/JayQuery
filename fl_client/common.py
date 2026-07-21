@@ -29,6 +29,8 @@ from privacy.noise_injection import add_gaussian_noise, clip_embedding_rows
 from privacy.privacy_accountant import PrivacyBudgetTracker, solve_noise_multiplier
 from utils.wandb_utils import log_client_rounds, new_run_id
 
+from contextlib import contextmanager
+
 
 def _build_model(spec: SiloSpec, context: Context) -> torch.nn.Module:
     """Construct the silo's model, restoring weights from context.state if present."""
@@ -226,6 +228,22 @@ def _log(
     if flush or interval <= 1 or len(entries) >= 2 * interval:
         _flush_wandb_buffer(spec, context)
 
+@contextmanager
+def _frozen_bn_stats(model: torch.nn.Module):
+    """Forward without updating BatchNorm running stats.
+    """
+    bns = [
+        m for m in model.modules()
+        if isinstance(m, torch.nn.modules.batchnorm._BatchNorm)
+    ]
+    saved = [m.momentum for m in bns]
+    for m in bns:
+        m.momentum = 0.0
+    try:
+        yield
+    finally:
+        for m, mom in zip(bns, saved):
+            m.momentum = mom
 
 # ── handlers ─────────────────────────────────────────────────────────────────
 
@@ -397,7 +415,8 @@ def apply_gradients(spec: SiloSpec, msg: Message, context: Context) -> Message:
     grad = torch.from_numpy(msg.content["gradients"]["local-gradients"].numpy())
 
     optimizer.zero_grad()
-    embedding = model(X)
+    with _frozen_bn_stats(model):
+        embedding = model(X)
 
     if (rec := context.state.get("sent_embedding")) is not None:
         sent = torch.from_numpy(rec["v"].numpy())

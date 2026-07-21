@@ -68,3 +68,7 @@
 - Implementation note: We use XGBoost in our baselines, but we do not plan to use it in the production workflow. This paper is helpful in understanding the algorithm and how it is a good baseline for our problem, but it lacks any importance in the implementation of our project.
 
 ---
+
+## Other
+### Batch Norm
+BatchNorm couples samples within a batch, which is unstable under Poisson sampling and incompatible with per-sample DP accounting — is a solid Methods-section paragraph.
