@@ -629,9 +629,9 @@ def build_flwr_sweep_fn(
 
             sweep_tag = getattr(run, "sweep_id", run.id)
             if sweep_tag:
-                tag= f"sweep-{sweep_tag}"
-                cfg.setdefault("wandb-sweep-tag",tag)
-                if tag not in (run.tag or ()):
+                tag = f"sweep-{sweep_tag}"
+                cfg.setdefault("wandb-sweep-tag", tag)
+                if tag not in (run.tags or ()):
                     run.tags = tuple(run.tags or ()) + (tag,)
 
             run_config_str = " ".join(f"{k}={_fmt_run_config_value(v)}" for k, v in cfg.items())
