@@ -86,7 +86,7 @@ AVAILABLE_MODELS = {
 }
 
 
-def parse_args() -> None:
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run centralized baseline models.")
     parser.add_argument(
         "--config", type=str, default="experiments/configs/exp01_centralized_baselines.yaml"
@@ -131,12 +131,17 @@ def main() -> None:
 
     training = exp["training"]
     experiment = exp["experiment"]
+    arch = exp.get("architecture", {})
+    evaluation = exp.get("evaluation", {})
 
     cfg = {
         "lr": float(training["learning_rate"]),
-        "epochs": int(training["epochs"]),
-        "batch_size": int(training["batch_size"]),
-        "dropout_rate": float(training["dropout_rate"]),
+        "gradient_steps": int(training["gradient_steps"]),
+        "batch_fraction": float(training["batch_fraction"]),
+        "warmup_steps": int(training.get("warmup_steps", 0)),
+        "grad_clip_norm": training.get("grad_clip_norm") or None,
+        "dropout_rate": float(arch.get("dropout_top", 0.2)),
+        "class_weighting": evaluation.get("class_weighting", "none"),
         "seed": int(exp["data"]["seed"]),
     }
 
@@ -144,7 +149,7 @@ def main() -> None:
 
     # Data Prep ------------------------
     try:
-        a_train_loader, a_val_loader, a_test_loader = load_silo_a(bypass_psi=True)
+        a_train_loader, a_val_loader, a_test_loader = load_silo_a()
         b_train_loader, b_val_loader, b_test_loader = load_silo_b()
     except Exception as e:
         print(f"Exception: {e}")
