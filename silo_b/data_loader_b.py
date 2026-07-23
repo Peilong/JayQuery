@@ -11,7 +11,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-FEATURE_COUNT = 27
+FEATURE_COUNT = 26  # rate_v1 layout (docs/DATA_DICTIONARY.md)
 
 
 class SiloBDataset(Dataset):

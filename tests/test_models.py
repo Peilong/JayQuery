@@ -126,8 +126,41 @@ def test_eval_utils_metrics_keys() -> None:
     y_true = np.array([0, 1, 0, 1, 1, 0])
     y_prob = np.array([0.1, 0.9, 0.2, 0.8, 0.7, 0.3])
     metrics = compute_metrics(y_true, y_prob)
-    required = {"auc_roc", "accuracy", "f1_macro", "precision", "recall", "brier_score"}
+    required = {
+        "auc_roc", "accuracy", "f1_macro", "precision", "recall", "brier_score",
+        "pred_std", "pred_mean", "pred_pos_rate", "base_rate", "pred_collapsed",
+    }
     assert required.issubset(metrics.keys()), f"Missing keys: {required - metrics.keys()}"
+
+
+@pytest.mark.model
+def test_eval_utils_health_flags_collapse() -> None:
+    """pred_collapsed fires on one-class predictions, stays 0 on healthy ones."""
+    import numpy as np
+
+    from baselines.eval_utils import compute_metrics
+
+    y_true = np.array([0, 1, 0, 1, 1, 0, 0, 1])
+
+    # Healthy: spread-out probabilities on both sides of the threshold.
+    healthy = compute_metrics(y_true, np.array([0.1, 0.9, 0.2, 0.8, 0.7, 0.3, 0.15, 0.85]))
+    assert healthy["pred_collapsed"] == 0.0
+    assert healthy["pred_std"] > 0.05
+    assert healthy["base_rate"] == 0.5
+
+    # Collapsed: near-constant output → predicts negative for every row.
+    constant = compute_metrics(y_true, np.full(8, 0.42))
+    assert constant["pred_collapsed"] == 1.0
+    assert constant["pred_std"] == 0.0
+    assert constant["pred_pos_rate"] == 0.0
+    assert constant["recall"] == 0.0  # classic all-negative signature
+
+    # Collapsed the other way: everything predicted positive.
+    all_pos = compute_metrics(y_true, np.linspace(0.6, 0.99, 8))
+    assert all_pos["pred_collapsed"] == 1.0
+    assert all_pos["pred_pos_rate"] == 1.0
+    assert all_pos["recall"] == 1.0  # recall=1 + precision≈base_rate signature
+    assert all_pos["precision"] == all_pos["base_rate"]
 
 
 # ---------------------------------------------------------------------------

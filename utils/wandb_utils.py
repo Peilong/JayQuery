@@ -92,7 +92,33 @@ _SCALAR_METRIC_KEYS = [
     "recall",
     "brier_score",
     "avg_precision",
+    "pred_std",
+    "pred_mean",
+    "pred_pos_rate",
+    "base_rate",
+    "pred_collapsed",
 ]
+
+# Compact metric glossary attached as run notes (shown on the wandb run
+# Overview tab) so every run documents its own metrics + failure thresholds.
+# Full explanations: docs/metrics_glossary.md.
+METRICS_GLOSSARY_NOTES = """\
+METRIC GUIDE (full doc: docs/metrics_glossary.md)
+Health checks — read these FIRST:
+- pred_collapsed: 1.0 = FAILURE, model predicts one class. Must be 0.
+- pred_std: std of predicted probs. < 0.05 = near-constant output (bad).
+  Healthy runs land ~0.15-0.30.
+- pred_pos_rate vs base_rate: fraction predicted positive vs actual positive
+  fraction. 0.0 or 1.0 = one-class; far from base_rate = miscalibrated.
+Quality:
+- auc_roc: ranking quality, threshold-free. 0.5 = chance; want > 0.75 here.
+- recall: fraction of true dropouts caught. recall=1 + precision=base_rate
+  means 'predict everyone positive' (collapse).
+- precision: fraction of flagged students actually at risk.
+- f1_macro: class-balanced F1; punishes one-class prediction hard.
+- brier_score: probability calibration, lower is better (< base_rate*(1-base_rate)
+  beats the constant-base-rate predictor).
+"""
 
 
 def _require_wandb()->Any:

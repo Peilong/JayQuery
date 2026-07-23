@@ -192,7 +192,7 @@ num-server-rounds        = 50
 learning-rate            = 1e-2
 embedding-dim            = 32
 input-dim-a              = 18     # 6 encoded + 12 region one-hots (drop-first) — matches prepare_silos.py
-input-dim-b              = 27     # 7 assessment/VLE stats + 20 vle_clicks_* — matches prepare_silos.py
+input-dim-b              = 26     # rate_v1: 6 stats + 20 vle rates; legacy v0 = 27 (docs/DATA_DICTIONARY.md)
 processed-dir            = "data/processed"
 seed                     = 42     # also seeds the per-round batch selection
 batch-sample-rate        = 0.1    # Poisson sampling rate q; 1.0 = full-batch rounds

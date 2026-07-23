@@ -1,6 +1,8 @@
 # wandb sweep over the VFL run — consumed by scripts/run_sweep.py.
-# Every key except cutoff-week maps 1:1 to a [tool.flwr.app.config] run-config key;
-# cutoff-week is translated to a per-week processed-dir by prepare_cutoff_week().
+# Every key except cutoff-week maps 1:1 to a [tool.flwr.app.config] run-config key.
+# Trials use the rate_v1 data/processed by default; cutoff-week (legacy v0) is only
+# honored under run_sweep.py --enable-cutoff-week, which repoints processed-dir
+# and input-dim-b per trial (docs/DATA_DICTIONARY.md).
 # Metric: val/auc_best, read from the server's meta.json after each trial.
 name: vfl-hparam-sweep
 method: bayes
@@ -38,5 +40,6 @@ parameters:
     values: [0.0, 0.5, 1.0, 2.0]
   lr-warmup-rounds:
     values: [0, 10, 25]
-  cutoff-week:
-    values: [1, 3, 5, 8, 10]
+  # Legacy v0 only — uncomment together with run_sweep.py --enable-cutoff-week:
+  # cutoff-week:
+  #   values: [1, 3, 5, 8, 10]
