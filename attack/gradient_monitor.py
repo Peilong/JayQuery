@@ -1,7 +1,7 @@
 """Gradient Norm Monitor — passive defense detecting anomalous gradient magnitudes.
 
 Owner: Wyatt Wilfong
-Status: SCAFFOLD — implement in Week 9.
+Status: IMPLEMENTED
 
 Flags rounds where incoming gradient norms are >3x the running mean,
 which can indicate an active gradient-based attack.

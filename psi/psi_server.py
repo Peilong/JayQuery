@@ -1,7 +1,7 @@
 """PSI Server — receives blinded IDs, re-blinds with server key, returns doubly-blinded set.
 
 Owner: Wyatt Wilfong
-Status: SCAFFOLD — implement TODO sections in Week 3.
+Status: COMPLETE
 
 Protocol (Pinkas 2018 §2, simplified ECDH-PSI):
   1. Client sends:  {H(id_i)^client_key  for id_i in client_set}
@@ -35,16 +35,6 @@ def run_server(
         server_ids: The list of student IDs in this server's dataset (Silo B).
         host: Server bind address.
         port: Server listen port.
-
-    TODO (Wyatt, Week 3 — Steps 5 in CLAUDE.md):
-        1. Generate server keypair: server_private, server_public = generate_keypair()
-        2. Blind all server IDs:
-               blinded_server = [blind_id(id, server_private) for id in server_ids]
-        3. Accept one TCP connection from the client.
-        4. Receive the client's blinded ID list (length-prefixed JSON of hex strings).
-        5. Re-blind each received item with server_private to get doubly-blinded client set.
-        6. Send back: (blinded_server_set, doubly_blinded_client_set) as JSON.
-        7. Close connection.
     """
     server_private, _ = generate_keypair()
     blinded_server_set = [blind_id(id, server_private) for id in server_ids]

@@ -36,10 +36,6 @@ def generate_keypair() -> tuple[EllipticCurvePrivateKey, EllipticCurvePublicKey]
 
     Example:
         private_key, public_key = generate_keypair()
-
-    TODO (Wyatt, Week 2 — Step 2 in CLAUDE.md):
-        Implement this function using generate_private_key(SECP256R1(), default_backend()).
-        Return (private_key, private_key.public_key()).
     """
     private_key = generate_private_key(SECP256R1(), default_backend())
     return (private_key, private_key.public_key())
@@ -58,13 +54,6 @@ def blind_id(id_string: str, private_key: EllipticCurvePrivateKey) -> bytes:
 
     Returns:
         64 bytes representing the blinded ID point (uncompressed x,y coords).
-
-    TODO (Wyatt, Week 2 — Step 3 in CLAUDE.md):
-        1. Hash id_string with SHA-256 to get 32 bytes.
-        2. Use those bytes as the x-coordinate to derive a deterministic public key.
-           (Ask Alex or Dr. Li for the `_derive_public_key_from_hash` helper pattern.)
-        3. Perform ECDH exchange: shared = private_key.exchange(ECDH(), derived_pubkey)
-        4. Return the shared secret bytes (64 bytes).
     """
     scalar = int.from_bytes(hash_id(id_string), byteorder="big") % _ORDER
     k = private_key.private_numbers().private_value
