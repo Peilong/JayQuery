@@ -39,11 +39,19 @@ class GradientNormMonitor:
                is_anomalous = (norm > self.threshold * running_mean)
             4. Return (norm, is_anomalous).
         """
-        norm = gradient.norm(p = 2).item()
+        norm = gradient.norm(p=2).item()
         self._history.append(norm)
+        # Keep only the most recent `window` rounds in the running average.
+        if len(self._history) > self.window:
+            self._history = self._history[-self.window :]
+
+        # Need at least two prior rounds before a running mean is meaningful; until
+        # then nothing is flagged (avoids a false alarm on cold-start).
+        is_anomalous = False
         if len(self._history) >= 3:
-            running_mean = torch.mean(self._history[:-1])
-            is_anomalous = (norm > self.threshold * running_mean)
+            prior = self._history[:-1]
+            running_mean = sum(prior) / len(prior)
+            is_anomalous = norm > self.threshold * running_mean
         return (norm, is_anomalous)
 
     @property
