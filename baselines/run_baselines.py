@@ -38,7 +38,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from baselines import centralized_lr, centralized_mlp, centralized_xgb, isolated_mlp
 from silo_a.data_loader_a import load_silo_a
 from silo_b.data_loader_b import load_silo_b
-from utils.wandb_utils import run_with_tracking
+from utils.wandb_utils import METRICS_GLOSSARY_NOTES, run_with_tracking
 
 
 def make_run_injector(train_fn) -> "callable":
@@ -208,6 +208,7 @@ def main() -> None:
             name=f"{experiment['name']}-{model_name}",
             group=f"{experiment['name']}-{model_name}",
             tags=model_cfg["tags"] + [f"week{experiment['week']}"],
+            notes=METRICS_GLOSSARY_NOTES,
             # Inject the active run into train_kwargs iff this train_fn takes it.
             on_run_created=make_run_injector(model_cfg["train_fn"]),
         )

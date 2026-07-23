@@ -112,6 +112,13 @@ def train_and_evaluate(
                 {
                     "val/auc_roc": val_metrics["auc_roc"],
                     "val/f1": val_metrics["f1_binary"],
+                    "val/precision": val_metrics["precision"],
+                    "val/recall": val_metrics["recall"],
+                    # Health: pred_std ~ 0 or pred_collapsed = 1 means the model
+                    # is outputting one class — see docs/metrics_glossary.md.
+                    "val/pred_std": val_metrics["pred_std"],
+                    "val/pred_pos_rate": val_metrics["pred_pos_rate"],
+                    "val/pred_collapsed": val_metrics["pred_collapsed"],
                 },
                 run=run,
                 step=epoch,

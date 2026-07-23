@@ -18,7 +18,7 @@ evaluation:
 
 architecture:                 # mirror the VFL run exactly
   input_dim_a: 18
-  input_dim_b: 27
+  input_dim_b: 26  # rate_v1 layout (docs/DATA_DICTIONARY.md)
   embedding_dim: 32
   hidden_dim_a: 64
   hidden_dim_b: 96

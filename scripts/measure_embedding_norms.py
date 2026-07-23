@@ -140,7 +140,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     # Config defaults mirror pyproject.toml [tool.flwr.app.config].
     parser.add_argument("--input-dim-a", type=int, default=18)
-    parser.add_argument("--input-dim-b", type=int, default=27)
+    parser.add_argument("--input-dim-b", type=int, default=26)
     parser.add_argument("--embedding-dim", type=int, default=32)
     parser.add_argument("--dropout-rate", type=float, default=0.3)
     parser.add_argument("--batch-size", type=int, default=64)

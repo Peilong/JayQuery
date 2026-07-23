@@ -50,6 +50,7 @@ from privacy.privacy_accountant import (
     combine_epsilon,
     solve_noise_multiplier,
 )
+from utils.wandb_utils import METRICS_GLOSSARY_NOTES
 
 app = ServerApp()
 
@@ -101,6 +102,7 @@ def main(grid: Grid, context: Context) -> None:
             name=context.run_config.get("wandb-run-name", "") or "server",
             group=context.run_config.get("wandb-group", "") or None,
             tags=tags,
+            notes=METRICS_GLOSSARY_NOTES,
             config={
                 "num-server-rounds": num_rounds,
                 "learning-rate": lr,
@@ -245,6 +247,17 @@ def main(grid: Grid, context: Context) -> None:
             loss_ema_alpha * float(loss) + (1.0 - loss_ema_alpha) * loss_ema
         )
 
+        # Train-batch prediction health, from the logits we already have.
+        # pred_std ~ 0 or pred_pos_rate pinned at 0/1 = one-class collapse
+        # (see docs/metrics_glossary.md) — visible EVERY round, unlike val/.
+        with torch.no_grad():
+            batch_probs = torch.sigmoid(logits.detach())
+        train_health = {
+            "train/pred_std": float(batch_probs.std()),
+            "train/pred_pos_rate": float((batch_probs >= 0.5).float().mean()),
+            "train/label_pos_rate": float(labels.float().mean()),
+        }
+
         if server_tracker is not None:
             server_tracker.step()
         eps_metrics = _epsilon_metrics(server_tracker, client_trackers, dp["delta"])
@@ -253,18 +266,34 @@ def main(grid: Grid, context: Context) -> None:
 
         if track:
             wandb.log({"train/loss": float(loss), "train/loss_ema": loss_ema,
-                       "train/lr": current_lr, **eps_metrics}, step=round_num)
+                       "train/lr": current_lr, **train_health, **eps_metrics}, step=round_num)
 
         save_best_now = False
         if round_num % eval_every == 0:
             src = train_model._module if dp["enabled"] else top_model
             eval_model = TopModel(**top_kwargs)
             eval_model.load_state_dict(src.state_dict())
-            val_auc = float(_run_eval(grid, node_ids, eval_model, split="val")["auc_roc"])
+            val_metrics = _run_eval(grid, node_ids, eval_model, split="val")
+            val_auc = float(val_metrics["auc_roc"])
             if track:
-                wandb.log({"val/auc": val_auc}, step=round_num)
+                # Full suite (recall/precision/f1/brier/confusion counts +
+                # pred_std/pred_collapsed health flags) as per-round curves,
+                # so mis-prediction modes show up mid-run — not just at the
+                # single final test point. "val/auc" key kept for continuity.
+                wandb.log(
+                    {"val/auc": val_auc,
+                     **{f"val/{k}": float(v) for k, v in val_metrics.items()
+                        if isinstance(v, int | float)}},
+                    step=round_num,
+                )
             log(INFO, "Round %d — val/auc: %.4f (best %.4f @ round %d)",
                 round_num, val_auc, best_val_auc, best_round)
+            if val_metrics["pred_collapsed"]:
+                log(WARNING,
+                    "Round %d — val predictions COLLAPSED to one class "
+                    "(pred_std=%.4f, pred_pos_rate=%.4f, base_rate=%.4f)",
+                    round_num, val_metrics["pred_std"], val_metrics["pred_pos_rate"],
+                    val_metrics["base_rate"])
 
             if val_auc > best_val_auc + min_delta:
                 best_val_auc, best_round = val_auc, round_num

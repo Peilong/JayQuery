@@ -15,7 +15,7 @@ RAW_DIR = Path("data/raw")
 FIXTURE_DIR = Path("tests/fixtures")  # synthetic OULAD data committed for CI
 MODULE = "CCC_2014J"
 A_FEATURE_COUNT = 18
-B_FEATURE_COUNT = 27
+B_FEATURE_COUNT = 26  # rate_v1 layout (docs/DATA_DICTIONARY.md)
 PSI_AVAILABLE = False
 
 
@@ -50,6 +50,11 @@ def raw_student_assessment():
 
 
 @pytest.fixture(scope="module")
+def raw_courses():
+    return pd.read_csv(_csv_dir() / "courses.csv")
+
+
+@pytest.fixture(scope="module")
 def prepared_silo_a(raw_student_info):
     from scripts.prepare_silos import prepare_silo_a_data
 
@@ -62,6 +67,17 @@ def prepared_silo_b(raw_student_vle, raw_vle, raw_assessments, raw_student_asses
 
     return prepare_silo_b_data(
         MODULE, raw_student_vle, raw_vle, raw_assessments, raw_student_assessment
+    )
+
+
+@pytest.fixture(scope="module")
+def prepared_silo_b_rate(
+    raw_student_vle, raw_vle, raw_assessments, raw_student_assessment, raw_courses
+):
+    from scripts.prepare_silos import prepare_silo_b_rate_v1
+
+    return prepare_silo_b_rate_v1(
+        MODULE, raw_student_vle, raw_vle, raw_assessments, raw_student_assessment, raw_courses
     )
 
 
@@ -246,6 +262,150 @@ class TestPreparedSiloB:
         vle_cols = [c for c in prepared_silo_b.columns if c.startswith("vle_clicks_")]
         result = (prepared_silo_b[vle_cols].fillna(0) >= 0).all(axis=None)
         assert bool(result), "All vle_clicks_ values should be non-negative"
+
+
+# ── Silo B: prepare_silo_b_rate_v1() ─────────────────────────────────────────
+
+
+class TestPreparedSiloBRateV1:
+    def test_has_rows(self, prepared_silo_b_rate):
+        assert len(prepared_silo_b_rate) > 0, "rate_v1 Silo B DataFrame should not be empty"
+
+    def test_expected_columns_present(self, prepared_silo_b_rate):
+        expected = {
+            "id_student",
+            "weighted_score_pct",
+            "participation_rate",
+            "submission_ratio",
+            "regularity",
+            "start_date",
+            "clicks_per_active_week",
+        }
+        assert expected.issubset(
+            prepared_silo_b_rate.columns
+        ), f"Missing columns: {expected - set(prepared_silo_b_rate.columns)}"
+
+    def test_leaky_v0_columns_absent(self, prepared_silo_b_rate):
+        leaky = {"end_date", "sum_click", "active_days", "num_assessments"}
+        assert leaky.isdisjoint(
+            prepared_silo_b_rate.columns
+        ), f"Leaky v0 columns present: {leaky & set(prepared_silo_b_rate.columns)}"
+
+    def test_vle_rate_columns_present(self, prepared_silo_b_rate):
+        vle_cols = [c for c in prepared_silo_b_rate.columns if c.startswith("vle_clicks_")]
+        assert len(vle_cols) > 0, "No vle_clicks_*_per_week columns found"
+        assert all(c.endswith("_per_week") for c in vle_cols), "VLE columns must be rates"
+
+    def test_ratios_in_range(self, prepared_silo_b_rate):
+        for col in ["weighted_score_pct", "participation_rate", "submission_ratio"]:
+            vals = prepared_silo_b_rate[col].dropna()
+            assert vals.between(0, 1).all(), f"{col} values should be in [0, 1]"
+
+    def test_regularity_bounded(self, prepared_silo_b_rate):
+        vals = prepared_silo_b_rate["regularity"].dropna()
+        # Max is 8/7 from span-boundary effects (docs/DATA_DICTIONARY.md)
+        assert vals.between(0, 8 / 7 + 1e-9).all(), "regularity out of expected bounds"
+
+    def test_rates_non_negative(self, prepared_silo_b_rate):
+        rate_cols = ["clicks_per_active_week"] + [
+            c for c in prepared_silo_b_rate.columns if c.startswith("vle_clicks_")
+        ]
+        result = (prepared_silo_b_rate[rate_cols].fillna(0) >= 0).all(axis=None)
+        assert bool(result), "Rate columns should be non-negative"
+
+    def test_no_label_column(self, prepared_silo_b_rate):
+        assert "label" not in prepared_silo_b_rate.columns
+        assert "final_result" not in prepared_silo_b_rate.columns
+
+
+class TestRateV1Computation:
+    """Exact-value checks on a tiny hand-computed synthetic module (docs/DATA_DICTIONARY.md)."""
+
+    @pytest.fixture(scope="class")
+    def rate_output(self):
+        from scripts.prepare_silos import prepare_silo_b_rate_v1
+
+        vle = pd.DataFrame(
+            {
+                "id_site": [1],
+                "code_module": ["CCC"],
+                "code_presentation": ["2014J"],
+                "activity_type": ["resource"],
+                "week_from": [np.nan],
+                "week_to": [np.nan],
+            }
+        )
+        # Student 1: clicks on days 0/14, submits on day 21. Student 3: one day-0 click.
+        student_vle = pd.DataFrame(
+            {
+                "code_module": ["CCC"] * 3,
+                "code_presentation": ["2014J"] * 3,
+                "id_student": [1, 1, 3],
+                "id_site": [1, 1, 1],
+                "date": [0, 14, 0],
+                "sum_click": [30, 40, 10],
+            }
+        )
+        assessments = pd.DataFrame(
+            {
+                "id_assessment": [11, 12, 13],
+                "code_module": ["CCC"] * 3,
+                "code_presentation": ["2014J"] * 3,
+                "assessment_type": ["TMA", "TMA", "Exam"],
+                "date": [10.0, 50.0, np.nan],
+                "weight": [40.0, 60.0, 100.0],
+            }
+        )
+        # Student 2 is banked-only (sentinel date_submitted = -1, no VLE activity)
+        student_assessment = pd.DataFrame(
+            {
+                "id_student": [1, 2],
+                "id_assessment": [11, 11],
+                "date_submitted": [21, -1],
+                "is_banked": [0, 1],
+                "score": [80.0, 50.0],
+            }
+        )
+        courses = pd.DataFrame(
+            {
+                "code_module": ["CCC"],
+                "code_presentation": ["2014J"],
+                "module_presentation_length": [100],
+            }
+        )
+        return prepare_silo_b_rate_v1(
+            "CCC_2014J", student_vle, vle, assessments, student_assessment, courses
+        ).set_index("id_student")
+
+    def test_assessment_ratios_student1(self, rate_output):
+        # Window [0, 21] -> weeks 3; D = {A11 (w=40)}; submitted A11 with score 80
+        row = rate_output.loc[1]
+        assert row["weighted_score_pct"] == pytest.approx(0.8)
+        assert row["participation_rate"] == pytest.approx(1.0)
+        assert row["submission_ratio"] == pytest.approx(1.0)
+
+    def test_click_rates_student1(self, rate_output):
+        row = rate_output.loc[1]
+        assert row["clicks_per_active_week"] == pytest.approx(70 / 3)
+        assert row["vle_clicks_resource_per_week"] == pytest.approx(70 / 3)
+        assert row["regularity"] == pytest.approx(2 / 21)
+        assert row["start_date"] == pytest.approx(0.0)
+
+    def test_banked_only_student_excluded(self, rate_output):
+        assert 2 not in rate_output.index, "Banked-only student must have no active window"
+
+    def test_empty_due_set_ratios_zero(self, rate_output):
+        # Student 3's window [0, 0] closes before the first due date (day 10)
+        row = rate_output.loc[3]
+        assert row["weighted_score_pct"] == 0.0
+        assert row["participation_rate"] == 0.0
+        assert row["submission_ratio"] == 0.0
+
+    def test_week_clamp_single_day_student(self, rate_output):
+        # Span 0 clamps weeks_active to 1
+        row = rate_output.loc[3]
+        assert row["clicks_per_active_week"] == pytest.approx(10.0)
+        assert row["regularity"] == pytest.approx(1 / 7)
 
 
 # ── build_silo_a() ────────────────────────────────────────────────────────────
