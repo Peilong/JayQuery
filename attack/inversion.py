@@ -83,7 +83,10 @@ def run_inversion_attack(
         Step 5: predicted = dummy_input[0, IMD_BAND_COL_IDX].round().clamp(0, 9).int().item()
                 success = (predicted == true_imd_band)
     """
-    dummy_input = torch.randn(1, 12, requires_grad = True)
+    # Infer the true feature width from the model's first Linear so the dummy input
+    # matches BottomModelA's input_dim (18 for Silo A) — never a hard-coded guess.
+    input_dim = model.encoder[0].in_features
+    dummy_input = torch.randn(1, input_dim, requires_grad = True)
     optimizer_attack = torch.optim.LBFGS([dummy_input], lr = lr)
     for i in range(num_iters):
         def closure():
