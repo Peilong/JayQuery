@@ -1,7 +1,7 @@
 """Model Inversion Attack (iDLG / gradient-matching) against Silo A embeddings.
 
 Owner: Wyatt Wilfong
-Status: SCAFFOLD — implement in Week 8. Alex provides checkpoint loader utility.
+Status: IMPLEMENTED
 
 Goal: Given only the embedding vector emitted by BottomModelA (the "cut layer output"),
       can an attacker reconstruct the original input features — specifically, imd_band?
@@ -68,20 +68,6 @@ def run_inversion_attack(
     Returns:
         Dict with keys: {success (bool), predicted_imd_band (int),
                          true_imd_band (int), final_loss (float), iters (int)}.
-
-    TODO (Wyatt, Week 8 — Steps 3–5 in CLAUDE.md attack guide):
-        Step 3: dummy_input = torch.randn(1, 12, requires_grad=True)
-        Step 4: optimizer_attack = torch.optim.LBFGS([dummy_input], lr=lr)
-                for i in range(num_iters):
-                    def closure():
-                        optimizer_attack.zero_grad()
-                        dummy_emb = model(dummy_input)
-                        loss = ((dummy_emb - real_embedding.detach()) ** 2).sum()
-                        loss.backward()
-                        return loss
-                    optimizer_attack.step(closure)
-        Step 5: predicted = dummy_input[0, IMD_BAND_COL_IDX].round().clamp(0, 9).int().item()
-                success = (predicted == true_imd_band)
     """
     # Infer the true feature width from the model's first Linear so the dummy input
     # matches BottomModelA's input_dim (18 for Silo A) — never a hard-coded guess.
@@ -120,9 +106,6 @@ def evaluate_attack_across_epsilon(
         output_csv: Path to write results CSV.
 
     Output CSV columns: [epsilon, asr, n_students, mean_final_loss]
-
-    TODO (Wyatt, Week 9): loop over epsilon_values, load checkpoint, run attack
-                          on first n_students samples, record ASR in output_csv.
     """
     checkpoint_dir = Path(checkpoint_dir)
     results: list[dict] = []  # one summary row per epsilon

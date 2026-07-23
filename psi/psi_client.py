@@ -1,7 +1,7 @@
 """PSI Client — aligns student IDs with Silo B without revealing non-intersecting IDs.
 
 Owner: Wyatt Wilfong
-Status: SCAFFOLD — implement TODO sections in Week 3.
+Status: COMPLETE
 
 After PSI, writes data/processed/ordered_id_list.json — the intersection of
 Silo A and Silo B student IDs in sorted order. Alex's DataLoaders use this file
@@ -43,22 +43,6 @@ def run_psi(
     Returns:
         Sorted list of student IDs present in BOTH Silo A and Silo B.
         Also writes the result to data/processed/ordered_id_list.json.
-
-    TODO (Wyatt, Week 3 — Step 6 in CLAUDE.md):
-        1. Generate client keypair.
-        2. Blind local_ids with client_private_key.
-        3. Connect to server via TCP socket.
-        4. Send blinded_client_ids as length-prefixed JSON.
-        5. Receive (blinded_server_set, doubly_blinded_client_set) from server.
-        6. Blind blinded_server_set with client_private_key → doubly_blinded_server.
-        7. Intersection = {id for id in local_ids
-               if blind_id(id)^both_keys in doubly_blinded_server}
-           IMPORTANT: Sort the result before returning.
-        8. Write sorted intersection to OUTPUT_PATH as JSON.
-        9. Return sorted intersection list.
-
-    Common mistake (see CLAUDE.md):
-        Always sort() both sets before comparing — Python sets are unordered.
     """
     client_private, _ = generate_keypair()
     
