@@ -12,7 +12,7 @@ import wandb
 # ---------------------------------------------------------------------------
 ENTITY = "jayquery"
 PROJECT = "jayquery-vfl"
-RUN_ID = "0i3c5z14"  # the short id in the run URL (.../runs/<RUN_ID>), not the display name
+RUN_ID = "98wy6oor"  # the short id in the run URL (.../runs/<RUN_ID>), not the display name
 OUTPUT_FILENAME = "wandb_run_charts.csv"
 
 # Wall-clock columns W&B adds automatically. Keep them or drop them here.

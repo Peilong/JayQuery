@@ -42,7 +42,7 @@ from flwr.common import log
 from flwr.serverapp import Grid, ServerApp
 
 import wandb
-from baselines.eval_utils import compute_metrics
+from baselines.eval_utils import compute_metrics, recall_at_precision, tune_threshold
 from fl_server.top_model import TopModel
 from privacy.dp_wrapper import make_private_with_noise
 from privacy.privacy_accountant import (
@@ -228,6 +228,16 @@ def main(grid: Grid, context: Context) -> None:
         logits = train_model(emb_a, emb_b).squeeze(1)
         loss = top_model.loss_fn(logits, labels.float())
         loss.backward()
+
+        if dp["enabled"]:
+            with torch.no_grad():
+                norms = torch.stack([
+                    p.grad_sample.reshape(p.grad_sample.shape[0], -1).norm(2, dim=1)
+                    for p in train_model.parameters() if hasattr(p, "grad_sample")
+                ]).norm(2, dim=0)
+            log(INFO, "per-sample grad norm: median=%.4f p90=%.4f frac_clipped=%.3f",
+                norms.median(), norms.quantile(0.9), (norms > dp["max_grad_norm"]).float().mean())
+
         if emb_a.grad is None or emb_b.grad is None:
             raise RuntimeError(
                 f"[server] input grads are None after backward "
@@ -351,10 +361,39 @@ def main(grid: Grid, context: Context) -> None:
 
     final_eval = TopModel(**top_kwargs)
     final_eval.load_state_dict(top_sd)
-    test_metrics = _run_eval(
+
+    # Tune the decision threshold on VALIDATION, then score test at it. DP shrinks
+    # logits toward zero, so a model that ranks well can still put every probability
+    # below 0.5 and flag nobody; the tuned threshold recovers a usable operating
+    # point. The 0.5 result is kept alongside for an honest before/after.
+    thr_objective = str(context.run_config.get("threshold-objective", "f1"))
+    val_labels, val_probs = _collect_eval_predictions(grid, node_ids, final_eval, split="val")
+    tuned_threshold = tune_threshold(
+        val_labels.numpy(), val_probs.numpy(), objective=thr_objective
+    )
+    log(INFO, "Tuned decision threshold on val (%s): %.4f (default 0.5)",
+        thr_objective, tuned_threshold)
+
+    # restore-best rides on this final query so clients checkpoint their best bottoms.
+    test_labels, test_probs = _collect_eval_predictions(
         grid, node_ids, final_eval, split="test",
         extra_cfg={"restore-best": True, "eps-tag": eps_tag},
     )
+    y_true, y_prob = test_labels.numpy(), test_probs.numpy()
+    test_metrics = compute_metrics(y_true, y_prob, threshold=tuned_threshold)
+    test_metrics_at_half = compute_metrics(y_true, y_prob, threshold=0.5)
+    # Threshold-free operating points — the deployment view (does it catch dropouts?).
+    op_points = {
+        f"recall_at_precision_{int(p * 100)}": recall_at_precision(y_true, y_prob, p)
+        for p in (0.6, 0.7, 0.8)
+    }
+    test_metrics["tuned_threshold"] = tuned_threshold
+    test_metrics.update(op_points)
+    log(INFO, "Test @tuned=%.3f: recall=%.3f prec=%.3f f1=%.3f | @0.5: recall=%.3f | "
+        "AP=%.3f recall@prec0.7=%.3f",
+        tuned_threshold, test_metrics["recall"], test_metrics["precision"],
+        test_metrics["f1_binary"], test_metrics_at_half["recall"],
+        test_metrics["avg_precision"], op_points["recall_at_precision_70"])
 
     meta = {
         "epsilon": dp["epsilon"] if dp["enabled"] else None,
@@ -367,8 +406,11 @@ def main(grid: Grid, context: Context) -> None:
         "stopped_early": stopped_early,
         "best_val_auc": None if best_val_auc == float("-inf") else best_val_auc,
         "best_round": best_round,
+        "tuned_threshold": tuned_threshold,
+        "threshold_objective": thr_objective,
         "epsilon_spent": _epsilon_metrics(server_tracker, client_trackers, dp["delta"]),
         "metrics": test_metrics,
+        "metrics_at_0.5": test_metrics_at_half,
     }
     (ckpt_dir / "meta.json").write_text(json.dumps(meta, indent=2))
 
@@ -378,6 +420,9 @@ def main(grid: Grid, context: Context) -> None:
         log(INFO, "  Round %3d — loss: %.4f", r, loss_val)
     if track:
         summary = {f"test/{k}": v for k, v in test_metrics.items() if isinstance(v, int | float)}
+        # Keep the naive-0.5 recall/f1 so the tuned-vs-default gain is visible in wandb.
+        for k in ("recall", "precision", "f1_binary", "one_class_at_threshold"):
+            summary[f"test_at_0.5/{k}"] = test_metrics_at_half[k]
         if best_val_auc != float("-inf"):
             summary["val/auc_best"] = best_val_auc
         wandb.log(summary)
@@ -596,14 +641,18 @@ def _send_gradients(
     log(INFO, "Sending gradients to %d nodes...", len(messages))
     grid.push_messages(messages)
 
-def _run_eval(
+def _collect_eval_predictions(
     grid: Grid,
     node_ids: list[int],
     top_model: TopModel,
     split: str,
     extra_cfg: dict | None = None,
-) -> dict:
-    """Distributed eval round: both silos forward `split` embeddings, server scores.
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run one distributed eval round and return (labels, probs) as 1-D tensors.
+
+    Both silos forward their `split` embeddings; the server scores them with
+    `top_model`. Separated from metric computation so a caller can, e.g., tune a
+    decision threshold on the returned probabilities before scoring another split.
 
     Args:
         extra_cfg: Optional extra config merged into the query (e.g.
@@ -654,5 +703,17 @@ def _run_eval(
     probs = torch.sigmoid(logits)
     log(INFO, "probs: min=%.4f max=%.4f mean=%.4f | frac>0.5=%.4f | labels mean=%.4f",
         probs.min(), probs.max(), probs.mean(), (probs > 0.5).float().mean(), labels.float().mean())
-    
-    return compute_metrics(labels.numpy(), probs.numpy())
+    return labels, probs
+
+
+def _run_eval(
+    grid: Grid,
+    node_ids: list[int],
+    top_model: TopModel,
+    split: str,
+    extra_cfg: dict | None = None,
+    threshold: float = 0.5,
+) -> dict:
+    """Distributed eval round → metrics dict at the given decision `threshold`."""
+    labels, probs = _collect_eval_predictions(grid, node_ids, top_model, split, extra_cfg)
+    return compute_metrics(labels.numpy(), probs.numpy(), threshold=threshold)
