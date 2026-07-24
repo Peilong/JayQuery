@@ -134,33 +134,82 @@ def test_eval_utils_metrics_keys() -> None:
 
 
 @pytest.mark.model
-def test_eval_utils_health_flags_collapse() -> None:
-    """pred_collapsed fires on one-class predictions, stays 0 on healthy ones."""
+def test_eval_utils_collapse_is_auc_based() -> None:
+    """pred_collapsed fires only when the model has no ranking signal (AUC at chance).
+
+    A tight, off-center probability band (the DP signature) ranks correctly, so it is
+    NOT collapse — it is flagged by the non-fatal one_class_at_threshold diagnostic.
+    """
     import numpy as np
 
     from baselines.eval_utils import compute_metrics
 
     y_true = np.array([0, 1, 0, 1, 1, 0, 0, 1])
 
-    # Healthy: spread-out probabilities on both sides of the threshold.
+    # Healthy: spread-out, correctly-ranked probabilities on both sides of 0.5.
     healthy = compute_metrics(y_true, np.array([0.1, 0.9, 0.2, 0.8, 0.7, 0.3, 0.15, 0.85]))
     assert healthy["pred_collapsed"] == 0.0
+    assert healthy["one_class_at_threshold"] == 0.0
     assert healthy["pred_std"] > 0.05
-    assert healthy["base_rate"] == 0.5
 
-    # Collapsed: near-constant output → predicts negative for every row.
+    # DP signature: tight band all < 0.5 (flags nobody at 0.5) but perfectly ranked.
+    # Ranking is intact → NOT collapsed, but one_class_at_threshold + low variance fire.
+    dp_like = compute_metrics(y_true, np.array([0.40, 0.47, 0.41, 0.46, 0.45, 0.42, 0.43, 0.48]))
+    assert dp_like["auc_roc"] > 0.9  # ranking is fine
+    assert dp_like["pred_collapsed"] == 0.0  # so NOT a collapse
+    assert dp_like["one_class_at_threshold"] == 1.0  # but all predicted negative at 0.5
+    assert dp_like["pred_low_variance"] == 1.0
+    assert dp_like["recall"] == 0.0  # the "flags nobody" symptom the tuner fixes
+
+    # Genuine collapse: constant output → AUC undefined/at chance, no ranking signal.
     constant = compute_metrics(y_true, np.full(8, 0.42))
     assert constant["pred_collapsed"] == 1.0
-    assert constant["pred_std"] == 0.0
-    assert constant["pred_pos_rate"] == 0.0
-    assert constant["recall"] == 0.0  # classic all-negative signature
 
-    # Collapsed the other way: everything predicted positive.
-    all_pos = compute_metrics(y_true, np.linspace(0.6, 0.99, 8))
-    assert all_pos["pred_collapsed"] == 1.0
-    assert all_pos["pred_pos_rate"] == 1.0
-    assert all_pos["recall"] == 1.0  # recall=1 + precision≈base_rate signature
-    assert all_pos["precision"] == all_pos["base_rate"]
+    # Anti-correlated ranking (AUC ≈ 0) is also collapse — worse than chance.
+    reversed_rank = compute_metrics(y_true, np.array([0.9, 0.1, 0.8, 0.2, 0.3, 0.7, 0.85, 0.15]))
+    assert reversed_rank["auc_roc"] < 0.5
+    assert reversed_rank["pred_collapsed"] == 1.0
+
+
+@pytest.mark.model
+def test_tune_threshold_recovers_operating_point() -> None:
+    """tune_threshold finds a cutoff that un-collapses a well-ranked, off-center band."""
+    import numpy as np
+
+    from baselines.eval_utils import compute_metrics, recall_at_precision, tune_threshold
+
+    # Perfectly separable but compressed below 0.5 (positives 0.45-0.49, negatives 0.40-0.44).
+    y_true = np.array([0, 0, 0, 0, 1, 1, 1, 1])
+    y_prob = np.array([0.40, 0.41, 0.43, 0.44, 0.45, 0.47, 0.48, 0.49])
+
+    # At 0.5 the model flags nobody.
+    assert compute_metrics(y_true, y_prob, threshold=0.5)["recall"] == 0.0
+
+    thr = tune_threshold(y_true, y_prob, objective="f1")
+    assert 0.44 < thr <= 0.45  # separates the two classes (>= makes 0.45 perfect)
+    tuned = compute_metrics(y_true, y_prob, threshold=thr)
+    assert tuned["recall"] == 1.0 and tuned["precision"] == 1.0
+
+    # Deployment view: perfect ranking → full recall at any reachable precision.
+    assert recall_at_precision(y_true, y_prob, min_precision=0.8) == 1.0
+
+    # Youden objective and a recall target are also honored.
+    assert 0.44 < tune_threshold(y_true, y_prob, objective="youden") <= 0.45
+    thr_r = tune_threshold(y_true, y_prob, objective="recall", target_recall=1.0)
+    assert compute_metrics(y_true, y_prob, threshold=thr_r)["recall"] == 1.0
+
+
+@pytest.mark.model
+def test_tune_threshold_degenerate_inputs() -> None:
+    """Degenerate scores fall back to the median instead of raising."""
+    import numpy as np
+
+    from baselines.eval_utils import recall_at_precision, tune_threshold
+
+    y_true = np.array([0, 1, 0, 1])
+    assert tune_threshold(y_true, np.full(4, 0.42), objective="f1") == 0.42  # all-equal
+    assert tune_threshold(np.zeros(4), np.array([0.1, 0.2, 0.3, 0.4])) == 0.25  # single class
+    assert recall_at_precision(np.zeros(4), np.array([0.1, 0.2, 0.3, 0.4])) == 0.0
 
 
 # ---------------------------------------------------------------------------

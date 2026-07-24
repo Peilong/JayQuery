@@ -46,6 +46,7 @@ experiments/checkpoints/
 # ── wandb ────────────────────────────────────────────────────────
 wandb/
 .wandb/
+docs/wandb_results/
 
 # ── Jupyter ──────────────────────────────────────────────────────
 .ipynb_checkpoints/
