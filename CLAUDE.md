@@ -157,8 +157,26 @@ python -m psi.psi_client
 ### 5 — Prepare silos (Alex)
 ```bash
 python scripts/prepare_silos.py                 # default module CCC_2014J, seed 42
-# outputs silo_{a,b}.pkl + scaler_{a,b}.pkl into data/processed/
+# outputs silo_{a,b}.pkl + scaler_{a,b}.pkl + ordered_id_list.json + manifest.json
 ```
+Cohort selection is parameterized (`docs/action_plan.md` §E/§F). `--modules` **replaces**
+the old `--module`; `--dedup-rule {first,best,worst}` picks one enrolment per student
+(12.3% of OULAD students appear in >1 presentation — dedup enforces the one-record-per-person
+invariant the DP guarantee needs); `--withdrawal-cutoff-day` (default 0, `none` disables)
+drops pre-start withdrawals, who are non-starters rather than dropout risk.
+```bash
+# the three agreed variants over all 22 module-presentations
+python scripts/prepare_silos.py --modules all --dedup-rule first \
+    --out_dir data/processed/dedup_first     # PRIMARY
+python scripts/prepare_silos.py --modules all --dedup-rule best \
+    --out_dir data/processed/dedup_best      # sensitivity bound
+python scripts/prepare_silos.py --modules all --dedup-rule worst \
+    --out_dir data/processed/dedup_worst     # sensitivity bound
+```
+Point a run at a variant with the `processed-dir` run-config key. Each variant's
+`manifest.json` records the exact parameters + row counts that produced it.
+`--features v0` / `--cutoff_week` are **[DEPRECATED]** (leaky; they also bypass the
+cohort rules, so their labels are not comparable).
 
 ### 6 — Run VFL training (deployment: SuperLink + 2 SuperNodes)
 ```bash

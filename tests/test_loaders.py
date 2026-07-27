@@ -55,14 +55,31 @@ def raw_courses():
 
 
 @pytest.fixture(scope="module")
-def prepared_silo_a(raw_student_info):
+def raw_student_registration():
+    return pd.read_csv(_csv_dir() / "studentRegistration.csv")
+
+
+@pytest.fixture(scope="module")
+def cohort(raw_student_info, raw_student_registration):
+    """Deduplicated, label-corrected cohort for MODULE (docs/action_plan.md §E-a, §F)."""
+    from scripts.prepare_silos import build_cohort
+
+    cohort_df, _ = build_cohort(
+        raw_student_info, raw_student_registration, modules=[MODULE], dedup_rule="first"
+    )
+    return cohort_df
+
+
+@pytest.fixture(scope="module")
+def prepared_silo_a(cohort):
     from scripts.prepare_silos import prepare_silo_a_data
 
-    return prepare_silo_a_data(MODULE, raw_student_info)
+    return prepare_silo_a_data(cohort)
 
 
 @pytest.fixture(scope="module")
 def prepared_silo_b(raw_student_vle, raw_vle, raw_assessments, raw_student_assessment):
+    """[DEPRECATED] legacy v0 features — retained only to keep the v0 path tested."""
     from scripts.prepare_silos import prepare_silo_b_data
 
     return prepare_silo_b_data(
@@ -72,12 +89,12 @@ def prepared_silo_b(raw_student_vle, raw_vle, raw_assessments, raw_student_asses
 
 @pytest.fixture(scope="module")
 def prepared_silo_b_rate(
-    raw_student_vle, raw_vle, raw_assessments, raw_student_assessment, raw_courses
+    cohort, raw_student_vle, raw_vle, raw_assessments, raw_student_assessment, raw_courses
 ):
     from scripts.prepare_silos import prepare_silo_b_rate_v1
 
     return prepare_silo_b_rate_v1(
-        MODULE, raw_student_vle, raw_vle, raw_assessments, raw_student_assessment, raw_courses
+        cohort, raw_student_vle, raw_vle, raw_assessments, raw_student_assessment, raw_courses
     )
 
 
@@ -373,8 +390,13 @@ class TestRateV1Computation:
                 "module_presentation_length": [100],
             }
         )
+        # Minimal cohort: prepare_silo_b_rate_v1 needs only id_student +
+        # module_presentation to route each student to their enrolment.
+        cohort = pd.DataFrame(
+            {"id_student": [1, 2, 3], "module_presentation": ["CCC_2014J"] * 3}
+        )
         return prepare_silo_b_rate_v1(
-            "CCC_2014J", student_vle, vle, assessments, student_assessment, courses
+            cohort, student_vle, vle, assessments, student_assessment, courses
         ).set_index("id_student")
 
     def test_assessment_ratios_student1(self, rate_output):
@@ -922,3 +944,160 @@ class TestLoadSiloB:
 
         with pytest.raises(FileNotFoundError, match="silo_b.pkl"):
             load_silo_b(processed_dir=tmp_path)
+
+
+# ── build_cohort(): dedup + pre-start-withdrawal exclusion ────────────────────
+# Guards the invariants the DP guarantee depends on (docs/action_plan.md §E-a, §F).
+
+
+def _multi_module_info() -> pd.DataFrame:
+    """studentInfo-shaped frame where student 1 has MIXED outcomes across presentations.
+
+    Student 1: 2013B Withdrawn, 2013J Pass, 2014J Fail  -> dedup rule decides the label.
+    Student 2: single enrolment, Pass. Student 3: single enrolment, Withdrawn (pre-start).
+    """
+    return pd.DataFrame(
+        {
+            "code_module": ["AAA", "AAA", "BBB", "AAA", "BBB"],
+            "code_presentation": ["2013B", "2013J", "2014J", "2013J", "2013B"],
+            "id_student": [1, 1, 1, 2, 3],
+            "region": ["East Anglian Region"] * 5,
+            "final_result": ["Withdrawn", "Pass", "Fail", "Pass", "Withdrawn"],
+        }
+    )
+
+
+def _multi_module_registration() -> pd.DataFrame:
+    """Student 1's 2013B withdrawal and student 3's are pre-start (day <= 0)."""
+    return pd.DataFrame(
+        {
+            "code_module": ["AAA", "AAA", "BBB", "AAA", "BBB"],
+            "code_presentation": ["2013B", "2013J", "2014J", "2013J", "2013B"],
+            "id_student": [1, 1, 1, 2, 3],
+            "date_registration": [-30, -30, -30, -30, -30],
+            "date_unregistration": [-5.0, np.nan, np.nan, np.nan, 0.0],
+        }
+    )
+
+
+class TestBuildCohort:
+    def test_dedup_yields_one_row_per_student(self):
+        """The one-record-per-person invariant the DP sensitivity bound relies on."""
+        from scripts.prepare_silos import DEDUP_RULES, build_cohort
+
+        for rule in DEDUP_RULES:
+            cohort, stats = build_cohort(
+                _multi_module_info(),
+                _multi_module_registration(),
+                dedup_rule=rule,
+                withdrawal_cutoff_day=None,
+            )
+            assert not cohort["id_student"].duplicated().any(), f"{rule} left duplicates"
+            assert stats["n_students"] == len(cohort) == 3
+
+    def test_dedup_rules_select_expected_enrolment(self):
+        """first = chronological; best/worst select on outcome. Student 1 is mixed."""
+        from scripts.prepare_silos import build_cohort
+
+        def label_of(rule, student=1):
+            cohort, _ = build_cohort(
+                _multi_module_info(),
+                _multi_module_registration(),
+                dedup_rule=rule,
+                withdrawal_cutoff_day=None,
+            )
+            return int(cohort.set_index("id_student").loc[student, "label"])
+
+        # earliest is AAA_2013B (Withdrawn -> 1); best picks a Pass (0); worst picks a 1
+        assert label_of("first") == 1
+        assert label_of("best") == 0
+        assert label_of("worst") == 1
+
+    def test_best_worst_bracket_first(self):
+        """best <= first <= worst on label rate — the sensitivity-bound property."""
+        from scripts.prepare_silos import build_cohort
+
+        rates = {
+            rule: build_cohort(
+                _multi_module_info(), _multi_module_registration(), dedup_rule=rule
+            )[1]["label_rate"]
+            for rule in ("best", "first", "worst")
+        }
+        assert rates["best"] <= rates["first"] <= rates["worst"]
+
+    def test_prestart_withdrawals_excluded(self):
+        """§F: withdrawals unregistering on/before the cutoff are dropped."""
+        from scripts.prepare_silos import build_cohort
+
+        info, reg = _multi_module_info(), _multi_module_registration()
+        cohort, stats = build_cohort(info, reg, dedup_rule="first")
+        # student 3's only enrolment is a pre-start withdrawal -> student disappears
+        assert 3 not in set(cohort["id_student"])
+        assert stats["n_excluded_prestart_withdrawals"] == 2  # student 1 (2013B) + student 3
+        # with the exclusion off, student 3 is retained
+        kept, _ = build_cohort(info, reg, dedup_rule="first", withdrawal_cutoff_day=None)
+        assert 3 in set(kept["id_student"])
+
+    def test_cutoff_is_parameterized(self):
+        """§F4's day<=14 sensitivity cut must need no code change."""
+        from scripts.prepare_silos import build_cohort
+
+        info, reg = _multi_module_info(), _multi_module_registration()
+        n_none = build_cohort(info, reg, withdrawal_cutoff_day=None)[1]["n_students"]
+        n_zero = build_cohort(info, reg, withdrawal_cutoff_day=0)[1]["n_students"]
+        assert n_none > n_zero
+
+    def test_module_filter_and_unknown_module_raises(self):
+        from scripts.prepare_silos import build_cohort
+
+        info, reg = _multi_module_info(), _multi_module_registration()
+        cohort, stats = build_cohort(info, reg, modules=["AAA_2013J"], withdrawal_cutoff_day=None)
+        assert set(cohort["code_presentation"]) == {"2013J"}
+        assert stats["modules"] == ["AAA_2013J"]
+        with pytest.raises(ValueError, match="Unknown module-presentation"):
+            build_cohort(info, reg, modules=["ZZZ_1999J"])
+
+    def test_invalid_dedup_rule_raises(self):
+        from scripts.prepare_silos import build_cohort
+
+        with pytest.raises(ValueError, match="dedup_rule must be one of"):
+            build_cohort(_multi_module_info(), _multi_module_registration(), dedup_rule="newest")
+
+    def test_stats_are_manifest_ready(self):
+        """Every field a variant manifest needs is present and JSON-serializable."""
+        import json
+
+        from scripts.prepare_silos import build_cohort
+
+        _, stats = build_cohort(_multi_module_info(), _multi_module_registration())
+        required = {
+            "dedup_rule", "withdrawal_cutoff_day", "modules", "n_module_presentations",
+            "n_raw_rows", "n_after_module_filter", "n_excluded_prestart_withdrawals",
+            "n_before_dedup", "n_dropped_by_dedup", "n_students", "label_rate",
+        }
+        assert required.issubset(stats), f"missing: {required - set(stats)}"
+        json.dumps(stats)  # must not raise
+
+
+class TestCohortFeatureStability:
+    """Feature dimensions must not drift when the cohort spans many presentations."""
+
+    def test_silo_a_dims_match_run_config(self, prepared_silo_a):
+        region_cols = [c for c in prepared_silo_a.columns if c.startswith("region_")]
+        encoded = [
+            "imd_band_enc", "highest_education_enc", "age_band_enc",
+            "gender_enc", "disability_enc", "studied_credits",
+        ]
+        assert len(encoded) + len(region_cols) == A_FEATURE_COUNT
+
+    def test_module_identity_is_not_a_feature(self, prepared_silo_a):
+        """Stratify-only decision: module must not leak in as a column (§E)."""
+        leaked = [
+            c for c in prepared_silo_a.columns
+            if "module" in c.lower() or "presentation" in c.lower()
+        ]
+        assert leaked == [], f"module identity leaked into Silo A features: {leaked}"
+
+    def test_silo_b_unique_per_student(self, prepared_silo_b_rate):
+        """A deduped student must be scored on exactly one enrolment."""
+        assert not prepared_silo_b_rate["id_student"].duplicated().any()

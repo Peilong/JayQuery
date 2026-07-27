@@ -8,6 +8,22 @@ to full protocol correctness (Week 3).
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _isolate_psi_output(tmp_path, monkeypatch):
+    """Keep PSI tests from overwriting the REAL data/processed/ordered_id_list.json.
+
+    psi_client.run_psi() writes its result to a module-level OUTPUT_PATH pointing at
+    data/processed/. Without this redirect, simply running `pytest tests/` replaced
+    the real 2305-student intersection with the ~200 synthetic IDs these tests use —
+    silently, and with no test failure to signal it. Autouse so no test in this module
+    can regress it.
+    """
+    import psi.psi_client as psi_client
+
+    monkeypatch.setattr(psi_client, "OUTPUT_PATH", tmp_path / "ordered_id_list.json")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Week 2 Tests — ECDH utilities
 # ─────────────────────────────────────────────────────────────────────────────
