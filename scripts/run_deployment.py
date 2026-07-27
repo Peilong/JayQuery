@@ -56,6 +56,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--app", default=".", help="Path to the Flower app (default: current directory).")
     p.add_argument("--rounds", type=int, default=None, help="Override num-server-rounds for this run.")
     p.add_argument(
+        "--run-config",
+        default=None,
+        help="Extra run-config overrides passed through to `flwr run`, as one "
+        "space-separated string of k=v pairs. String values need inner quotes, e.g. "
+        "--run-config \"processed-dir='data/processed/dedup_first' "
+        "server-dp-enabled=true\". Merged with --rounds.",
+    )
+    p.add_argument(
         "--connection-name",
         default="jayquery-local",
         help="Name to register this SuperLink under in ~/.flwr/config.toml (default: jayquery-local).",
@@ -222,9 +230,17 @@ def main() -> None:
         # SUPERNODE_STARTUP_GRACE_S or check each SuperNode's own log output.
         time.sleep(SUPERNODE_STARTUP_GRACE_S)
 
-        run_cmd = ["flwr", "run", args.app, args.connection_name, "--stream"]
+        # --run-config is merged into ONE flag: flwr accepts a single space-separated
+        # "k=v k=v" string, and passing the flag twice would silently drop the first.
+        overrides: list[str] = []
         if args.rounds is not None:
-            run_cmd += ["--run-config", f"num-server-rounds={args.rounds}"]
+            overrides.append(f"num-server-rounds={args.rounds}")
+        if args.run_config:
+            overrides.append(args.run_config)
+
+        run_cmd = ["flwr", "run", args.app, args.connection_name, "--stream"]
+        if overrides:
+            run_cmd += ["--run-config", " ".join(overrides)]
 
         print(f"[deploy] Submitting run: {' '.join(run_cmd)}")
         result = subprocess.run(run_cmd)

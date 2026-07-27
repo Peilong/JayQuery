@@ -1,23 +1,63 @@
 """Prepare Silo A and Silo B data files from raw OULAD CSVs.
 
 Owner: Alex Pellet
-Run AFTER:
-    - Downloading OULAD (scripts/download_oulad.sh)
-    - Running PSI (python -m psi.psi_client) to get ordered_id_list.json.
+Run AFTER downloading OULAD (scripts/download_oulad.sh).
 
-Output:
-  data/processed/silo_a.pkl      — {X_train, y_train, X_val, y_val, X_test, y_test}
-  data/processed/silo_b.pkl      — same structure
-  data/processed/scaler_a.pkl    — fitted StandardScaler for Silo A (studied_credits)
-  data/processed/scaler_b.pkl    — fitted StandardScaler for Silo B
+The A-B intersection is computed here and written per variant; the PSI protocol is
+run separately to VERIFY it, not as a prerequisite (docs/action_plan.md §E).
+
+Output (per --out_dir, i.e. per variant):
+  silo_a.pkl            — {X_train, y_train, X_val, y_val, X_test, y_test, provenance}
+  silo_b.pkl            — same structure
+  scaler_a.pkl          — fitted StandardScaler for Silo A (studied_credits)
+  scaler_b.pkl          — fitted StandardScaler for Silo B
+  ordered_id_list.json  — A-B intersection order for this variant
+  manifest.json         — every parameter + row count that produced this variant
 
 Silo B feature definitions (rate_v1 and the legacy v0 modes), their rationale, and
 every edge-case rule live in docs/DATA_DICTIONARY.md.
 
+CURRENT vs DEPRECATED
+---------------------
+CURRENT (use these):
+  - build_cohort()             — module filter + pre-start-withdrawal exclusion + dedup
+  - prepare_silo_b_rate_v1()   — exposure-normalized Silo B features
+  - SILO_B_LAYOUTS["rate_v1"]
+
+[DEPRECATED] (retained only to reproduce historical numbers — do NOT use for new work):
+  - prepare_silo_b_data()      — legacy v0 features; full-course totals LEAK the label
+  - SILO_B_LAYOUTS["v0"]
+  - the --features v0 and --cutoff_week CLI flags
+  Deprecated paths predate the cohort refactor: they filter by a single --module
+  themselves and do NOT honour the dedup / pre-start-withdrawal rules
+  (docs/action_plan.md §E-a, §F), so their labels are not comparable to current runs.
+
+CLI (cohort flags are NEW — see docs/action_plan.md §E/§F):
+  --modules                 comma-separated codes, or 'all'. REPLACES the old --module.
+  --dedup-rule              first (PRIMARY) | best | worst — one enrolment per student.
+  --withdrawal-cutoff-day   drop withdrawals unregistering on/before this day (default 0;
+                            'none' disables). Non-starters are not dropout risk.
+  --out_dir                 per-variant output directory.
+
 Usage:
-  python scripts/prepare_silos.py                       # rate_v1 features (default)
-  python scripts/prepare_silos.py --features v0         # legacy full-course totals (leaky)
-  python scripts/prepare_silos.py --cutoff_week 5       # legacy v0, censored to week 5
+  # single module (legacy default cohort), current features
+  python scripts/prepare_silos.py
+
+  # the three agreed variants, all 22 module-presentations
+  python scripts/prepare_silos.py --modules all --dedup-rule first \
+      --out_dir data/processed/dedup_first
+  python scripts/prepare_silos.py --modules all --dedup-rule best \
+      --out_dir data/processed/dedup_best
+  python scripts/prepare_silos.py --modules all --dedup-rule worst \
+      --out_dir data/processed/dedup_worst
+
+  # §F4 sensitivity cut — a flag change, no code edit
+  python scripts/prepare_silos.py --modules all --withdrawal-cutoff-day 14 \
+      --out_dir data/processed/cutoff14
+
+  # [DEPRECATED] legacy v0 paths — leaky, comparison-only, ignore the cohort flags
+  python scripts/prepare_silos.py --features v0
+  python scripts/prepare_silos.py --cutoff_week 5
 """
 
 import argparse
@@ -39,11 +79,14 @@ PROCESSED_DIR = Path("data/processed")
 # Per-mode Silo B stat columns + index where the StandardScaler slice starts;
 # vle_clicks_* columns always follow the stats and are always scaled (docs/DATA_DICTIONARY.md).
 SILO_B_LAYOUTS: dict[str, tuple[list[str], int]] = {
+    # CURRENT — the only layout that should be used for reported results.
     "rate_v1": (
         ["weighted_score_pct", "participation_rate", "submission_ratio",
          "regularity", "start_date", "clicks_per_active_week"],
         4,
     ),
+    # [DEPRECATED] Legacy v0 layout — full-course totals LEAK the label.
+    # Retained for reproducing old comparison numbers only. Do not use for new work.
     "v0": (
         ["weighted_score_pct", "participation_rate", "num_assessments",
          "start_date", "end_date", "active_days", "sum_click"],
@@ -51,30 +94,197 @@ SILO_B_LAYOUTS: dict[str, tuple[list[str], int]] = {
     ),
 }
 
+# ── Cohort construction (CURRENT pipeline) ────────────────────────────────────
 
-def prepare_silo_a_data(module: str, student_info: pd.DataFrame) -> pd.DataFrame:
-    """Filter, encode, and impute Silo A features from studentInfo.csv.
+DEDUP_RULES: tuple[str, ...] = ("first", "best", "worst")
+"""Rules for students enrolled in more than one module-presentation.
+
+12.3% of OULAD students appear in >1 module-presentation, and **33% of those
+repeat students have MIXED outcomes** (passed one module, withdrew from another),
+so the rule materially moves the label — the at-risk rate spans 0.4935 ("best")
+to 0.5340 ("worst"), a 4.06-point spread. See docs/action_plan.md §E-a.
+
+- ``first``  — earliest enrolment chronologically. **PRIMARY.** Label-neutral
+  (selects on time, not outcome) and mirrors deployment: predict on a student's
+  first course with no look-ahead.
+- ``best`` / ``worst`` — keep the student's best/worst outcome. Label-SELECTING:
+  report as sensitivity bounds only, never as the headline result.
+"""
+
+_PRESENTATION_TERM_ORDER = {"B": 0, "J": 1}
+"""OULAD presentation suffix -> within-year order (B = February, J = October)."""
+
+
+def _add_presentation_order(df: pd.DataFrame) -> pd.DataFrame:
+    """Attach integer year/term columns so presentations can be sorted chronologically.
+
+    Args:
+        df: Frame with a ``code_presentation`` column (e.g. "2014J").
+
+    Returns:
+        A copy with ``_pres_year`` and ``_pres_term`` columns added.
+
+    Raises:
+        ValueError: If any ``code_presentation`` has an unrecognised term suffix.
+    """
+    out = df.copy()
+    out["_pres_year"] = out["code_presentation"].str[:4].astype(int)
+    out["_pres_term"] = out["code_presentation"].str[4].map(_PRESENTATION_TERM_ORDER)
+    if out["_pres_term"].isna().any():
+        bad = sorted(out.loc[out["_pres_term"].isna(), "code_presentation"].unique())
+        raise ValueError(f"Unrecognised code_presentation term suffix(es): {bad}")
+    return out
+
+
+def build_cohort(
+    student_info: pd.DataFrame,
+    student_registration: pd.DataFrame,
+    modules: list[str] | None = None,
+    dedup_rule: str = "first",
+    withdrawal_cutoff_day: int | None = 0,
+) -> tuple[pd.DataFrame, dict]:
+    """Build the deduplicated, label-corrected student cohort.
+
+    Three things happen here, in order, and each is a decision recorded in
+    docs/action_plan.md:
+
+    1. **Module filter** — restrict to ``modules``, or keep all 22 module-presentations.
+    2. **Pre-start withdrawal exclusion** (§F) — drop rows whose ``final_result`` is
+       "Withdrawn" AND whose ``date_unregistration <= withdrawal_cutoff_day``. 30.4%
+       of all OULAD withdrawals unregister before the course starts; they are
+       non-starters, not dropout risk, and are trivially separable (66.7% have zero
+       VLE clicks), which inflates AUC with easy wins.
+    3. **Deduplication** (§E-a) — one row per ``id_student`` under ``dedup_rule``.
+       This enforces the one-record-per-person invariant that the DP guarantee
+       depends on: a student contributing k records would push true sensitivity to
+       k*C and invalidate the reported epsilon.
+
+    Args:
+        student_info: Raw studentInfo DataFrame.
+        student_registration: Raw studentRegistration DataFrame (supplies
+            ``date_unregistration``).
+        modules: Module-presentation codes to keep, e.g. ["CCC_2014J", "FFF_2013B"].
+            None (default) keeps every module-presentation.
+        dedup_rule: One of :data:`DEDUP_RULES`. "first" is the primary rule.
+        withdrawal_cutoff_day: Withdrawals unregistering on or before this course day
+            are dropped. Default 0 (before/at course start). None disables the
+            exclusion entirely.
+
+    Returns:
+        Tuple of ``(cohort, stats)``. ``cohort`` is one row per student with the raw
+        studentInfo columns plus a binary ``label`` (1 = Withdrawn or Fail), and is
+        guaranteed unique on ``id_student``. ``stats`` is a manifest-ready dict of
+        the parameters used and the row counts at each stage.
+
+    Raises:
+        ValueError: If ``dedup_rule`` is unknown, or ``modules`` names a
+            module-presentation absent from the data.
+    """
+    if dedup_rule not in DEDUP_RULES:
+        raise ValueError(f"dedup_rule must be one of {DEDUP_RULES}, got {dedup_rule!r}")
+
+    df = student_info.copy()
+    n_raw = len(df)
+    df["label"] = df["final_result"].isin(["Withdrawn", "Fail"]).astype(int)
+    df["module_presentation"] = df["code_module"] + "_" + df["code_presentation"]
+
+    if modules is not None:
+        unknown = sorted(set(modules) - set(df["module_presentation"].unique()))
+        if unknown:
+            raise ValueError(f"Unknown module-presentation(s): {unknown}")
+        df = df[df["module_presentation"].isin(modules)]
+    n_after_modules = len(df)
+
+    # Step 2 — drop pre-start withdrawals (non-starters, not dropout risk).
+    n_excluded_prestart = 0
+    if withdrawal_cutoff_day is not None:
+        unreg = student_registration[
+            ["id_student", "code_module", "code_presentation", "date_unregistration"]
+        ]
+        df = df.merge(unreg, on=["id_student", "code_module", "code_presentation"], how="left")
+        is_prestart = (df["final_result"] == "Withdrawn") & (
+            df["date_unregistration"] <= withdrawal_cutoff_day
+        )
+        n_excluded_prestart = int(is_prestart.sum())
+        df = df[~is_prestart].drop(columns=["date_unregistration"])
+    n_before_dedup = len(df)
+
+    # Step 3 — one row per student. Chronological order is the tie-break for every
+    # rule, so "best"/"worst" differ from "first" only where outcomes actually differ.
+    df = _add_presentation_order(df)
+    sort_cols = ["id_student", "_pres_year", "_pres_term"]
+    ascending: list[bool] = [True, True, True]
+    if dedup_rule == "best":  # prefer label 0
+        sort_cols.insert(1, "label")
+        ascending.insert(1, True)
+    elif dedup_rule == "worst":  # prefer label 1
+        sort_cols.insert(1, "label")
+        ascending.insert(1, False)
+
+    cohort = (
+        df.sort_values(sort_cols, ascending=ascending, kind="mergesort")
+        .groupby("id_student", as_index=False, sort=False)
+        .head(1)
+        .drop(columns=["_pres_year", "_pres_term"])
+        .reset_index(drop=True)
+    )
+
+    if cohort["id_student"].duplicated().any():
+        raise ValueError("Dedup failed: id_student is not unique — DP sensitivity would break.")
+
+    stats = {
+        "dedup_rule": dedup_rule,
+        "withdrawal_cutoff_day": withdrawal_cutoff_day,
+        "modules": "all" if modules is None else sorted(modules),
+        "n_module_presentations": int(cohort["module_presentation"].nunique()),
+        "n_raw_rows": n_raw,
+        "n_after_module_filter": n_after_modules,
+        "n_excluded_prestart_withdrawals": n_excluded_prestart,
+        "n_before_dedup": n_before_dedup,
+        "n_dropped_by_dedup": n_before_dedup - len(cohort),
+        "n_students": len(cohort),
+        "label_rate": round(float(cohort["label"].mean()), 6),
+    }
+    return cohort, stats
+
+
+def prepare_silo_a_data(cohort: pd.DataFrame) -> pd.DataFrame:
+    """Encode and impute Silo A features from a :func:`build_cohort` cohort.
+
+    Cohort selection (module filter, pre-start-withdrawal exclusion, dedup) has
+    already happened in :func:`build_cohort` — this function only encodes. Module
+    identity is deliberately NOT encoded as a feature: heterogeneity across
+    module-presentations is handled by stratifying the split instead, which keeps
+    ``input-dim-a`` stable at 18 and avoids inflating the DP parameter count
+    (noise scales with sqrt(d) — see docs/dp_explained_for_alex.md §3).
 
     Scaling of studied_credits is deferred to main() and applied post-split
     to avoid data leakage into the val/test sets.
 
     Args:
-        module: Module presentation code, e.g. "CCC_2014J".
-        student_info: Raw studentInfo DataFrame.
+        cohort: Output of :func:`build_cohort` — one row per student, with a
+            binary ``label`` column already present.
 
     Returns:
-        DataFrame indexed by id_student with encoded features and a binary label column.
+        DataFrame indexed by id_student with encoded features and the label column.
     """
-
-    df = student_info.copy()
-    df["label"] = df["final_result"].isin(["Withdrawn", "Fail"]).astype(int)
-    m_code, p_code = module.split("_")
-    df = df.query("code_module == @m_code and code_presentation == @p_code").drop(
-        columns=["code_module", "code_presentation", "final_result"]
+    df = cohort.copy()
+    df = df.drop(
+        columns=[
+            c
+            for c in ("code_module", "code_presentation", "final_result", "module_presentation")
+            if c in df.columns
+        ]
     )
 
-    # Impute missing imd_band with the mode within each region group
-    df["imd_band"] = df.groupby("region")["imd_band"].transform(lambda x: x.fillna(x.mode()[0]))
+    # Impute missing imd_band with the mode within each region group. Falls back to
+    # the global mode if a region has no observed value at all (possible once the
+    # cohort spans 22 module-presentations); no-op when every region has one.
+    global_mode = df["imd_band"].mode()
+    fallback = global_mode.iloc[0] if not global_mode.empty else None
+    df["imd_band"] = df.groupby("region")["imd_band"].transform(
+        lambda x: x.fillna(x.mode().iloc[0] if not x.mode().empty else fallback)
+    )
 
     # Ordinal encoding
     enc = OrdinalEncoder()
@@ -109,19 +319,76 @@ def prepare_silo_a_data(module: str, student_info: pd.DataFrame) -> pd.DataFrame
 
 
 def prepare_silo_b_rate_v1(
-    module: str,
+    cohort: pd.DataFrame,
     student_vle: pd.DataFrame,
     vle: pd.DataFrame,
     assessments: pd.DataFrame,
     student_assessment: pd.DataFrame,
     courses: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Engineer exposure-normalized (rate_v1) Silo B features.
+    """Engineer exposure-normalized (rate_v1) Silo B features across the cohort.
+
+    Features are computed **per module-presentation** and concatenated, because the
+    assessment schedule and course length differ per presentation. Each student is
+    scored only on the enrolment :func:`build_cohort` selected for them, so the
+    result stays one row per ``id_student``.
 
     All feature definitions, window rules, and guards: docs/DATA_DICTIONARY.md.
 
     Args:
+        cohort: Output of :func:`build_cohort`; supplies each student's chosen
+            ``module_presentation``.
+        student_vle: Raw studentVle DataFrame.
+        vle: Raw vle DataFrame.
+        assessments: Raw assessments DataFrame.
+        student_assessment: Raw studentAssessment DataFrame.
+        courses: Raw courses DataFrame (provides module_presentation_length).
+
+    Returns:
+        DataFrame with one row per student: id_student + the rate_v1 feature columns.
+
+    Raises:
+        ValueError: If the concatenated result is not unique on ``id_student``.
+    """
+    frames = [
+        _rate_v1_for_presentation(
+            module=mp,
+            student_ids=set(grp["id_student"]),
+            student_vle=student_vle,
+            vle=vle,
+            assessments=assessments,
+            student_assessment=student_assessment,
+            courses=courses,
+        )
+        for mp, grp in cohort.groupby("module_presentation", sort=True)
+    ]
+    out = pd.concat(frames, ignore_index=True)
+    if out["id_student"].duplicated().any():
+        raise ValueError(
+            "Silo B features are not unique per id_student — a student was scored on "
+            "more than one enrolment."
+        )
+    return out
+
+
+def _rate_v1_for_presentation(
+    module: str,
+    student_ids: set,
+    student_vle: pd.DataFrame,
+    vle: pd.DataFrame,
+    assessments: pd.DataFrame,
+    student_assessment: pd.DataFrame,
+    courses: pd.DataFrame,
+) -> pd.DataFrame:
+    """rate_v1 features for ONE module-presentation, restricted to ``student_ids``.
+
+    This is the original single-module rate_v1 implementation, unchanged except for
+    the ``student_ids`` restriction; :func:`prepare_silo_b_rate_v1` loops it over the
+    cohort's presentations.
+
+    Args:
         module: Module presentation code, e.g. "CCC_2014J".
+        student_ids: Students whose chosen enrolment is this module-presentation.
         student_vle: Raw studentVle DataFrame.
         vle: Raw vle DataFrame.
         assessments: Raw assessments DataFrame.
@@ -149,11 +416,13 @@ def prepare_silo_b_rate_v1(
         .query("code_module == @m_code and code_presentation == @p_code")
         .drop(columns=["code_module", "code_presentation"])
     )
+    merged = merged[merged["id_student"].isin(student_ids)]
 
     mod_assess = assessments.query("code_module == @m_code and code_presentation == @p_code")[
         ["id_assessment", "date", "weight"]
     ]
     assess = student_assessment.merge(mod_assess, on="id_assessment", how="inner")
+    assess = assess[assess["id_student"].isin(student_ids)]
     # Drop post-course submissions
     assess = assess[assess["date_submitted"] <= t_end]
 
@@ -228,10 +497,19 @@ def prepare_silo_b_data(
     student_assessment: pd.DataFrame,
     cutoff_week: int | None = None,
 ) -> pd.DataFrame:
-    """Engineer legacy v0 Silo B features (full-course totals, optionally censored).
+    """[DEPRECATED] Engineer legacy v0 Silo B features (full-course totals, censored).
 
-    Comparison-only mode — the full-course totals leak the label; see
-    docs/DATA_DICTIONARY.md (Legacy modes). rate_v1 is the default pipeline.
+    .. deprecated::
+        **Do not use for new work or reported results.** The full-course totals LEAK
+        the label (they encode course completion, which is the thing being predicted).
+        Retained only to reproduce historical comparison numbers.
+        **Use :func:`prepare_silo_b_rate_v1` instead** — see docs/DATA_DICTIONARY.md
+        (Legacy modes).
+
+        This function also predates the cohort refactor: it takes a single ``module``
+        string and does its own filtering, so it is NOT wired to :func:`build_cohort`
+        and does not honour the dedup / pre-start-withdrawal rules in
+        docs/action_plan.md §E-a and §F.
 
     Args:
         module: Module presentation code, e.g. "CCC_2014J".
@@ -337,8 +615,10 @@ def build_silo_a(
     if missing > len(int_ids) * 0.01:
         raise ValueError(
             f"build_silo_a: {missing}/{len(int_ids)} intersection IDs not found in "
-            "Silo A DataFrame. Check that ordered_id_list.json was produced for the "
-            "same module as prepare_silos.py --module."
+            "Silo A DataFrame. The intersection is derived from the cohort, so a "
+            "mismatch means ordered_id_list.json came from a DIFFERENT variant — "
+            "check that --modules / --dedup-rule / --withdrawal-cutoff-day match the "
+            "ones recorded in this directory's manifest.json."
         )
 
     feature_cols = [
@@ -387,40 +667,145 @@ def fit_and_scale(
     X_b: np.ndarray,
     train_idx: np.ndarray,
     b_scale_start: int,
+    log1p_b: bool = True,
 ) -> tuple[np.ndarray, np.ndarray, StandardScaler, StandardScaler]:
-    """Fit StandardScalers on training rows only, then transform all rows.
+    """Fit StandardScalers on training rows only, then transform all rows once.
 
     Silo A: scales the studied_credits column (index 5).
-    Silo B: scales columns [b_scale_start:] — the scaled stats plus all vle_clicks_*
-    columns, which are contiguous through the end in every layout.
+    Silo B: optionally log1p-compresses the non-negative click-rate columns, then
+    scales columns [b_scale_start:] — the scaled stats plus all vle_clicks_* columns,
+    which are contiguous through the end in every layout.
 
     Args:
         X_a: Full Silo A feature array (all students, pre-split).
         X_b: Full Silo B feature array (all students, pre-split).
         train_idx: Indices of training-set rows.
         b_scale_start: First Silo B column index to scale (from SILO_B_LAYOUTS).
+        log1p_b: Apply log1p to structurally non-negative Silo B columns before
+            standardizing. Prevents sparse activity-type columns from exploding
+            (see the comment in the body). The chosen mask is stored on the
+            returned scaler as ``log1p_mask_``.
 
     Returns:
         Tuple of (X_a_scaled, X_b_scaled, scaler_a, scaler_b).
     """
-    # Silo A: studied_credits is at index 5 (after 5 encoded cols, before region one-hots)
+    # Silo A: studied_credits is at index 5 (after 5 encoded cols, before region one-hots).
+    # Fit on train rows, then transform every row EXACTLY ONCE. (Previously this
+    # wrote scaled values into the train rows and then transformed the whole array
+    # again, double-scaling train and leaving it ~50x narrower than val/test.)
     scaler_a = StandardScaler()
     X_a = X_a.copy()
-    X_a[train_idx, 5:6] = scaler_a.fit_transform(X_a[train_idx, 5:6])
+    scaler_a.fit(X_a[train_idx, 5:6])
     X_a[:, 5:6] = scaler_a.transform(X_a[:, 5:6])
 
-    scale_slice = slice(b_scale_start, X_b.shape[1])
-    scaler_b = StandardScaler()
     X_b = X_b.copy()
-    X_b[train_idx, scale_slice] = scaler_b.fit_transform(X_b[train_idx, scale_slice])
-    X_b[:, scale_slice] = scaler_b.transform(X_b[:, scale_slice])
+    scale_slice = slice(b_scale_start, X_b.shape[1])
+    block = X_b[:, scale_slice].copy()
+
+    # Compress the heavy right tail of the click-rate columns BEFORE standardizing.
+    # Sparse activity types (used by only a few of the 22 presentations) are ~all-zero
+    # for most students, so their training std is near zero and the handful of active
+    # students get divided by it — blowing scaled values up to ~1e5. log1p is applied
+    # only to columns that are structurally non-negative in TRAIN (start_date ranges
+    # negative, so it is excluded automatically).
+    if log1p_b:
+        log1p_mask = block[train_idx].min(axis=0) >= 0
+        if log1p_mask.any():
+            block[:, log1p_mask] = np.log1p(np.clip(block[:, log1p_mask], 0.0, None))
+    else:
+        log1p_mask = np.zeros(block.shape[1], dtype=bool)
+
+    scaler_b = StandardScaler()
+    scaler_b.fit(block[train_idx])
+    X_b[:, scale_slice] = scaler_b.transform(block)
+    # Travels with the joblib dump so the transform can be reproduced from the artifact.
+    scaler_b.log1p_mask_ = log1p_mask
 
     return X_a, X_b, scaler_a, scaler_b
 
 
+def _cutoff_day_arg(value: str) -> int | None:
+    """Parse --withdrawal-cutoff-day: an int, or "none" to disable the exclusion."""
+    return None if value.strip().lower() == "none" else int(value)
+
+
+def _stratify_key(cohort: pd.DataFrame, intersection_ids: list[int]) -> np.ndarray:
+    """Module-presentation x label strata, aligned to ``intersection_ids`` order.
+
+    Stratifying on the pair keeps both the 22-presentation mix and the class balance
+    intact in every split — the agreed alternative to encoding module as a feature
+    (docs/action_plan.md §E).
+
+    Args:
+        cohort: Output of :func:`build_cohort`.
+        intersection_ids: Ordered student IDs the split will index.
+
+    Returns:
+        Array of "<module_presentation>|<label>" strings, one per intersection id.
+    """
+    lookup = cohort.set_index("id_student")
+    sub = lookup.reindex(intersection_ids)
+    return (sub["module_presentation"].astype(str) + "|" + sub["label"].astype(str)).values
+
+
+def _split_indices(
+    idx: np.ndarray, strat: np.ndarray, y: np.ndarray, val_size: float, test_size: float, seed: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Stratified train/val/test split, falling back to label-only if strata are too thin.
+
+    ``train_test_split`` requires >= 2 members per stratum; a small cohort (or a rare
+    presentation) can violate that on the module x label key, so we degrade to
+    label-only rather than fail.
+
+    Returns:
+        Tuple of (idx_train, idx_val, idx_test).
+    """
+
+    def _try(key: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        tv, test = train_test_split(idx, test_size=test_size, random_state=seed, stratify=key)
+        train, val = train_test_split(
+            tv, test_size=val_size / (1 - test_size), random_state=seed, stratify=key[tv]
+        )
+        return train, val, test
+
+    try:
+        return _try(strat)
+    except ValueError as exc:
+        print(
+            f"[Silo Prep] WARNING: module x label stratification failed ({exc}); "
+            "falling back to label-only stratification."
+        )
+        return _try(y)
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--module", default="CCC_2014J", help="OULAD module presentation code")
+    parser = argparse.ArgumentParser(
+        description="Prepare Silo A/B datasets from raw OULAD CSVs. "
+        "Cohort selection (modules, dedup rule, withdrawal cutoff) is parameterized "
+        "so a variant can be regenerated with a flag change — see docs/action_plan.md §E."
+    )
+    parser.add_argument(
+        "--modules",
+        default="CCC_2014J",
+        help="Comma-separated module-presentation codes (e.g. 'CCC_2014J,FFF_2013B'), "
+        "or 'all' for every presentation in the data. REPLACES the old --module flag.",
+    )
+    parser.add_argument(
+        "--dedup-rule",
+        choices=DEDUP_RULES,
+        default="first",
+        help="How to pick one enrolment for students appearing in several presentations. "
+        "'first' (chronological) is the PRIMARY rule; 'best'/'worst' select on outcome "
+        "and are for sensitivity bounds only (docs/action_plan.md §E-a).",
+    )
+    parser.add_argument(
+        "--withdrawal-cutoff-day",
+        type=_cutoff_day_arg,
+        default=0,
+        help="Drop withdrawals that unregistered on/before this course day — they are "
+        "non-starters, not dropout risk (docs/action_plan.md §F). Default 0 "
+        "(before/at course start). Pass 'none' to keep them.",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--val_size", type=float, default=0.1)
     parser.add_argument("--test_size", type=float, default=0.1)
@@ -428,22 +813,23 @@ def main() -> None:
         "--features",
         choices=["rate_v1", "v0"],
         default="rate_v1",
-        help="Silo B feature set (see docs/DATA_DICTIONARY.md). v0 is comparison-only.",
+        help="Silo B feature set (see docs/DATA_DICTIONARY.md). "
+        "[DEPRECATED] v0 leaks the label — comparison-only, never for reported results.",
     )
     parser.add_argument(
         "--cutoff_week",
         type=int,
         default=None,
-        help="Legacy v0 temporal censoring: restrict Silo B records to this course week. "
-        "Implies --features v0.",
+        help="[DEPRECATED] Legacy v0 temporal censoring: restrict Silo B records to this "
+        "course week. Implies --features v0.",
     )
     parser.add_argument(
         "--out_dir",
         type=Path,
         default=PROCESSED_DIR,
-        help="Output directory for silo pkls/scalers (e.g. data/processed/week05 for "
-        "a cutoff-week sweep). ordered_id_list.json is still read from data/processed "
-        "and copied alongside the outputs.",
+        help="Output directory for this variant's silo pkls, scalers, ordered_id_list.json "
+        "and manifest.json (e.g. data/processed/dedup_first). Point the FL app at it via "
+        "the processed-dir run-config key.",
     )
     args = parser.parse_args()
 
@@ -457,59 +843,82 @@ def main() -> None:
 
     print("[Silo Prep] Loading raw OULAD CSVs ...")
     student_info = pd.read_csv(RAW_DIR / "studentInfo.csv")
+    student_reg  = pd.read_csv(RAW_DIR / "studentRegistration.csv")
     student_vle  = pd.read_csv(RAW_DIR / "studentVle.csv")
     vle          = pd.read_csv(RAW_DIR / "vle.csv")
     student_ass  = pd.read_csv(RAW_DIR / "studentAssessment.csv")
     assessments  = pd.read_csv(RAW_DIR / "assessments.csv")
     courses      = pd.read_csv(RAW_DIR / "courses.csv")
 
-    silo_a_prep = prepare_silo_a_data(args.module, student_info)
+    modules = None if args.modules.strip().lower() == "all" else [
+        m.strip() for m in args.modules.split(",") if m.strip()
+    ]
+    cohort, cohort_stats = build_cohort(
+        student_info,
+        student_reg,
+        modules=modules,
+        dedup_rule=args.dedup_rule,
+        withdrawal_cutoff_day=args.withdrawal_cutoff_day,
+    )
+    print(
+        f"[Silo Prep] Cohort: {cohort_stats['n_students']} students across "
+        f"{cohort_stats['n_module_presentations']} presentation(s) "
+        f"[rule={args.dedup_rule}, cutoff={args.withdrawal_cutoff_day}] — "
+        f"excluded {cohort_stats['n_excluded_prestart_withdrawals']} pre-start withdrawal(s), "
+        f"dropped {cohort_stats['n_dropped_by_dedup']} duplicate enrolment(s); "
+        f"label rate {cohort_stats['label_rate']:.4f}"
+    )
+
+    silo_a_prep = prepare_silo_a_data(cohort)
     if args.features == "rate_v1":
         print("[Silo Prep] Features: rate_v1 (exposure-normalized, full course).")
         silo_b_prep = prepare_silo_b_rate_v1(
-            args.module, student_vle, vle, assessments, student_ass, courses
-        )
-    elif args.cutoff_week is not None:
-        print(f"[Silo Prep] Features: legacy v0, censored to weeks <= {args.cutoff_week} "
-              f"(days <= {args.cutoff_week * 7}). Comparison-only.")
-        silo_b_prep = prepare_silo_b_data(
-            args.module, student_vle, vle, assessments, student_ass, cutoff_week=args.cutoff_week
+            cohort, student_vle, vle, assessments, student_ass, courses
         )
     else:
-        print(
-            "[Silo Prep] WARNING: legacy v0 full-course features LEAK the label. "
-            "Comparison-only — do not quote these numbers as a baseline."
-        )
-        silo_b_prep = prepare_silo_b_data(
-            args.module, student_vle, vle, assessments, student_ass
-        )
-    print(f"[Silo Prep] Module {args.module}: {len(silo_a_prep)} students")
+        # [DEPRECATED] v0 paths predate the cohort refactor: they filter by a single
+        # module themselves and ignore the dedup / withdrawal rules above.
+        legacy_module = (modules or [cohort_stats["modules"]])[0]
+        if args.cutoff_week is not None:
+            print(f"[Silo Prep] [DEPRECATED] legacy v0, censored to weeks <= {args.cutoff_week} "
+                  f"(days <= {args.cutoff_week * 7}). Comparison-only.")
+            silo_b_prep = prepare_silo_b_data(
+                legacy_module, student_vle, vle, assessments, student_ass,
+                cutoff_week=args.cutoff_week,
+            )
+        else:
+            print(
+                "[Silo Prep] WARNING: [DEPRECATED] legacy v0 full-course features LEAK the "
+                "label. Comparison-only — do not quote these numbers as a baseline."
+            )
+            silo_b_prep = prepare_silo_b_data(
+                legacy_module, student_vle, vle, assessments, student_ass
+            )
+        print("[Silo Prep] WARNING: v0 ignores --dedup-rule and --withdrawal-cutoff-day; "
+              "its labels are NOT comparable to rate_v1 runs.")
 
-    # Load PSI intersection order (written by psi_client.py)
-    id_list_path = PROCESSED_DIR / "ordered_id_list.json"
-    if id_list_path.exists():
-        with open(id_list_path) as f:
-            intersection_ids = json.load(f)
-        print(f"[Silo Prep] Using PSI intersection: {len(intersection_ids)} students")
-        if out_dir != PROCESSED_DIR:
-            (out_dir / "ordered_id_list.json").write_text(id_list_path.read_text())
-    else:
-        intersection_ids = silo_a_prep.index.tolist()
-        print("[Silo Prep] WARNING: ordered_id_list.json not found — using all IDs (no PSI)")
+    # Intersection computed directly (docs/action_plan.md §E: PSI is verified separately,
+    # not run per variant). Written per variant so each dataset is self-contained.
+    ids_b = set(silo_b_prep["id_student"].dropna().astype(int))
+    intersection_ids = sorted(set(silo_a_prep.index.astype(int)) & ids_b)
+    if not intersection_ids:
+        raise ValueError("Empty A-B intersection — check the module filter and raw CSVs.")
+    (out_dir / "ordered_id_list.json").write_text(json.dumps(intersection_ids))
+    print(
+        f"[Silo Prep] Intersection: {len(intersection_ids)} students "
+        f"({len(silo_a_prep) - len(intersection_ids)} in A had no Silo B records) "
+        f"-> {out_dir / 'ordered_id_list.json'}"
+    )
 
     X_a, y_a = build_silo_a(silo_a_prep, intersection_ids)
     X_b = build_silo_b(silo_b_prep, intersection_ids)
 
-    # Split first, then scale — scaler is fit on training rows only
+    # Split first, then scale — scaler is fit on training rows only.
+    # Stratified on module-presentation x label (docs/action_plan.md §E).
     idx = np.arange(len(intersection_ids))
-    idx_tv, idx_test = train_test_split(
-        idx, test_size=args.test_size, random_state=args.seed, stratify=y_a
-    )
-    idx_train, idx_val = train_test_split(
-        idx_tv,
-        test_size=args.val_size / (1 - args.test_size),
-        random_state=args.seed,
-        stratify=y_a[idx_tv],
+    strat = _stratify_key(cohort, intersection_ids)
+    idx_train, idx_val, idx_test = _split_indices(
+        idx, strat, y_a, args.val_size, args.test_size, args.seed
     )
 
     _, b_scale_start = SILO_B_LAYOUTS[args.features]
@@ -537,6 +946,10 @@ def main() -> None:
             # Provenance for cross-run comparisons (docs/DATA_DICTIONARY.md)
             "feature_version": args.features,
             "cutoff_week": args.cutoff_week,
+            # Cohort provenance — which variant produced this file
+            "dedup_rule": args.dedup_rule,
+            "withdrawal_cutoff_day": args.withdrawal_cutoff_day,
+            "modules": cohort_stats["modules"],
         }
         out_path = out_dir / f"{name}.pkl"
         with open(out_path, "wb") as f:
@@ -545,6 +958,35 @@ def main() -> None:
             f"[Silo Prep] Saved {out_path} — train={len(y_train)}, "
             f"val={len(y_a[idx_val])}, test={len(y_a[idx_test])}"
         )
+
+    # Manifest: every parameter that produced this variant, so any result traces
+    # back to its data (docs/action_plan.md §E design constraint 4).
+    manifest = {
+        **cohort_stats,
+        "feature_version": args.features,
+        "cutoff_week": args.cutoff_week,
+        "seed": args.seed,
+        "val_size": args.val_size,
+        "test_size": args.test_size,
+        "stratified_on": "module_presentation x label",
+        "silo_b_log1p_cols": int(getattr(scaler_b, "log1p_mask_", np.zeros(0)).sum()),
+        "n_intersection": len(intersection_ids),
+        "n_train": int(len(idx_train)),
+        "n_val": int(len(idx_val)),
+        "n_test": int(len(idx_test)),
+        "label_rate_train": round(float(y_a[idx_train].mean()), 6),
+        "label_rate_val": round(float(y_a[idx_val].mean()), 6),
+        "label_rate_test": round(float(y_a[idx_test].mean()), 6),
+        "input_dim_a": int(X_a.shape[1]),
+        "input_dim_b": int(X_b.shape[1]),
+    }
+    (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    print(f"[Silo Prep] Manifest -> {out_dir / 'manifest.json'}")
+    print(
+        f"[Silo Prep] input-dim-a={manifest['input_dim_a']} "
+        f"input-dim-b={manifest['input_dim_b']} "
+        "(must match pyproject.toml [tool.flwr.app.config])"
+    )
 
 
 if __name__ == "__main__":

@@ -77,6 +77,11 @@ python -m psi.psi_client
 
 # 5. Prepare data silos
 python scripts/prepare_silos.py     # default module CCC_2014J
+# multi-module variants (--modules replaces the old --module):
+#   python scripts/prepare_silos.py --modules all --dedup-rule first \
+#       --out_dir data/processed/dedup_first
+# --dedup-rule {first,best,worst} and --withdrawal-cutoff-day are documented in
+# CLAUDE.md step 5 / docs/action_plan.md §E-a and §F.
 
 # 6. Train VFL (SuperLink + 2 SuperNodes, submits the run)
 python run_deployment.py --rounds 50

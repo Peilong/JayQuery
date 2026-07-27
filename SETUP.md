@@ -27,6 +27,9 @@ python -m psi.psi_client
 
 python scripts/prepare_silos.py
 
+# Multi-module variants (--modules replaces --module; see CLAUDE.md step 5):
+#   python scripts/prepare_silos.py --modules all --dedup-rule first \
+#       --out_dir data/processed/dedup_first
 ```
 
 ## Testing the flwr server/client
