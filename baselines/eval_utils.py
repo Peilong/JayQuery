@@ -10,9 +10,11 @@ import numpy as np
 from sklearn.metrics import (
     accuracy_score,
     average_precision_score,
+    balanced_accuracy_score,
     brier_score_loss,
     confusion_matrix,
     f1_score,
+    matthews_corrcoef,
     precision_recall_curve,
     precision_score,
     recall_score,
@@ -100,6 +102,11 @@ def compute_metrics(
         "f1_binary": float(f1_score(y_true, y_pred, average="binary", zero_division=0)),
         "precision": float(precision_score(y_true, y_pred, zero_division=0)),
         "recall": float(recall_score(y_true, y_pred, zero_division=0)),
+        # Degeneracy-proof threshold metrics: BOTH are exactly 0.5 / 0.0 for an
+        # all-positive AND an all-negative classifier, so a degenerate prediction can
+        # never masquerade as an improvement the way accuracy and f1_binary did.
+        "balanced_accuracy": float(balanced_accuracy_score(y_true, y_pred)),
+        "mcc": float(matthews_corrcoef(y_true, y_pred)) if both_classes else 0.0,
         "brier_score": float(brier_score_loss(y_true, y_pred_prob)),
         "avg_precision": ap,
         "pred_std": pred_std,
@@ -116,10 +123,22 @@ def compute_metrics(
     }
 
 
+def _non_degenerate(thresholds: np.ndarray, y_pred_prob: np.ndarray) -> np.ndarray:
+    """Boolean mask over ``thresholds`` keeping only non-degenerate operating points.
+
+    A threshold is degenerate when it puts every sample on one side — "flag everyone" or
+    "flag nobody". Both are zero-skill, and an objective that rewards them (F1 does, when
+    positives are the majority) will happily select one.
+    """
+    pos_rate = np.array([float(np.mean(y_pred_prob >= t)) for t in thresholds])
+    minority = np.minimum(pos_rate, 1.0 - pos_rate)
+    return minority >= PRED_MINORITY_FRAC_FLOOR
+
+
 def tune_threshold(
     y_true: np.ndarray,
     y_pred_prob: np.ndarray,
-    objective: str = "f1",
+    objective: str = "youden",
     target_recall: float | None = None,
 ) -> float:
     """Pick a decision threshold from (validation) predictions.
@@ -129,48 +148,134 @@ def tune_threshold(
     probability below 0.5 and flag nobody. This chooses a data-driven operating point
     on a held-out (validation) split, which the caller then applies to test.
 
+    **Default is "youden", not "f1".** F1 is only a sensible objective when positives are
+    RARE. On this task positives ran at 55.8% of the cohort, where the trivial all-positive
+    classifier already scores F1 = 0.717 — so maximizing F1 selected "flag everyone",
+    precision collapsed to the base rate, and a zero-skill classifier looked like an
+    improvement (docs/action_plan.md §C). Youden's J (TPR - FPR) is 0 for BOTH degenerate
+    classifiers, so it cannot be gamed that way.
+
+    Every objective is additionally restricted to non-degenerate thresholds
+    (:func:`_non_degenerate`), which makes the guarantee structural rather than a property
+    of whichever objective is chosen.
+
     Args:
         y_true: Ground-truth binary labels, shape (N,).
         y_pred_prob: Predicted probabilities, shape (N,).
-        objective: "f1" maximizes binary F1; "youden" maximizes TPR - FPR (balanced
-            error); "recall" returns the highest-precision threshold whose recall is
-            still >= ``target_recall``.
+        objective: "youden" (default) maximizes TPR - FPR; "f1" maximizes binary F1 —
+            use only when positives are rare; "recall" returns the highest-precision
+            threshold whose recall is still >= ``target_recall``.
         target_recall: Required when ``objective == "recall"``.
 
     Returns:
         A threshold in [0, 1]. Falls back to the median probability when the scores
-        are degenerate (single class, or all-equal probabilities).
+        are degenerate (single class, all-equal probabilities, or no non-degenerate
+        threshold exists).
 
     Raises:
         ValueError: If ``objective`` is unknown, or "recall" without ``target_recall``.
     """
+    if objective not in ("youden", "f1", "recall"):
+        raise ValueError(f"unknown objective {objective!r} (use 'youden', 'f1', or 'recall')")
+
     fallback = float(np.median(y_pred_prob))
     if len(np.unique(y_true)) < 2 or np.ptp(y_pred_prob) == 0.0:
         return fallback
 
     if objective == "youden":
         fpr, tpr, thr = roc_curve(y_true, y_pred_prob)
-        best = thr[int(np.argmax(tpr - fpr))]
-        return fallback if not math.isfinite(best) else float(best)
+        score, cand = tpr - fpr, thr
+    else:
+        precision, recall, thr = precision_recall_curve(y_true, y_pred_prob)
+        if thr.size == 0:
+            return fallback
+        if objective == "f1":
+            f1 = np.divide(
+                2 * precision * recall, precision + recall,
+                out=np.zeros_like(precision), where=(precision + recall) > 0,
+            )
+            score, cand = f1[:-1], thr
+        else:
+            if target_recall is None:
+                raise ValueError("objective='recall' requires target_recall")
+            # Prefer the highest-precision point still meeting the recall floor.
+            feasible = recall[:-1] >= target_recall
+            score = np.where(feasible, precision[:-1], -np.inf)
+            cand = thr
 
-    precision, recall, thr = precision_recall_curve(y_true, y_pred_prob)
-    if thr.size == 0:
+    finite = np.isfinite(cand)
+    keep = finite & _non_degenerate(cand, y_pred_prob)
+    if not keep.any():
+        # Every candidate is degenerate — fall back rather than return a zero-skill point.
+        keep = finite
+        if not keep.any():
+            return fallback
+
+    masked = np.where(keep, score, -np.inf)
+    if not np.isfinite(masked).any():
         return fallback
+    return float(cand[int(np.argmax(masked))])
 
-    if objective == "f1":
-        f1 = np.divide(
-            2 * precision * recall, precision + recall,
-            out=np.zeros_like(precision), where=(precision + recall) > 0,
-        )
-        return float(thr[int(np.argmax(f1[:-1]))])
 
-    if objective == "recall":
-        if target_recall is None:
-            raise ValueError("objective='recall' requires target_recall")
-        feasible = recall[:-1] >= target_recall
-        return float(thr[feasible][-1]) if feasible.any() else float(thr[0])
+def bootstrap_ci(
+    y_true: np.ndarray,
+    y_pred_prob: np.ndarray,
+    metrics: tuple[str, ...] = ("auc_roc", "avg_precision"),
+    n_boot: int = 2000,
+    alpha: float = 0.05,
+    seed: int = 42,
+) -> dict[str, float]:
+    """Percentile-bootstrap confidence intervals for threshold-free metrics.
 
-    raise ValueError(f"unknown objective {objective!r} (use 'f1', 'youden', or 'recall')")
+    Quantifies **test-set sampling** uncertainty — "if a different cohort of this size had
+    been drawn, how much would the metric move?" — from a SINGLE run, at no extra training
+    cost. It does NOT capture training stochasticity (seed variance); that needs multiple
+    seeds, and the two are separate sources (docs/action_plan.md §D).
+
+    This resamples *predictions* to estimate uncertainty. It never touches training and
+    creates no synthetic rows — unlike upsampling, which would additionally invalidate the
+    DP guarantee by breaking the one-record-per-person assumption.
+
+    Args:
+        y_true: Ground-truth binary labels, shape (N,).
+        y_pred_prob: Predicted probabilities, shape (N,).
+        metrics: Which metrics to bootstrap. Supports "auc_roc" and "avg_precision".
+        n_boot: Resample count. 2000 gives a stable 95% percentile interval.
+        alpha: 1 - coverage. 0.05 -> 95% CI.
+        seed: RNG seed, so the interval is reproducible.
+
+    Returns:
+        Flat dict of ``{metric}_ci_low`` / ``{metric}_ci_high`` / ``{metric}_se``. Values
+        are NaN when the metric is undefined (e.g. a single-class label vector).
+    """
+    fns = {"auc_roc": roc_auc_score, "avg_precision": average_precision_score}
+    out: dict[str, float] = {}
+    n = len(y_true)
+    if n == 0 or len(np.unique(y_true)) < 2:
+        for m in metrics:
+            out[f"{m}_ci_low"] = out[f"{m}_ci_high"] = out[f"{m}_se"] = float("nan")
+        return out
+
+    rng = np.random.default_rng(seed)
+    idx = rng.integers(0, n, size=(n_boot, n))
+    for m in metrics:
+        fn = fns.get(m)
+        if fn is None:
+            raise ValueError(f"bootstrap_ci does not support metric {m!r}")
+        vals: list[float] = []
+        for row in idx:
+            yt = y_true[row]
+            if len(np.unique(yt)) < 2:  # degenerate resample — undefined, skip
+                continue
+            vals.append(float(fn(yt, y_pred_prob[row])))
+        if not vals:
+            out[f"{m}_ci_low"] = out[f"{m}_ci_high"] = out[f"{m}_se"] = float("nan")
+            continue
+        arr = np.asarray(vals)
+        out[f"{m}_ci_low"] = float(np.quantile(arr, alpha / 2))
+        out[f"{m}_ci_high"] = float(np.quantile(arr, 1 - alpha / 2))
+        out[f"{m}_se"] = float(arr.std(ddof=1))
+    return out
 
 
 def recall_at_precision(
@@ -207,8 +312,17 @@ def print_metrics_table(metrics: dict[str, float], label: str = "") -> None:
     """
     header = f"=== {label} ===" if label else "=== Metrics ==="
     print(header)
-    for k in ["auc_roc", "accuracy", "f1_macro", "precision", "recall", "brier_score"]:
-        print(f"  {k:<18}: {metrics[k]:.4f}")
+    for k in [
+        "auc_roc", "avg_precision", "balanced_accuracy", "mcc",
+        "accuracy", "f1_macro", "precision", "recall", "brier_score",
+    ]:
+        if k in metrics:
+            print(f"  {k:<18}: {metrics[k]:.4f}")
+    if "auc_roc_ci_low" in metrics:
+        print(
+            f"  {'auc 95% CI':<18}: [{metrics['auc_roc_ci_low']:.4f}, "
+            f"{metrics['auc_roc_ci_high']:.4f}]"
+        )
     print(
         f"  {'confusion matrix':<18}: TN={metrics['tn']} FP={metrics['fp']} "
         f"FN={metrics['fn']} TP={metrics['tp']}"

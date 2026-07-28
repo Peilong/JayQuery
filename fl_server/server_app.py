@@ -42,7 +42,12 @@ from flwr.common import log
 from flwr.serverapp import Grid, ServerApp
 
 import wandb
-from baselines.eval_utils import compute_metrics, recall_at_precision, tune_threshold
+from baselines.eval_utils import (
+    bootstrap_ci,
+    compute_metrics,
+    recall_at_precision,
+    tune_threshold,
+)
 from fl_server.top_model import TopModel
 from privacy.dp_wrapper import make_private_with_noise
 from privacy.privacy_accountant import (
@@ -50,6 +55,7 @@ from privacy.privacy_accountant import (
     combine_epsilon,
     solve_noise_multiplier,
 )
+from utils.reproducibility import seed_everything
 from utils.wandb_utils import METRICS_GLOSSARY_NOTES
 
 app = ServerApp()
@@ -71,6 +77,12 @@ def main(grid: Grid, context: Context) -> None:
     num_rounds: int = context.run_config["num-server-rounds"]
     embedding_dim: int = context.run_config["embedding-dim"]
     lr: float = context.run_config["learning-rate"]
+
+    # Seed BEFORE constructing the top model (CLAUDE.md coding standard 4). Weight init
+    # was previously left to the ambient process RNG, so identical configs differed by
+    # ~0.005 AUC. Seeding once here (not per round) keeps the DP noise sequence varying
+    # across rounds while making the whole run reproducible from `seed`.
+    seed_everything(int(context.run_config.get("seed", 42)))
 
     top_kwargs = {
         "embedding_dim": embedding_dim,
@@ -112,6 +124,10 @@ def main(grid: Grid, context: Context) -> None:
                 "server-dp-enabled": dp["enabled"],
                 "pos-weight": pos_weight_cfg,
             },
+            # Honour the same wandb-mode the clients use (fl_client/common.py). Without
+            # this the server stayed online while `wandb-mode="offline"` put only the
+            # clients offline — a half-offline run is worse than either.
+            mode=context.run_config.get("wandb-mode", "online"),
             resume="never",
         )
 
@@ -366,7 +382,7 @@ def main(grid: Grid, context: Context) -> None:
     # logits toward zero, so a model that ranks well can still put every probability
     # below 0.5 and flag nobody; the tuned threshold recovers a usable operating
     # point. The 0.5 result is kept alongside for an honest before/after.
-    thr_objective = str(context.run_config.get("threshold-objective", "f1"))
+    thr_objective = str(context.run_config.get("threshold-objective", "youden"))
     val_labels, val_probs = _collect_eval_predictions(grid, node_ids, final_eval, split="val")
     tuned_threshold = tune_threshold(
         val_labels.numpy(), val_probs.numpy(), objective=thr_objective
@@ -389,11 +405,18 @@ def main(grid: Grid, context: Context) -> None:
     }
     test_metrics["tuned_threshold"] = tuned_threshold
     test_metrics.update(op_points)
-    log(INFO, "Test @tuned=%.3f: recall=%.3f prec=%.3f f1=%.3f | @0.5: recall=%.3f | "
-        "AP=%.3f recall@prec0.7=%.3f",
+    # §D1: test-set sampling uncertainty from this single run (no extra training cost).
+    # Does NOT capture seed variance — that needs the multi-seed matrix.
+    test_metrics.update(bootstrap_ci(y_true, y_prob))
+    log(INFO, "Test @tuned=%.3f: recall=%.3f prec=%.3f f1=%.3f bal_acc=%.3f mcc=%.3f | "
+        "@0.5: recall=%.3f",
         tuned_threshold, test_metrics["recall"], test_metrics["precision"],
-        test_metrics["f1_binary"], test_metrics_at_half["recall"],
-        test_metrics["avg_precision"], op_points["recall_at_precision_70"])
+        test_metrics["f1_binary"], test_metrics["balanced_accuracy"], test_metrics["mcc"],
+        test_metrics_at_half["recall"])
+    log(INFO, "Test AUC=%.4f [95%% CI %.4f-%.4f]  AP=%.4f  recall@prec0.7=%.3f",
+        test_metrics["auc_roc"], test_metrics["auc_roc_ci_low"],
+        test_metrics["auc_roc_ci_high"], test_metrics["avg_precision"],
+        op_points["recall_at_precision_70"])
 
     meta = {
         "epsilon": dp["epsilon"] if dp["enabled"] else None,

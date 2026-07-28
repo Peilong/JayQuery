@@ -33,15 +33,26 @@ python scripts/prepare_silos.py
 ```
 
 ## Testing the flwr server/client
+
+Two run modes — identical app code, ~10x speed difference. Full details: CLAUDE.md step 6.
+
 ```bash
-#Set flwr to simulation mode with 2 virtual SuperNodes.
-flwr federation simulation-config --num-supernodes=2
+# SIMULATION (~0.75 s/round) — fast path for iteration and sweeps.
+# `local` is the stock ~/.flwr/config.toml entry whose address ":local:" makes the CLI
+# auto-start `flower-superlink --insecure --simulation`.
+# num-supernodes=2 is REQUIRED: the default is 10, and the ServerApp needs exactly 2.
+flwr run . local --federation-config "num-supernodes=2" \
+    --run-config "processed-dir='data/processed/dedup_first' num-server-rounds=10"
 
-#Run the flwr server/client in a simulation.
-flwr run .
-
-#This doesn't show much, but it is functional for starting the flwr environment.
+# DEPLOYMENT (~8 s/round) — real SuperLink + 2 SuperNode processes.
+# Use this for any result reported in the paper.
+python scripts/run_deployment.py --rounds 10 \
+    --run-config "processed-dir='data/processed/dedup_first'"
 ```
+
+> NOTE (flwr 1.28): the old `flwr federation simulation-config --num-supernodes=2` +
+> bare `flwr run .` flow **no longer exists** — that subcommand was removed and
+> `[tool.flwr.federations]` in `pyproject.toml` is not parsed. Use the commands above.
 
 ## Run Model Baselines
 ```bash

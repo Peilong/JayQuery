@@ -374,3 +374,108 @@ def test_integration_full_round_trip() -> None:
     assert any(
         not torch.equal(b, p) for b, p in zip(before_top, top.parameters())
     ), "TopModel weights did not update after optimizer step"
+
+# ── C1/C2/D1: degeneracy-proof thresholds, metrics, and bootstrap CIs ─────────
+
+
+def _compressed_majority_positive():
+    """Reproduce the §J all-DP failure: majority-positive, near-zero signal, tight band.
+
+    This is the exact regime where maximizing F1 selects "flag everyone" — precision
+    collapses to the base rate and a zero-skill classifier scores F1 = 0.717.
+    """
+    import numpy as np
+
+    rng = np.random.default_rng(3)
+    y = np.array([1] * 129 + [0] * 102)
+    p = np.where(
+        y == 1, rng.normal(0.4530, 0.0028, len(y)), rng.normal(0.4523, 0.0028, len(y))
+    )
+    return y, p
+
+
+@pytest.mark.model
+def test_tune_threshold_default_is_youden_not_f1():
+    """The default objective must not be F1 — it degenerates on majority-positive data."""
+    import inspect
+
+    from baselines.eval_utils import tune_threshold
+
+    assert inspect.signature(tune_threshold).parameters["objective"].default == "youden"
+
+
+@pytest.mark.model
+def test_threshold_guard_blocks_flag_everyone():
+    """C1: the tuner must never return a degenerate (all-positive) operating point."""
+    from baselines.eval_utils import compute_metrics, tune_threshold
+
+    y, p = _compressed_majority_positive()
+    m = compute_metrics(y, p, threshold=tune_threshold(y, p))
+    assert 0.0 < m["pred_pos_rate"] < 1.0, "tuner returned a degenerate threshold"
+    assert m["mcc"] > 0.0, "chosen operating point has zero skill"
+    # The §J signature: precision collapsing to the base rate.
+    assert abs(m["precision"] - m["base_rate"]) > 1e-6
+
+
+@pytest.mark.model
+def test_guard_applies_to_every_objective():
+    """The non-degeneracy guard is structural, not a property of one objective."""
+    from baselines.eval_utils import compute_metrics, tune_threshold
+
+    y, p = _compressed_majority_positive()
+    for objective in ("youden", "f1"):
+        m = compute_metrics(y, p, threshold=tune_threshold(y, p, objective=objective))
+        assert 0.0 < m["pred_pos_rate"] < 1.0, f"{objective} returned a degenerate threshold"
+
+
+@pytest.mark.model
+def test_balanced_accuracy_and_mcc_are_degeneracy_proof():
+    """C2: both zero-skill classifiers must score identically — 0.5 and 0.0."""
+    import numpy as np
+
+    from baselines.eval_utils import compute_metrics
+
+    y = np.array([1] * 129 + [0] * 102)
+    all_neg = compute_metrics(y, np.full(len(y), 0.01))
+    all_pos = compute_metrics(y, np.full(len(y), 0.99))
+
+    for m in (all_neg, all_pos):
+        assert m["balanced_accuracy"] == pytest.approx(0.5)
+        assert m["mcc"] == pytest.approx(0.0)
+    # ...whereas accuracy and f1 rate the two very differently — the trap they replace.
+    assert all_pos["accuracy"] > all_neg["accuracy"]
+    assert all_pos["f1_binary"] > 0.7 and all_neg["f1_binary"] == 0.0
+
+
+@pytest.mark.model
+def test_bootstrap_ci_brackets_the_point_estimate():
+    """D1: percentile CI must contain the observed metric and have sane width."""
+    import numpy as np
+
+    from baselines.eval_utils import bootstrap_ci, compute_metrics
+
+    rng = np.random.default_rng(11)
+    y = np.array([1] * 400 + [0] * 400)
+    p = np.where(y == 1, rng.normal(0.62, 0.18, len(y)), rng.normal(0.38, 0.18, len(y)))
+    p = np.clip(p, 0, 1)
+
+    m = compute_metrics(y, p)
+    ci = bootstrap_ci(y, p, n_boot=300, seed=0)
+    assert ci["auc_roc_ci_low"] < m["auc_roc"] < ci["auc_roc_ci_high"]
+    assert ci["avg_precision_ci_low"] < m["avg_precision"] < ci["avg_precision_ci_high"]
+    assert 0.0 < ci["auc_roc_se"] < 0.1
+    # Reproducible for a fixed seed.
+    assert bootstrap_ci(y, p, n_boot=300, seed=0) == ci
+
+
+@pytest.mark.model
+def test_bootstrap_ci_handles_single_class():
+    """Degenerate label vector yields NaNs rather than raising."""
+    import math
+
+    import numpy as np
+
+    from baselines.eval_utils import bootstrap_ci
+
+    ci = bootstrap_ci(np.zeros(20), np.linspace(0, 1, 20), n_boot=20)
+    assert math.isnan(ci["auc_roc_ci_low"]) and math.isnan(ci["auc_roc_se"])

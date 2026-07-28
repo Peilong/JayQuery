@@ -178,14 +178,71 @@ Point a run at a variant with the `processed-dir` run-config key. Each variant's
 `--features v0` / `--cutoff_week` are **[DEPRECATED]** (leaky; they also bypass the
 cohort rules, so their labels are not comparable).
 
-### 6 — Run VFL training (deployment: SuperLink + 2 SuperNodes)
+### 6 — Run VFL training — TWO run modes
+
+There are two supported ways to run the VFL loop. **Both execute the identical ServerApp /
+ClientApp code**; they differ in how the Flower runtime is hosted, and therefore in speed and
+in RNG stream. Cross-mode numerical equivalence is **not yet established** — see the caveat
+below before treating a simulation number as a deployment number.
+
+| | Simulation | Deployment |
+|---|---|---|
+| Runtime | one local SuperLink, virtual SuperNodes (Ray) | real SuperLink + 2 SuperNode processes |
+| Speed | **~0.75 s/round** | ~8 s/round |
+| Use for | sweeps, seed studies, config/plumbing checks | **headline results reported in the paper** |
+
+#### 6a — Simulation (fast; use for iteration and sweeps)
 ```bash
-python scripts/run_deployment.py --rounds 50
-# run_deployment.py starts flower-superlink + one flower-supernode per silo
-# (partition-id 0 = Silo A, 1 = Silo B), registers the connection in ~/.flwr/config.toml,
-# then submits `flwr run`. This is the supported run path — prefer it over a bare `flwr run .`,
-# which currently has no federation configured in pyproject.toml.
+flwr run . local --federation-config "num-supernodes=2" \
+    --run-config "processed-dir='data/processed/dedup_first' num-server-rounds=50"
 ```
+`local` is the stock `[superlink.local]` entry in `~/.flwr/config.toml`, whose
+`address = ":local:"` magic value makes the Flower CLI lazily start
+`flower-superlink --insecure --simulation` for you. **`num-supernodes=2` is required** —
+the default is 10 and the ServerApp asserts exactly 2 nodes.
+
+> Gotchas: the field is bare `num-supernodes` (`options.num-supernodes` is rejected), and
+> `--federation-config` is separate from `--run-config` — federation options configure the
+> *runtime*, run-config configures the *app*.
+
+#### 6b — Deployment (real federation; use for reported results)
+```bash
+python scripts/run_deployment.py --rounds 50 \
+    --run-config "processed-dir='data/processed/dedup_first' server-dp-enabled=true"
+```
+Starts `flower-superlink` + one `flower-supernode` per silo (partition-id 0 = Silo A,
+1 = Silo B), registers the connection in `~/.flwr/config.toml`, then submits `flwr run`.
+`--rounds` and `--run-config` are merged into a single `--run-config` flag.
+
+#### Which to use, and the one rule
+Iterate in simulation; report from deployment. **Never mix the two modes inside one
+comparison table.**
+
+> **Equivalence caveat (measured 2026-07-28, UNRESOLVED).** One paired run — same config,
+> same seed, 20 rounds, `dedup_first` — gave sim AUC **0.7064** vs deployment **0.7378**,
+> a gap of **0.0314**. That exceeds the n=2552 Hanley–McNeil bar of 0.0250, so this does
+> **not** demonstrate equivalence. It also does not demonstrate a systematic difference:
+> that bar measures *test-set sampling* uncertainty, whereas two runs with different RNG
+> streams differ by *training stochasticity*, a separate and usually larger source. Both
+> runs were also truncated at 20 rounds (`best_val` at the final round), the noisiest phase
+> of training. Resolving this needs several seeds per mode — tracked as §L in
+> `docs/action_plan.md`. **Until then, do not report a simulation number as a deployment
+> number.**
+
+The DP guarantee is unaffected either way: ε is computed analytically from
+sigma/steps/sample-rate, never from the realized noise.
+
+> **flwr 1.28 note:** `[tool.flwr.federations]` in `pyproject.toml` is **not parsed** by this
+> version and must not be added — SuperLink connections live in `~/.flwr/config.toml`.
+> A bare `flwr run .` with no connection name will not work.
+
+> **Why the client forward is seeded, not RNG-snapshotted:** `apply_gradients` must replay
+> `generate_embeddings`' exact dropout mask. It re-seeds a `torch.random.fork_rng()` from a
+> per-round integer (`fl_client/common.py:_forward_seed`). The previous design snapshotted
+> process-global RNG state, which held in deployment but broke under simulation's Ray actor
+> pool — every `apply_gradients` tripped the replay guard, so bottom models silently never
+> trained while the top model kept learning. Do not reintroduce global-RNG snapshotting.
+
 DP behavior is controlled by the `[tool.flwr.app.config]` keys in `pyproject.toml` (see below).
 
 ### 7 — Baselines (Alex)

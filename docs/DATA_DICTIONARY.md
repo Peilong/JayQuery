@@ -2,6 +2,9 @@
 
 > Owner: Alex Pellet
 > Feature version: **rate_v1** (2026-07-23) — exposure-normalized Silo B features.
+> Cohort version: **multi-module + dedup + pre-start-withdrawal exclusion** (2026-07-28).
+> Scaling: **two corrections** on 2026-07-28 (double-scaling, log1p) — every number produced
+> before that date is void. See *Cohort construction* and *Feature scaling* below.
 > Supersedes the v0 full-course totals and the `--cutoff_week` censored variants,
 > both of which remain available as comparison modes (see [Legacy modes](#legacy-modes-comparison-only)).
 
@@ -98,11 +101,64 @@ Definitional details (deliberate, flag if you disagree):
    activity in this presentation has no window, hence `D` = ∅ and all-zero features —
    consistent with the "no evidence of engagement" 0-fill semantics.
 6. **Empty due set (`D` = ∅) → all three assessment ratios are 0.** This is a real
-   population, not a corner case: **215 of 2305 students (~9%)** in CCC_2014J have
-   `active_end` before the first due date (day 18). Compliance is undefined for them;
+   population, not a corner case: **215 of 2305 students (~9%)** in the *original
+   single-module* CCC_2014J cohort had `active_end` before the first due date (day 18).
+   (That figure predates the 2026-07-28 cohort changes and has not been recomputed for the
+   multi-module variants; the mechanism is unchanged.) Compliance is undefined for them;
    0 is the "no evidence" value consistent with the missing-value strategy, and the
    model must lean on the VLE-rate features for these students. The divide-by-zero
    guard therefore covers both `D` = ∅ and zero total weight in `D`.
+
+---
+
+## Cohort construction (added 2026-07-28 — `prepare_silos.py:build_cohort`)
+
+Feature engineering is unchanged, but **which rows exist** is now parameterized. Three steps
+run in order before any feature is computed. Full rationale: `docs/action_plan.md` §E-a, §F.
+
+### 1. Module filter (`--modules`)
+`CCC_2014J` (single presentation) or `all` (22 module-presentations, 32,593 raw rows).
+
+### 2. Pre-start withdrawal exclusion (`--withdrawal-cutoff-day`, default 0)
+Rows with `final_result == "Withdrawn"` **and** `date_unregistration <= cutoff` are dropped.
+
+**Why:** 30.4% of all OULAD withdrawals unregister *before the course starts*. They are
+non-starters, not dropout risk — and they are trivially separable (**66.7% have zero VLE
+clicks**, vs 2.4% for everyone else), so keeping them inflates AUC with unearnable wins. In
+CCC_2014J alone this was 213 students, 8.5% of the cohort. Pass `none` to disable.
+
+The prediction task is therefore **"dropout among students who began the course."** An
+early-warning system cannot intervene on someone who unregistered before day 1.
+
+### 3. Deduplication (`--dedup-rule {first,best,worst}`)
+One row per `id_student`. **12.3% of OULAD students appear in >1 module-presentation**, and
+**33% of those have MIXED outcomes** (passed one, withdrew from another), so the rule
+materially moves the label:
+
+| Rule | at-risk rate (pre-exclusion) | Use |
+|---|---|---|
+| `best` (any pass) | 0.4935 | Sensitivity bound only — label-SELECTING |
+| **`first`** (earliest, chronological) | **0.5131** | **PRIMARY** — label-neutral, no look-ahead |
+| `last` (chronological) | 0.5147 | Not used |
+| `worst` (any withdrawal) | 0.5340 | Sensitivity bound only — label-SELECTING |
+
+A 4.06-point spread — larger than most DP effects being measured, which is why `first` is
+primary and `best`/`worst` are reported as bounds around it.
+
+**This is not optional for the DP guarantee.** DP assumes one record per individual; a student
+contributing *k* records makes true sensitivity *k·C* and invalidates the reported ε. The same
+reasoning is why **upsampling/SMOTE must never be reintroduced**.
+
+### Resulting cohorts (all 22 presentations, cutoff day 0)
+
+| Variant | cohort | A∩B intersection | train/val/test | label rate |
+|---|---|---|---|---|
+| `dedup_first` | 26,365 | 25,515 | 20411 / 2552 / 2552 | 0.4633 |
+| `dedup_best` | 26,365 | 25,520 | 20416 / 2552 / 2552 | 0.4470 |
+| `dedup_worst` | 26,365 | 25,512 | 20408 / 2552 / 2552 | 0.4841 |
+
+Note the class balance **flipped**: positives were the majority in CCC_2014J (0.5584) and are
+now the minority (~0.46). This matters for metric choice — see `docs/action_plan.md` §C.
 
 ---
 
@@ -118,7 +174,11 @@ Definitional details (deliberate, flag if you disagree):
 | 5 | studied_credits | Standardized float | z-score | Credits registered for in this module. |
 | 6–17 | region | One-hot (12 cols, drop-first) | 0/1 | 13 UK regions, reference level dropped. |
 
-**Label:** `final_result` → binary: {Withdrawn, Fail} = 1 (at-risk), {Pass, Distinction} = 0.
+**Label:** `final_result` → binary: {Withdrawn, Fail} = 1 (at-risk), {Pass, Distinction} = 0 —
+**after** the pre-start-withdrawal exclusion and dedup described in *Cohort construction* above.
+Module identity is deliberately **not** a feature: cross-module heterogeneity (at-risk rate
+ranges 0.274–0.658 across the 22 presentations) is handled by **stratifying the split**, which
+keeps `input-dim-a` at 18 and avoids inflating the DP parameter count (noise scales with √d).
 
 ## Silo B Features (26 columns — studentVle.csv + vle.csv + assessments.csv + studentAssessment.csv + courses.csv)
 
@@ -164,15 +224,53 @@ baselines.**
 
 ## Train/Val/Test Split
 
-- Seed: 42; split 80% train / 10% val / 10% test, stratified on label.
-- Counts (CCC_2014J, PSI intersection = 2305): train = 1843, val = 231, test = 231.
-- Class imbalance handled by **weighting in the top-model loss** (server side) — SMOTE
-  was removed from silo prep (it fabricated cross-silo-inconsistent synthetic rows).
-- StandardScaler fit on training rows only; transform applied to all rows. Split
-  happens **before** scaling.
+- Seed: 42; 80% train / 10% val / 10% test.
+- **Stratified on `module_presentation` × `label`** (changed 2026-07-28). Stratifying on the
+  pair preserves both the 22-presentation mix and the class balance in every split; verified
+  max deviation from the overall presentation share is **0.0004**. Falls back to label-only
+  with a warning if a stratum has <2 members (possible on tiny cohorts).
+- Counts: see the *Cohort construction* table. (The old CCC_2014J figures — 1843/231/231 from
+  a 2305 intersection — apply only to the pre-2026-07-28 single-module dataset.)
+- Class imbalance handled by **weighting in the top-model loss** (server side). **SMOTE was
+  removed** from silo prep and must not return: it fabricated cross-silo-inconsistent rows,
+  and duplicated/synthetic records break the per-record DP sensitivity bound.
+- Split happens **before** scaling; scaler fit on training rows only.
+
+## Feature scaling (corrected 2026-07-28 — two bugs, see `docs/action_plan.md` §H)
+
+Both bugs were **pre-existing and affected every result collected before 2026-07-28.**
+
+**H1 — train rows were scaled twice.** `fit_and_scale` wrote scaled values into the train rows
+and then transformed the whole array again, so train and val/test came from *different
+distributions*: Silo A `studied_credits` had train σ 0.026 vs val σ 0.988 (**38×**), and Silo B
+column 5 was **50×** off. This hit **1 of 18** Silo A features and **22 of 26** Silo B features
+— training features were compressed to near-constant, then evaluation presented features an
+order of magnitude wider. Fixed: `fit()` on train, `transform()` every row exactly once.
+
+**H2 — sparse click-rate columns exploded.** `StandardScaler` divides by the training σ. With
+22 presentations × 20 global activity types, types used by only a few modules are ~all-zero for
+most students → near-zero training σ → the few active students get divided by it. Peak scaled
+σ reached **720** and max |x| **84,391**. Fixed: **`log1p` applied to the structurally
+non-negative scaled columns before standardizing** (21 of 22; `start_date` is excluded
+automatically because it ranges negative, −25 to 238). Post-fix: max σ **1.00**, max |x| **116**.
+The mask is stored on the scaler as `log1p_mask_` and counted in `manifest.json`
+(`silo_b_log1p_cols`).
+
+**Measured effect of the two fixes together** (no-DP, 30 rounds): train loss went from stuck at
+0.693 = ln(2) (chance) to descending; val AUC from ~0.75 after 150 rounds to **0.789 after 30**.
 
 ## Provenance
 
-Each `silo_{a,b}.pkl` records its lineage: `feature_version` (`"rate_v1"` or absent for
-legacy) and `cutoff_week` (None unless a legacy cutoff run). Check these before comparing
-runs across datasets.
+`silo_{a,b}.pkl` records: `feature_version` (`"rate_v1"` / legacy), `cutoff_week`,
+**`dedup_rule`**, **`withdrawal_cutoff_day`**, **`modules`**.
+
+Each variant directory also carries a **`manifest.json`** with the full lineage — every cohort
+parameter, row counts at each stage (raw → module filter → exclusion → dedup), per-split label
+rates, `stratified_on`, `silo_b_log1p_cols`, and `input_dim_a`/`input_dim_b`. Check it before
+comparing runs across datasets; a result is only interpretable against the manifest that
+produced its data.
+
+Regenerate every variant with one command:
+```bash
+python scripts/prepare_variants.py          # -> data/processed/dedup_{first,best,worst}
+```
