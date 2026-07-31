@@ -106,17 +106,134 @@ n=5 → ±0.012. Target effects are ~0.02, so **5 seeds is the floor for DP arms
 needs far fewer. And "two seeds agreed" does **not** certify stability: at T=200 two seeds
 matched to 0.0003 while a third sat 0.025 away, and the T=150 point was 5σ out.
 
-### 2e. Headline scientific findings (provisional — single-seed, pending §D3)
+### 2e. §D3 FULL MATRIX — 60 runs (3 variants x 4 DP modes x 5 seeds), T=200, simulation
 
-1. **Server-side DP-SGD is close to free at an adequate horizon.** At matched T=200,
-   `server_only` (0.8997) trails `no_dp` (0.9064) by **0.0066** — well inside the 0.025 bar.
-   At T=50 the same gap was 0.037. **The measured cost of DP shrinks as the horizon grows.**
-2. **Cut-layer noise is the expensive mechanism.** `all_dp` trails by **0.0619** (significant).
-   Cut noise corrupts the model's *inputs*; server DP-SGD only perturbs gradients.
+**0 failures, 0 `pred_collapsed`, MCC 0.436-0.706 across all 60 runs.**
+
+Absolute AUC (mean of 5 seeds):
+
+| arm | dedup_first | dedup_best | dedup_worst |
+|---|---|---|---|
+| no_dp | 0.9023 | 0.9204 | 0.9131 |
+| server_only | 0.9001 | 0.9176 | 0.9109 |
+| cut_only | 0.8461 | 0.8548 | 0.8589 |
+| all_dp | 0.8227 | 0.8356 | 0.8277 |
+
+Gap vs the no-DP ceiling (Welch, n=5/arm; * = significant at 95%):
+
+| arm | dedup_first | dedup_best | dedup_worst |
+|---|---|---|---|
+| **server_only** | −0.0022 [−0.0053, +0.0009] | −0.0027 [−0.0073, +0.0019] | −0.0021 [−0.0051, +0.0008] |
+| cut_only | −0.0562 [−0.0616, −0.0508]* | −0.0656 [−0.0761, −0.0551]* | −0.0541 [−0.0606, −0.0477]* |
+| all_dp | −0.0797 [−0.1033, −0.0560]* | −0.0847 [−0.1007, −0.0688]* | −0.0853 [−0.1122, −0.0585]* |
+
+**The sensitivity analysis passes.** The dedup rule moves the label rate by **4.06 points**
+(0.4935 → 0.5340) and shifts absolute AUC by up to 0.018 — yet the measured cost of server-side
+DP moves by **less than 0.001** (−0.0022 / −0.0027 / −0.0021), and its CI contains zero in all
+three. Every conclusion is invariant to the cohort-construction choice that was flagged as the
+largest methodological risk in §E-a.
+
+That invariance is the point: the *absolute* level depends on how you define the label, but the
+*DP effect* does not. Conclusions rest on the effect, not the level.
+
+### 2f. Headline scientific findings (now 5-seed, CI-backed)
+
+1. **Server-side DP-SGD at ε=1.0 has NO measurable utility cost.** ΔAUC −0.0022, 95% CI
+   **[−0.0053, +0.0009]** — contains zero, confirmed on all three dedup variants with 5 seeds
+   each. At T=50 the same gap measured 0.037, so **an under-trained model makes DP look far
+   more expensive than it is** — a confound worth flagging in the DP-utility literature.
+2. **Cut-layer noise at the SAME nominal ε=1.0 costs 25× more** (−0.0562, significant).
+   Cut noise corrupts the model's *inputs*; server DP-SGD only perturbs *gradients*.
+   **Where you inject noise matters far more than how much.**
 3. **DP crushes confidence separation, not ranking.** `pred_std` 0.365 (no_dp) → 0.006
    (all_dp) while AUC stays high. Deploy as a **ranking**, never as calibrated probabilities.
 4. **§A2's premise inverts at this data scale.** σ ∝ √T argues for short horizons, but that
    assumes a converged model. Here extra steps buy far more than the extra noise costs.
+
+---
+
+### 2g. Cut-layer clip (S) calibration — the median heuristic is WRONG here
+
+Cut-noise only, eps=1.0, T=200, `dedup_first`, 3 seeds:
+
+| setting | (S_a, S_b) | mean AUC | sd |
+|---|---|---|---|
+| **S=1.0** (the shipped "placeholder") | (1.0, 1.0) | **0.8453** | 0.0042 |
+| S=median | (5.6, 4.0) | 0.6022 | 0.0664 |
+| S=p75 | (6.7, 6.3) | 0.5995 | 0.0582 |
+
+**Moving to the calibrated median costs −0.2431 AUC and inflates variance ~16×.**
+
+**Why the intuition fails.** The natural expectation — shared with gradient clipping — is that
+clipping far below the data's scale destroys signal, so S should sit near the median. For the
+cut layer that is backwards, because **signal saturates but noise does not**:
+
+    SNR = min(S, row_norm) / (sigma * S)
+      S <= min row norm  ->  SNR = 1/sigma          (flat — best, and where S=1.0 sits)
+      S >  row_norm      ->  SNR = row_norm/(sigma*S)  (falls as S grows)
+
+The embedding's magnitude is capped by the model at ~4.3, while the injected noise scales
+linearly with S. At S=1.0 every row clips to length 1.0 and SNR is 1/sigma; at S=5.6 most rows
+pass through unclipped at ~4.3 but carry 5.6x the noise, giving 0.77/sigma.
+
+**Consequences:**
+- `cut-noise-max-norm = 1.0`, flagged in its own docstring as an uncalibrated placeholder, is
+  near-optimal — right by accident.
+- `scripts/measure_embedding_norms.py` previously advised *"start S near the median (or p75)"*.
+  That guidance is now corrected in the script with the measured table.
+- Worth a sentence in the paper: **percentile-based clip selection is a gradient-clipping
+  heuristic that does not transfer to input-side (cut-layer) noise.**
+
+---
+
+### 2h. ε SWEEP — the privacy–utility curve (35 runs, 5 seeds, S=1.0, T=200)
+
+wandb group **`eps-sweep`**. Cut-layer noise only; server DP off, so this isolates the
+input-side mechanism.
+
+| ε | AUC | sd | AP | r@p70 | MCC | stopped early | composed ε |
+|---|---|---|---|---|---|---|---|
+| 0.1 | 0.5862 | 0.082 | 0.528 | 0.047 | 0.077 | **5/5** | 0.111 |
+| 0.25 | 0.6464 | 0.105 | 0.577 | 0.121 | 0.196 | **4/5** | 0.297 |
+| 0.5 | 0.7324 | 0.130 | 0.685 | 0.465 | 0.417 | 1/5 | 0.680 |
+| 1 | 0.8463 | 0.005 | 0.816 | 0.827 | 0.599 | 0/5 | 1.435 |
+| **2** | **0.8609** | 0.005 | 0.842 | 0.839 | 0.611 | 0/5 | 2.844 |
+| 4 | 0.7805 | 0.016 | 0.745 | 0.623 | 0.434 | **5/5** | 2.981 |
+| off | 0.9027 | 0.002 | 0.906 | 0.887 | 0.639 | 0/5 | — |
+
+Cost vs the no-noise ceiling (Welch, n=5): ε=0.1 **−0.3165**, ε=0.25 −0.2563, ε=0.5 −0.1703,
+ε=1 −0.0564, ε=2 −0.0418, ε=4 −0.1222. All significant.
+
+**ε=1 reproduces §D3's `cut_only` (−0.0564 vs −0.0562)** — independent replication via a
+different job list.
+
+#### ⚠️ Two truncation confounds — do not read the curve naively
+
+**1. ε=4 is INVALID as a noise measurement.** It scores *worse* than ε=2, which is backwards.
+Cause: `combined-target-epsilon = 3.0` caps the **composed** budget across both silos. At ε=4
+the composed spend reaches 2.981 and **all 5 runs stop early at round ~50** of 200. Those runs
+are **under-trained, not over-noised**. ε=2 sits at composed 2.844 — close to the cap, though
+it still ran full length.
+→ **Either raise `combined-target-epsilon` and re-run the high end, or report only up to ε=2
+and state the cap.** As it stands the ε=4 point must not be plotted as a noise effect.
+
+**2. The low end is truncated legitimately.** At ε=0.1 all 5 runs stop at round ~21; at ε=0.25,
+4/5 stop by ~60. Here the **per-mechanism budget genuinely exhausts** — the accountant working
+as designed. This *is* part of the privacy cost, but it means low-ε points reflect
+"noise + fewer rounds", not noise alone. State it rather than let a reader assume 200 rounds
+throughout.
+
+#### What the curve genuinely shows
+
+1. **Variance explodes as ε falls**: sd 0.002 (off) → 0.005 (ε=1–2) → **0.130** (ε=0.5). At
+   tight budgets the model is not merely worse, it is **unpredictable** — arguably the stronger
+   deployment argument, since an institution retraining could get materially different results.
+2. **Deployment utility collapses far faster than AUC suggests.** `recall@precision-70`:
+   0.887 → 0.827 (ε=1) → 0.465 (ε=0.5) → 0.121 (ε=0.25) → **0.047** (ε=0.1). At ε=0.5 you catch
+   under half of at-risk students at acceptable precision; at ε=0.25 the system is useless while
+   AUC still reads 0.65. **Reporting only AUC would substantially overstate low-ε viability.**
+3. **The usable knee is ε≈1.** Below it, utility and stability both degrade sharply; above it,
+   gains are small and the composed-budget cap intervenes.
 
 ---
 

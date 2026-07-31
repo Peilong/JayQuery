@@ -67,15 +67,28 @@ def run_inversion_attack(
 
     Returns:
         Dict with keys: {success (bool), predicted_imd_band (int),
-                         true_imd_band (int), final_loss (float), iters (int)}.
+                         true_imd_band (int), final_loss (float), iters (int),
+                         reconstruction (Tensor)}.
+
+        ``reconstruction`` is the FULL recovered feature row, shape (input_dim,). The
+        optimizer always recovers every feature; previously only imd_band was read out and
+        the other 17 columns were discarded, which understated the attack by reporting
+        1/18 of what it actually recovers.
     """
-    # Infer the true feature width from the model's first Linear so the dummy input
-    # matches BottomModelA's input_dim (18 for Silo A) — never a hard-coded guess.
-    input_dim = model.encoder[0].in_features
+    # Infer the feature width from the model's FIRST Linear layer, found by walking the
+    # module tree. Reading `model.encoder[0]` hard-coded Silo A's attribute name, so this
+    # raised AttributeError on BottomModelB (whose stack is `layer1`) and made Silo B
+    # un-attackable.
+    first_linear = next(
+        (m for m in model.modules() if isinstance(m, torch.nn.Linear)), None
+    )
+    if first_linear is None:
+        raise ValueError(f"{type(model).__name__} has no Linear layer to infer input_dim from")
+    input_dim = first_linear.in_features
     dummy_input = torch.randn(1, input_dim, requires_grad = True)
     optimizer_attack = torch.optim.LBFGS([dummy_input], lr = lr)
     for i in range(num_iters):
-        def closure():
+        def closure() -> torch.Tensor:
             optimizer_attack.zero_grad()
             dummy_emb = model(dummy_input)
             loss = ((dummy_emb - real_embedding.detach()) ** 2).sum()
@@ -85,7 +98,14 @@ def run_inversion_attack(
     predicted = dummy_input[0, IMD_BAND_COL_IDX].round().clamp(0, 9).int().item()
     success = (predicted == true_imd_band)
 
-    return {"success" : success, "predicted_imd_band" : predicted, "true_imd_band" : true_imd_band, "final_loss" : end_loss.item(), "iters" : num_iters}
+    return {
+        "success": success,
+        "predicted_imd_band": predicted,
+        "true_imd_band": true_imd_band,
+        "final_loss": end_loss.item(),
+        "iters": num_iters,
+        "reconstruction": dummy_input.detach()[0].clone(),
+    }
 
 
 

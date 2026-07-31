@@ -211,15 +211,90 @@ def jobs_l5(seeds: list[int], variant: str, rounds: int) -> list[Job]:
     ]
 
 
+def jobs_clip(seeds: list[int], variant: str, rounds: int, mode: str) -> list[Job]:
+    """Calibrate the cut-layer DP sensitivity S at FIXED epsilon.
+
+    `cut-noise-max-norm` shipped at 1.0 — a documented placeholder — while measured
+    embedding row norms are ~5.6 (Silo A) / ~4.0 (Silo B), so every row was clipped to a
+    fifth of its length. Raising S does NOT change signal-to-noise (noise scales with S,
+    so S cancels); what it changes is **clipping bias**: at S=1.0 every embedding is
+    squashed to the same length, so the relative-magnitude signal between students is
+    destroyed and only direction survives. This measures whether recovering that costs or
+    buys utility at identical epsilon.
+    """
+    settings = {
+        "S1.0": (1.0, 1.0),      # shipped placeholder — 100% of rows clipped
+        "Smed": (5.6, 4.0),      # per-silo medians  — ~50% clipped
+        "Sp75": (6.7, 6.3),      # per-silo p75      — ~25% clipped
+    }
+    return [
+        Job(
+            tag=f"clip_{name}_s{seed}",
+            mode=mode,
+            rounds=rounds,
+            config={
+                "processed-dir": f"{PROCESSED}/{variant}",
+                "server-dp-enabled": False,
+                "cut-noise-enabled": True,      # cut-layer only: isolate the clip's effect
+                "cut-noise-target-epsilon": 1.0,
+                "cut-noise-max-norm-a": sa,
+                "cut-noise-max-norm-b": sb,
+                "seed": seed,
+                "track-wandb": False,
+            },
+        )
+        for name, (sa, sb) in settings.items()
+        for seed in seeds
+    ]
+
+
+def jobs_eps(seeds: list[int], variant: str, rounds: int, mode: str, group: str,
+             max_norm_a: float, max_norm_b: float) -> list[Job]:
+    """The privacy-utility curve: sweep cut-layer epsilon at a calibrated clip.
+
+    Logged to wandb under `group` so the sweep is browsable. epsilon=0 is the sentinel
+    for "cut noise disabled" (the no-DP ceiling of this curve).
+    """
+    jobs: list[Job] = []
+    for eps in (0.0, 0.1, 0.25, 0.5, 1.0, 2.0, 4.0):
+        for seed in seeds:
+            enabled = eps > 0
+            cfg: dict[str, object] = {
+                "processed-dir": f"{PROCESSED}/{variant}",
+                "server-dp-enabled": False,
+                "cut-noise-enabled": enabled,
+                "cut-noise-max-norm-a": max_norm_a,
+                "cut-noise-max-norm-b": max_norm_b,
+                "seed": seed,
+                "track-wandb": True,
+                "wandb-mode": "offline",
+                "wandb-group": group,
+            }
+            if enabled:
+                cfg["cut-noise-target-epsilon"] = eps
+            jobs.append(
+                Job(tag=f"eps_{'inf' if not enabled else eps}_s{seed}",
+                    mode=mode, rounds=rounds, config=cfg)
+            )
+    return jobs
+
+
 def jobs_d3(seeds: list[int], variants: list[str], rounds: int, mode: str) -> list[Job]:
-    """§D3: the reported matrix — variant x dp-mode x seed."""
+    """§D3: the reported matrix — variant x dp-mode x seed.
+
+    Deployment jobs get a distinct `d3dep_` tag prefix. Without it a deployment run and a
+    simulation run of the same cell share a checkpoint directory: the second would
+    overwrite the first, and the report would merge both into one table — precisely the
+    mode-mixing the project forbids (docs/FINDINGS.md section 3, rule 3).
+    """
+    prefix = "d3" if mode == "sim" else "d3dep"
     jobs: list[Job] = []
     for variant in variants:
         for dp_name, (server_dp, cut) in DP_MODES.items():
             for seed in seeds:
                 jobs.append(
                     Job(
-                        tag=f"d3_{variant}_{dp_name}_s{seed}",
+                        tag=f"{prefix}_{variant}_{dp_name}_s{seed}",
                         mode=mode,
                         rounds=rounds,
                         config={
@@ -278,7 +353,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--jobs", choices=["l5", "d3"], required=True)
+    parser.add_argument("--jobs", choices=["l5", "d3", "clip", "eps"], required=True)
     parser.add_argument("--seeds", type=int, nargs="+", default=[42, 43, 44])
     parser.add_argument(
         "--variants", nargs="+", default=["dedup_first"],
@@ -292,6 +367,15 @@ def main() -> None:
     parser.add_argument("--attempts", type=int, default=2, help="Retries per job (O2).")
     parser.add_argument("--resume", action="store_true", help="Skip jobs with a meta.json.")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--wandb-group", default="eps-sweep",
+                        help="wandb group id for the epsilon sweep (--jobs eps).")
+    # Defaults are 1.0 from the MEASURED calibration, not from the median. Raising S to
+    # the median cost -0.243 AUC: the embedding's magnitude saturates at its natural norm
+    # (~4.3) while the noise keeps scaling with S, so an oversized S is pure waste.
+    parser.add_argument("--max-norm-a", type=float, default=1.0,
+                        help="Silo A cut-layer clip S (default: 1.0, the calibration winner).")
+    parser.add_argument("--max-norm-b", type=float, default=1.0,
+                        help="Silo B cut-layer clip S (default: 1.0, the calibration winner).")
     parser.add_argument("--out", type=Path, default=Path("experiments/matrix_results.json"))
     args = parser.parse_args()
 
@@ -300,6 +384,11 @@ def main() -> None:
 
     if args.jobs == "l5":
         jobs = jobs_l5(args.seeds, args.variants[0], args.rounds)
+    elif args.jobs == "clip":
+        jobs = jobs_clip(args.seeds, args.variants[0], args.rounds, args.mode)
+    elif args.jobs == "eps":
+        jobs = jobs_eps(args.seeds, args.variants[0], args.rounds, args.mode,
+                        args.wandb_group, args.max_norm_a, args.max_norm_b)
     else:
         jobs = jobs_d3(args.seeds, args.variants, args.rounds, args.mode)
 

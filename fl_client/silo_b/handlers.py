@@ -27,6 +27,16 @@ SPEC = SiloSpec(
         "dropout-b": rc.run_config.get("dropout-b", 0.3),
         "hidden-dim-b": rc.run_config.get("hidden-dim-b", 128),
     },
+    # Per-silo DP sensitivity. The shared `cut-noise-max-norm` was a documented
+    # PLACEHOLDER of 1.0, while measured embedding row norms are ~5.6 (Silo A) and
+    # ~4.0 (Silo B) — so 100% of rows were clipped to a fifth of their length,
+    # destroying the relative-magnitude signal. The two silos have different bottom
+    # models and different norm distributions, so they get separate values.
+    cut_noise_config_fn=lambda rc: (
+        {"max_norm": float(rc.run_config["cut-noise-max-norm-b"])}
+        if "cut-noise-max-norm-b" in rc.run_config
+        else {}
+    ),
 )
 
 

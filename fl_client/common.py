@@ -27,6 +27,7 @@ Best-state checkpointing (added):
 
 import io
 import json
+import logging
 import time
 from pathlib import Path
 
@@ -385,11 +386,22 @@ def generate_embeddings(spec: SiloSpec, msg: Message, context: Context) -> Messa
     context.state["sent_embedding"] = ArrayRecord({"v": Array(emb.numpy())})
 
     sent_emb = emb
+    audit: dict[str, float] = {}
     if tracker is not None:
-        sent_emb = add_gaussian_noise(
-            clip_embedding_rows(emb, noise["max_norm"]),
-            noise_std=tracker.sigma * noise["max_norm"],
-        )
+        clipped = clip_embedding_rows(emb, noise["max_norm"])
+        noise_std = tracker.sigma * noise["max_norm"]
+        sent_emb = add_gaussian_noise(clipped, noise_std=noise_std)
+        # Mechanism audit (docs/privacy_presentation_plan.md V2/V3): the DP proof assumes
+        # per-row sensitivity <= max_norm and noise std == sigma * max_norm. Both are
+        # measured here on the tensor actually sent, so a run carries its own evidence
+        # rather than asserting the mechanism ran as specified.
+        audit = {
+            "max_norm": noise["max_norm"],
+            "noise_std_target": noise_std,
+            "noise_std_realized": float((sent_emb - clipped).std().item()),
+            "row_norm_max_pre_clip": float(emb.norm(p=2, dim=1).max().item()),
+            "row_norm_max_sent": float(clipped.norm(p=2, dim=1).max().item()),
+        }
         tracker.step()
         _save_tracker(context, tracker)
 
@@ -405,6 +417,7 @@ def generate_embeddings(spec: SiloSpec, msg: Message, context: Context) -> Messa
         }
         if tracker is not None:
             metrics[f"{spec.wandb_tag}/epsilon"] = tracker.get_epsilon()
+            metrics.update({f"{spec.wandb_tag}/{k}": v for k, v in audit.items()})
         _log(spec, context, metrics, step=rnd)
 
     arrays = {"embedding": Array(sent_emb.numpy())}
@@ -421,10 +434,18 @@ def generate_embeddings(spec: SiloSpec, msg: Message, context: Context) -> Messa
             "n-total": int(len(X)),
             "n-neg":n_neg,
             "n-pos":n_pos,
+            # Running count of rounds whose bottom-model update was skipped due to a
+            # replay mismatch. Reported so the SERVER can record it in meta.json —
+            # otherwise the skip is invisible (docs/action_plan.md section Q).
+            "replay-skips": int(context.state["replay_skips"]["v"])
+            if "replay_skips" in context.state else 0,
         }),
     })
     if tracker is not None:
-        content["privacy"] = ConfigRecord(tracker.to_dict())
+        # Accountant primitives + the mechanism audit, so meta.json can record what the
+        # cut layer actually did. from_dict() reads only the keys it knows, so the extra
+        # audit fields ride along harmlessly.
+        content["privacy"] = ConfigRecord({**tracker.to_dict(), **audit})
     return Message(content=content, reply_to=msg)
 
 def generate_eval_embeddings(spec: SiloSpec, msg: Message, context: Context) -> Message:
@@ -506,10 +527,27 @@ def apply_gradients(spec: SiloSpec, msg: Message, context: Context) -> Message:
     if (rec := context.state.get("sent_embedding")) is not None:
         sent = torch.from_numpy(rec["v"].numpy())
         if not torch.allclose(embedding.detach(), sent):
-            raise RuntimeError(
-                f"[{spec.wandb_tag}] Recomputed embedding != sent embedding — "
-                "RNG/data-order replay is broken."
+            # The two forwards genuinely disagree (measured ~1.7e-2, not float noise), so
+            # applying this gradient would target a different computation graph. Skipping
+            # is correct — but it MUST be counted, not silent: gradients are pushed
+            # fire-and-forget, so the server never learns the update was dropped and the
+            # run still writes a normal meta.json (docs/action_plan.md §Q).
+            #
+            # Root cause is SIMULATION-ONLY: Ray spawns new actors mid-run and the first
+            # round on a fresh actor rebuilds from a model state one step out of sync.
+            # Deployment (persistent SuperNode per silo) shows zero occurrences across
+            # ~614 rounds. Run headline results in deployment mode.
+            n_skips = int(context.state["replay_skips"]["v"]) + 1 \
+                if "replay_skips" in context.state else 1
+            context.state["replay_skips"] = ConfigRecord({"v": n_skips})
+            max_abs = float((embedding.detach() - sent).abs().max())
+            logging.getLogger(__name__).warning(
+                "[%s] replay mismatch (max_abs=%.3e) — SKIPPING this round's bottom-model "
+                "update. Total skips this run: %d. Simulation-only; use deployment for "
+                "reported results (docs/action_plan.md section Q).",
+                spec.wandb_tag, max_abs, n_skips,
             )
+            return Message(content=RecordDict(), reply_to=msg)
 
     noise = _cut_noise_config(spec, context)
     t0 = time.perf_counter()

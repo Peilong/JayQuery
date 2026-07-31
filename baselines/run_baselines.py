@@ -29,6 +29,8 @@ wandb run-passing methodology (IMPORTANT):
 
 import argparse
 import inspect
+import json
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -97,7 +99,51 @@ def parse_args() -> argparse.Namespace:
         default="all",
         choices=["all"] + list(AVAILABLE_MODELS.keys()),
     )
+    parser.add_argument(
+        "--processed-dir",
+        type=str,
+        default=None,
+        help="Override the config's data.processed_dir, e.g. data/processed/dedup_first.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Override the config's data.seed. Repeat runs across seeds to get a CI on "
+             "the federation-cost comparison (n=1 gives none).",
+    )
+    parser.add_argument(
+        "--out",
+        type=str,
+        default="experiments/baselines.json",
+        help="Where to write the collected metrics so make_report.py can publish them.",
+    )
     return parser.parse_args()
+
+
+def _flatten_metrics(result: object) -> dict[str, float]:
+    """Reduce a train_fn's return value to a flat {metric: number} dict.
+
+    train_fns return either a flat metrics dict or a dict-of-dicts keyed by split, so
+    normalise both into one shape for reporting.
+
+    Args:
+        result: Whatever train_fn returned.
+
+    Returns:
+        Flat mapping of metric name to numeric value; nested splits are prefixed.
+    """
+    flat: dict[str, float] = {}
+    if not isinstance(result, dict):
+        return flat
+    for key, value in result.items():
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            flat[key] = float(value)
+        elif isinstance(value, dict):
+            for sub, subval in value.items():
+                if isinstance(subval, int | float) and not isinstance(subval, bool):
+                    flat[f"{key}/{sub}"] = float(subval)
+    return flat
 
 
 def merge_silo_dataloaders(
@@ -142,15 +188,22 @@ def main() -> None:
         "grad_clip_norm": training.get("grad_clip_norm") or None,
         "dropout_rate": float(arch.get("dropout_top", 0.2)),
         "class_weighting": evaluation.get("class_weighting", "none"),
-        "seed": int(exp["data"]["seed"]),
+        "seed": int(args.seed if args.seed is not None else exp["data"]["seed"]),
     }
 
     to_run = AVAILABLE_MODELS if args.run == "all" else {args.run: AVAILABLE_MODELS[args.run]}
 
     # Data Prep ------------------------
+    # The config's processed_dir was previously PARSED BUT NEVER USED: load_silo_*() was
+    # called with no argument, so it silently fell back to the default "data/processed" —
+    # the LEGACY single-module pickles (1,843 train rows) rather than the reported cohort
+    # (20,411). Every baseline number was therefore computed on 11x less data than the VFL
+    # runs it is meant to be compared against. --processed-dir overrides the config.
+    processed_dir = args.processed_dir or exp["data"].get("processed_dir", "data/processed")
+    print(f"[Baselines] processed_dir = {processed_dir}")
     try:
-        a_train_loader, a_val_loader, a_test_loader = load_silo_a()
-        b_train_loader, b_val_loader, b_test_loader = load_silo_b()
+        a_train_loader, a_val_loader, a_test_loader = load_silo_a(processed_dir=processed_dir)
+        b_train_loader, b_val_loader, b_test_loader = load_silo_b(processed_dir=processed_dir)
     except Exception as e:
         print(f"Exception: {e}")
         return
@@ -189,11 +242,15 @@ def main() -> None:
     }
 
     # Model Run -----------------------------
+    # Results are collected AND written to disk. They previously went only to wandb, so
+    # the whole baseline comparison was invisible to scripts/make_report.py and never
+    # reached results/ (docs/action_plan.md section R).
+    collected: dict[str, dict] = {}
     for model_name, model_cfg in to_run.items():
         print(f"[Baselines] Running {model_name}...")
         data_key = model_cfg.get("data", "merged")
         X_tr, y_tr, X_v, y_v, X_te, y_te = data_map[data_key]
-        run_with_tracking(
+        result = run_with_tracking(
             train_fn=model_cfg["train_fn"],
             train_kwargs=dict(
                 X_train=X_tr,
@@ -212,6 +269,22 @@ def main() -> None:
             # Inject the active run into train_kwargs iff this train_fn takes it.
             on_run_created=make_run_injector(model_cfg["train_fn"]),
         )
+        collected[model_name] = {
+            "model": model_name,
+            "data": data_key,
+            "metrics": _flatten_metrics(result),
+        }
+
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps({
+        "experiment": experiment["name"],
+        "seed": cfg["seed"],
+        "processed_dir": str(processed_dir),
+        "config": cfg,
+        "results": collected,
+    }, indent=2))
+    print(f"\n[Baselines] {len(collected)} model(s) -> {out_path}")
 
 
 if __name__ == "__main__":

@@ -785,6 +785,296 @@ run_sim () {
 
 ---
 
+## ⚠️ Q. Replay-guard desync in SIMULATION only (found 2026-07-30)
+
+**Deployment mode is clean. Simulation intermittently skips bottom-model updates.**
+
+### What happens
+
+`apply_gradients` must reproduce the exact embedding `generate_embeddings` sent, or the
+injected upstream gradient lands on a different computation graph. A guard checks this. In
+simulation it **fails intermittently**; when it does, that silo **silently skips its weight
+update** for that round — gradients are pushed fire-and-forget, so the server never learns of
+it, `meta.json` is still written, and `run_matrix.py` scores the run as clean.
+
+### Measured — this is NOT a tolerance issue
+
+| | max abs difference |
+|---|---|
+| when the guard passes | **0.000e+00** (bit-identical) |
+| when it fails | **1.658e-02** (Silo A) / 4.841e-02 (Silo B) |
+
+~1000x too large for floating point. Loosening the tolerance would be **wrong** — the two
+computations genuinely disagree, and tolerating that means applying a gradient to a different
+graph than the one that produced the embedding.
+
+### Mechanism
+
+- **Deterministic magnitude**, identical across independent runs (always `1.658e-02`) — rules
+  out a race condition.
+- **Coincides with new Ray actor PIDs.** Passing rounds run on the original workers; the
+  failure appears on **freshly-spawned** workers, which then handle all later rounds. The
+  *first round handled by a new worker* is the one that fails.
+- **Batch is correct, weights are not.** Row counts match exactly (1012 sent / 1012 recomputed),
+  so the right students are loaded — but a ~0.017 embedding difference is about the size of
+  **one gradient update**, consistent with the new worker rebuilding from a model state one
+  step out of sync.
+
+### Deployment vs simulation — controlled comparison
+
+| mode | runs | rounds | failures |
+|---|---|---|---|
+| **deployment** | 4 | ~614 | **0** |
+| simulation | 5 | ~442 | 8, 8, 8, 4, 0 |
+
+The decisive pair is §L5: **identical config, identical seeds, identical code** — simulation 8
+failures/run, deployment 0 across three 200-round runs. Deployment gives each silo a persistent
+SuperNode process, so there is no actor pool and no mid-run worker spawning.
+
+### Impact on existing results
+
+~8 skips per 400 gradient applications (**~2%**), concentrated early. Models still train fully
+(val/auc 0.575 -> 0.913) and all 60 §D3 runs were internally consistent with 0 collapses.
+
+**But the arms were not equally affected** — cut-noise-OFF runs (`no_dp`, `server_only`) had
+skips; cut-noise-ON runs (`cut_only`, `all_dp`) had none. That biases slightly **against the
+no-DP ceiling**, i.e. it would make the measured DP cost an **under**estimate. Since
+`server_only` measured -0.0022 with a CI containing zero, this is the direction that matters
+for the headline claim.
+
+| # | Action | Status |
+|---|---|---|
+| Q1 | Deployment mode eliminates the issue | ✅ **verified** — 0 skips in ~614 rounds vs 8/run in the paired sim arm |
+| Q2 | Count + log skipped updates; surface in `meta.json` | ✅ **DONE** — hard failure replaced by a counted, logged skip; `replay_skips` + `replay_skips_total` in every `meta.json`. Verified live. Tolerance deliberately NOT loosened: the mismatch is ~1.7e-2 vs 0.0 when healthy, so tolerating it would apply a gradient to a different graph |
+| Q3 | Re-run §D3 | 📋 **DEFERRED (Alex, 2026-07-30) — re-run in SIMULATION, not deployment.** Skips are now reported, so a sim re-run declares its own bound; 60 deployment runs would cost ~34 h vs ~3 h. **See `docs/HANDOFF.md` §5 — do not forget this** |
+| Q4 | §L5 equivalence still holds | ✅ measured with this present in the sim arm; modes still agreed to 0.000255 |
+
+**Bias direction (why Q3 matters):** the arms were **not equally affected** — cut-noise-OFF
+runs (`no_dp`, `server_only`) skipped updates while cut-noise-ON runs did not. That handicaps
+the **no-DP ceiling**, so the true DP cost may be marginally **larger** than §D3 reports. With
+`server_only` at −0.0022 and a CI containing zero, this is the direction that could matter for
+the headline claim.
+
+---
+
+## ⚠️ R. Privacy-verification findings (2026-07-30)
+
+Found while building the audit pipeline (`scripts/verify_privacy.py`,
+`docs/privacy_presentation_plan.md`). Three are holes in the guarantee, one is tooling.
+
+### R1. The per-silo accountant nondeterministically UNDER-counts by one step
+
+Two runs, identical config, 6 rounds, simulation:
+
+| run | server ε (steps) | silo ε (steps) |
+|---|---|---|
+| `audit_smoke` | 0.9988 (6) | **0.9684 (5)** |
+| `audit_smoke3` | 0.9988 (6) | 0.9988 (6) |
+
+The silo trackers reported 5 steps for a 6-round run. **Under-reporting ε is the one
+direction a privacy claim cannot tolerate.** Simulation-only in signature (like §Q) but
+`replay_skips_total` was 0, so it is *not* the replay-skip mechanism. Root cause not yet
+found. **Mitigated, not fixed:** `verify_privacy.py` V5 now FAILs any run whose accountants
+did not charge the rounds actually run, so it can never pass silently again. Re-check
+whether it reproduces in deployment mode before the write-up.
+
+### R2. Validation/test embeddings are released with NO formal protection
+
+`fl_client/common.py:generate_eval_embeddings` clips but does **not** noise, and takes no
+accountant step. At `eval-every = 5`, T = 200 that is ~40 unnoised releases of 2,552
+validation students, plus the final test release. Not covered by the reported ε and not
+previously written down anywhere.
+
+Two defensible positions (pick one and state it): **(a) scope it** — "ε is a guarantee over
+the *training* set; val/test embeddings are released clipped but unnoised" — or **(b) close
+it** by noising eval too, which composes in *parallel* (val/test rows are disjoint from
+train) and so yields a **second, separate** ε over the eval population rather than raising
+the training ε. (a) is the call for this timeline; (b) is future work. Leaving it unstated
+is not an option.
+
+### R3. The attacks were not attacking the defense
+
+`attack/` and `scripts/run_attack.py` contained **zero** references to noise, clipping,
+sigma or max_norm. `run_inversion` attacked `model_a(row)` — the clean embedding — while
+the wire carries `add_gaussian_noise(clip_embedding_rows(emb, S), sigma*S)`. Any ASR-vs-ε
+curve built that way measures only how DP changed the *weights*, would read as near-flat,
+and would **understate the defense**.
+
+✅ **Fixed** in `scripts/run_attack.py` (no change to `attack/` — `run_inversion_attack`
+already takes the target embedding as an argument, so the wire reconstruction lives in
+`scripts/`). Defense parameters are read from the attacked run's own `meta.json`, never
+from config defaults. Added: Wilson CIs, n=200 default (n=20 gives SE 0.112), a measured
+always-guess-modal **floor**, ASR **lift** over that floor, and reconstruction RMSE.
+
+First wire-faithful numbers (toy 3/6-round checkpoints, ε≈1):
+
+| run | inversion ASR | floor | lift | label inference | floor |
+|---|---|---|---|---|---|
+| `audit_smoke2` | 0.100 | 0.150 | −0.050 | 0.998 | 0.554 |
+| `audit_smoke3` | 0.050 | 0.150 | −0.100 | 0.998 | 0.554 |
+
+Inversion against the noised wire does **worse than an uninformed attacker**; label
+inference — an undefended channel by construction — leaks almost perfectly. The anchors are
+what make this readable: without the floor, "ASR = 0.10" looks like 10% of students
+compromised.
+
+### R4. 176 existing checkpoints are unauditable
+
+`meta.json` recorded no mechanism primitives (no sigma, no S, no cut-noise target, no
+server `noise_multiplier`), so no existing run's ε can be recomputed from its artifact.
+✅ **Fixed** — `meta.json` now carries a `mechanism` block plus a measured audit
+(`row_norm_max_sent`, `noise_std_realized`) proving the mechanism ran as specified. Runs
+predating it are reported as SKIP by the audit. **This is the argument for `--fresh`.**
+
+### R6. ⚠️ Baselines were computed on the WRONG dataset — and now question the architecture
+
+**The bug.** `baselines/run_baselines.py:main` parsed `data.processed_dir` from the YAML and
+then called `load_silo_a()` / `load_silo_b()` **with no argument**, so both fell back to the
+default `data/processed` — the legacy single-module pickles (1,843 train rows vs 20,411).
+Every baseline number was computed on 11× less data than the VFL runs it exists to be
+compared against. The config key that would have fixed it was silently ignored.
+
+✅ **Fixed** — `processed_dir` is honoured, `--processed-dir` overrides it, the YAML default
+is now `data/processed/dedup_first`, and results are written to `experiments/baselines.json`
+(they previously went to wandb only, so `make_report.py` could never publish them).
+
+**What the corrected baselines show** (`dedup_first`, single seed):
+
+| model | data | AUC |
+|---|---|---|
+| xgboost | merged | **0.9382** |
+| isolated_silo_b | silo B only | **0.9219** |
+| mlp | merged | 0.9158 |
+| logistic_regression | merged | 0.8704 |
+| isolated_silo_a | silo A only | 0.6210 |
+| *(VFL no_dp, T=200)* | *federated* | *0.9023* |
+
+### ✅ FRAMING DECISION (Alex, 2026-07-30)
+
+**This is a feasibility paper, not an accuracy-gain paper.** The claim is *"an architecture
+of this shape is implementable in practice, and you lose little utility by doing so"* — not
+*"VFL improves prediction on OULAD"*. Under that framing, silo B outperforming the federated
+model is a **property of this dataset**, stated plainly, not a threat to the contribution.
+OULAD is a FERPA proxy; a deployment with a genuine vertical split would have different
+per-silo value.
+
+**What the decision changes:** the *cost of federation* stops being incidental and becomes
+the **headline utility claim**. It therefore has to be measured properly — see R6a/R6b,
+which are promoted rather than dropped.
+
+**Two consequences to handle:**
+
+1. **Silo B alone (0.9219) beats the federated model (0.9023).** If one institution can do
+   better on its own data than by federating, the architecture's premise is undercut.
+   Silo A contributes 0.6210 alone and appears to *subtract* value: merged MLP (0.9158) is
+   also below silo B alone.
+2. **Cost of federation vs the architecture-matched centralized control:** 0.9158 − 0.9023
+   = **0.0135**, which is a legitimate and reportable number.
+
+**Before concluding anything, note the confound:** the VFL runs are horizon-truncated (4/5
+`no_dp` runs still improving at T=200) and use Poisson batches at q=0.05, while the
+baselines train to convergence. **This is not a like-for-like training budget**, so the
+comparison is suggestive, not conclusive.
+
+| # | Action |
+|---|---|
+| R6a | Re-run baselines at multiple seeds — currently n=1, so no CI |
+| R6b | Establish a like-for-like budget before quoting the federation cost |
+| R6c | Investigate why Silo A's 18 features do not help the merged model — feature quality, scaling, or a genuine finding about demographic vs behavioural predictors |
+| R6d | Decide the paper's framing if silo B alone wins: this may become a *finding* ("behavioural data dominates; demographics add little") rather than a problem |
+
+Auto-detected by `scripts/make_report.py:known_issues` on every report build.
+
+### R7. Attack evaluation rebuilt (2026-07-30)
+
+Four changes, prompted by Alex's review of what the three attacks actually measured.
+
+**1. Inversion reported 1/18 of what it recovers.** `run_inversion_attack` optimizes a full
+feature row and then read out only column 0 (`imd_band`), discarding the rest. The full
+`reconstruction` is now returned and scored, giving per-attribute recovery for
+**gender, disability, age band, highest education, IMD band and region** — the attributes
+that actually matter for a FERPA proxy. Every rate is paired with its always-guess-majority
+floor; an accuracy without its floor is unreadable (disability scores 0.425 against a
+**0.900** floor, i.e. far worse than guessing).
+
+**2. Silo B was structurally un-attackable.** `run_inversion_attack` read
+`model.encoder[0].in_features`, hard-coding Silo A's attribute name, so it raised
+`AttributeError` on `BottomModelB` (whose stack is `layer1`). Now walks the module tree for
+the first `Linear`. Silo B's 26 behavioural VLE features are attacked for the first time.
+
+**3. The attacker was artificially single-shot.** A real MITM watches every round; at
+`batch-sample-rate` q over T rounds a student is transmitted ~q·T times (≈10 at q=0.05,
+T=200), and averaging k noisy views shrinks the noise by √k. `wire_embedding` now takes
+`n_observations`, exposed as `--observations`. **This is the honest version of the attack**:
+composition over steps is exactly why ε grows with T, so the accounting already assumes this
+adversary while the attack ignored it. Documented as an upper bound — it treats the
+embedding as stationary, which holds late in training and is optimistic for the attacker
+early on.
+
+**4. Gradient monitor removed from attack results; label inference reframed.**
+The monitor is a defense-side anomaly detector that measures no leakage — listing it beside
+two real attacks implied otherwise. It remains available as `run_gradient_monitoring()` for
+a "defenses considered" note. Label inference is kept but explicitly marked **not a defense
+evaluation**: the returned activation gradient is noised by neither mechanism (server DP-SGD
+perturbs *parameter* gradients), so its ~0.998 accuracy against a 0.554 floor quantifies a
+known scope limit rather than testing a defense.
+
+**Also fixed:** unconstrained L-BFGS diverges on noised targets, producing nRMSE ~1e16. The
+reconstruction is now clamped to the public feature ranges — which makes the attacker
+*stronger*, since a real adversary knows gender is binary — and near-constant features are
+excluded from the error average instead of dividing by ~0.
+
+### R8. `stopped_early` conflated FOUR unrelated causes (2026-07-31)
+
+**The bug.** `stopped_early` in `meta.json` is set by four different code paths — silo
+budget exhausted, server budget exceeded, combined-epsilon cap, **and ordinary validation
+early stopping** — and every downstream report read it as "ran out of privacy budget".
+
+**How it was caught.** The clip-calibration arms `Smed`/`Sp75` were flagged as 3/3
+budget-truncated. They stopped at rounds 10–35 with composed epsilon **1.046–1.165 against
+a 3.0 cap** — nowhere near any budget. They stopped because validation AUC stopped
+improving, which is ordinary convergence behaviour, not a privacy effect. The published
+caveat on those arms was therefore wrong.
+
+✅ **Fixed** — `meta.json` now records `stop_reason` (`silo_budget` / `server_budget` /
+`combined_cap` / `val_early_stop` / `null`). `results_lib.Group` exposes
+`n_budget_stopped`, `n_val_stopped` and `n_stop_unknown` separately, and runs predating the
+field are reported as **unknown** rather than silently assumed to be budget stops.
+
+**Consequence for §2g:** the clip-calibration result (S=1.0 beats S=median by 0.243 AUC)
+still holds directionally — but the mechanism is *"large S makes the model stop learning
+early"*, not *"large S exhausts the privacy budget"*. Restate it that way.
+
+### R9. Other pre-fresh-run fixes (2026-07-31)
+
+| fix | why |
+|---|---|
+| `combined-target-epsilon` 3.0 → **10.0** | At 3.0 it bound during the epsilon sweep: eps=4 hit composed 2.981 and all 5 seeds stopped at round ~50, so that point measured under-training, not noise. It is a guardrail, not a scientific parameter; the composed epsilon actually spent is still recorded and reported |
+| `results/tables/` wiped before each build | Table names carry a positional prefix, so adding an experiment renumbers them (`t3_x` → `t4_x`) and the old file survived beside the new one — two tables, same content, one stale |
+| **Cost of federation generated, not hand-typed** | The feasibility framing's headline claim was computed in a throwaway one-liner outside the repo. `analyze.py:_compare_federation_cost` now emits it into `claims.csv` with a Welch CI, carrying the budget-mismatch caveat on every row |
+| `reproduce_all.sh --attack-obs` (default 10) | The attack stage was running the artificially weak single-shot attacker; 10 ≈ `batch-sample-rate x rounds` (§R7) |
+
+**Generated federation cost** (centralized minus VFL; positive = what federating costs):
+
+| baseline | ΔAUC | 95% CI |
+|---|---|---|
+| xgboost | +0.0359 | [+0.0333, +0.0385] |
+| isolated_silo_b | +0.0207 | [+0.0179, +0.0236] |
+| **mlp (architecture-matched)** | **+0.0128** | **[+0.0102, +0.0154]** |
+| logistic_regression | −0.0319 | [−0.0345, −0.0293] |
+| isolated_silo_a | −0.2821 | [−0.2847, −0.2795] |
+
+All are **upper bounds** until §R6b matches the training budgets.
+
+### R5. Two of the five headline `all_dp` runs stopped early
+
+Surfaced by the generated report's `early` column: `dedup_first / all_dp` shows **2/5** runs
+stopped by the budget gate, i.e. truncated at ~round 50 rather than 200. The §2h ε-sweep
+truncation confound is therefore **also present inside the headline §D3 matrix** and is not
+currently stated in `FINDINGS.md` §2e. Check before quoting the all_dp figure.
+
+---
+
 ## 📋 TRACKED — K. Round-count revisit ⏳ REVIEW AT END
 
 **Owner: Alex. Deferred by decision (2026-07-27): revisit once the §D3 matrix is configured,
@@ -902,42 +1192,67 @@ hard-coded layer indices are stale — a contained fix, not an integration unkno
 
 ---
 
-## 📋 TRACKED — M. Full-check run: every setting, end to end ⏳ RUN LAST
+## ⛔ DISSOLVED — M. Full-check sweep (superseded, 2026-07-28)
 
-**Owner: Alex. Added 2026-07-28 by decision — run this AFTER all other changes land**, as the
-final verification that the accumulated refactors work together rather than only in isolation.
+**Decision (Alex): dissolve §M and defer its remaining value to a future full parameter sweep
+tracked in wandb.**
 
-**Why it exists.** This session changed the data pipeline (§E/§F), the metric definitions (§C),
-the scaling (§H), the client RNG design (§L2), the run modes (§L), and the horizon (§K). Each
-was verified on its own, and several bugs were only visible in combination — §H1 hid behind
-§C's threshold artifact; §L2 hid behind fire-and-forget gradients. A single sweep over the full
-setting space is the check that nothing else is hiding in a combination we never exercised.
+**Why it is no longer needed as specified.** §M was written to verify that the accumulated
+refactors work *in combination*, not just in isolation. **§D3 already did that**: 60 runs over
+the complete `variant × DP-mode × seed` cross-product, **0 failures, 0 `pred_collapsed`**, MCC
+0.436–0.706, dimensions stable, ε within budget on every run. That is the combined-correctness
+sweep §M existed to perform.
 
-**Scope — the cross-product, not a sample:**
+**What §D3 did NOT cover, and where it now lives:**
 
-| Axis | Values |
+| Original | Status |
 |---|---|
-| Dedup variant | `dedup_first`, `dedup_best`, `dedup_worst` |
-| DP mode | `no_dp`, `cut_only`, `server_only`, `all_dp` |
-| Run mode | simulation **and** deployment (at least one config in both) |
-| Threshold objective | whatever §C1 settles on |
-| Horizon | T=200 (§K3) |
+| M1 every run writes `meta.json` | ✅ done — §D3, 60/60 |
+| M2 no `pred_collapsed`; `one_class_at_threshold` explainable | ✅ done — §D3, 0 collapses |
+| M3 dimensions + ε within budget | ✅ done — §D3 |
+| M4 no silent truncation | ✅ measured — 12/20 flagged at T=200, quantified as ~+0.010–0.014 AUC forgone (§K5); applies to all arms equally so between-arm comparisons are unaffected |
+| M5 diff the three dedup variants | ✅ done — §D3 sensitivity analysis passes (DP effect moves <0.001 across rules) |
+| M6 reproducibility record | ✅ done — `docs/FINDINGS.md` §2e |
+| **deployment-mode spot check** | 📋 → deferred to the wandb parameter sweep |
+| **broader parameter cross-product** (ε grid, clip norms, model size, horizon) | 📋 → **this is the real remaining work**, see below |
 
-| # | Action |
-|---|---|
-| M1 | Run the full cross-product; assert **every** run writes a `meta.json` (per §O2 — a missing one is a silent hole, not a pass) |
-| M2 | Assert no run trips `pred_collapsed`, and that `one_class_at_threshold` is explainable where it fires |
-| M3 | Assert dimensions hold everywhere (`input-dim-a` 18 / `input-dim-b` 26) and ε never exceeds `combined-target-epsilon` |
-| M4 | Assert no run is silently truncated at the horizon (§K5) |
-| M5 | Diff the three dedup variants: `first` primary, `best`/`worst` as bounds — confirm conclusions hold across all three |
-| M6 | Record the full table in this document as the reproducibility record for the write-up |
+### ✅ DONE — clip calibration + ε sweep (2026-07-30)
 
-**Not a substitute for §D3.** §D3 produces the *reported* multi-seed results; §M is a
-correctness sweep over the setting space. They can share runs but answer different questions.
+**Clip calibration** (`experiments/clip_calibration.json`, 9 runs): **S=1.0 wins** —
+0.8453 vs 0.6022 (median) vs 0.5995 (p75). Moving to the median costs **−0.243 AUC** and
+inflates variance ~16×. The percentile heuristic is gradient-clipping intuition that does not
+transfer to input-side noise: the embedding magnitude saturates at its natural row norm (~4.3)
+while noise scales linearly with S, so SNR = min(S, norm)/(σ·S). `measure_embedding_norms.py`
+guidance corrected; `run_matrix.py` defaults set to 1.0. Full write-up: `FINDINGS.md` §2g.
+
+**ε sweep** (`experiments/eps_sweep.json`, 35 runs, wandb group `eps-sweep`, synced): the
+privacy–utility curve. Usable knee at **ε≈1**. Two truncation confounds documented in
+`FINDINGS.md` §2h — **ε=4 is invalid** (capped by `combined-target-epsilon = 3.0`, stopped at
+round ~50) and low-ε points are budget-exhausted. `recall@precision-70` collapses far faster
+than AUC (0.887 → 0.465 at ε=0.5 → 0.047 at ε=0.1).
+
+**→ Outstanding: re-run ε > 2 with `combined-target-epsilon` raised.** The curve above ε=2 is
+currently unusable.
+
+### 📋 DEFERRED — remaining parameter sweep, tracked in wandb
+
+Not a correctness sweep — a **parameter study**. §D3 fixed ε=1.0 per mechanism, T=200, and the
+current clip norms; none of those were swept. Candidate axes:
+
+- ~~`cut-noise-target-epsilon` grid~~ ✅ **DONE** — see above. **Still open:** the
+  `server-dp-epsilon` grid (this sweep covered the cut layer only), and ε > 2 with a raised
+  `combined-target-epsilon`
+- ~~`cut-noise-max-norm`~~ ✅ **DONE** — calibrated 2026-07-30; S=1.0 confirmed optimal
+- `hidden-dim-top` — the √d argument says model size is a strong DP lever
+- horizon, now that §K has mapped its shape
+- deployment-mode spot check folded in as one arm
+
+Run through `scripts/run_matrix.py` (add a job list) with `track-wandb=true`, so the sweep is
+browsable rather than living in JSON files.
 
 ---
 
-## 📋 TRACKED — G. PSI verification against the generated variants
+## ✅ DONE — G. PSI verification against the generated variants (2026-07-28)
 
 **Owner: Alex** (2026-07-27 — Wyatt is focused on the attack work, so all remaining
 refinements move to Alex's list; this is a deliberate departure from the CLAUDE.md
@@ -949,12 +1264,49 @@ regeneration stays a single command. The PSI protocol is therefore **no longer o
 critical path** — but the architecture still claims PSI is what aligns the silos, so that claim
 needs to be demonstrated at least once.
 
-| # | Action |
-|---|---|
-| G1 | Run the PSI protocol (`scripts/extract_ids_for_psi.py` → `psi.psi_server` / `psi.psi_client`) against **one** variant's student set |
-| G2 | Assert the protocol's `ordered_id_list.json` matches the directly-computed one **exactly** (same IDs, same order) |
-| G3 | Record the result in the paper as the evidence that PSI alignment is real, not assumed |
-| G4 | Consider a CI check pinning G2 for a small fixture cohort, so the two paths cannot silently diverge |
+| # | Action | Status |
+|---|---|---|
+| G1 | Run the real ECDH protocol against a variant's student set | ✅ **all three variants** via `scripts/verify_psi.py --all` |
+| G2 | Assert the protocol reproduces the directly-computed intersection | ✅ **set-identical on all three**; ordering differs by convention — see below |
+| G3 | Record as evidence PSI alignment is real, not assumed | ✅ this section + `docs/FINDINGS.md` |
+| G4 | CI check pinning G2 | 📋 still open — would need a small fixture cohort |
+
+### Result
+
+| variant | Silo A ids | Silo B ids | pipeline ∩ | PSI ∩ | same set | time |
+|---|---|---|---|---|---|---|
+| dedup_first | 26,365 | 25,515 | 25,515 | 25,515 | ✅ | 4.6 s |
+| dedup_best | 26,365 | 25,520 | 25,520 | 25,520 | ✅ | 4.5 s |
+| dedup_worst | 26,365 | 25,512 | 25,512 | 25,512 | ✅ | 4.5 s |
+
+**The architecture's alignment claim is verified against the data actually used.**
+
+### ⚠️ Ordering convention differs (known, documented, NOT a bug)
+
+`prepare_silos.py` sorts the intersection **numerically** (ints); `psi_client.run_psi` sorts
+**lexicographically** (strings). Same students, different row order.
+
+Both are internally consistent — **both** silos read the same file — but the two lists are
+**NOT interchangeable**: the row order determines which students land in train/val/test, so
+substituting one for the other silently changes the dataset. **The pipeline's numeric ordering
+is canonical**; if PSI output is ever adopted directly, regenerate both silos from it.
+
+Aligning them was considered and rejected: it would change every variant's split and invalidate
+all 60 §D3 runs, for a cosmetic convention. The verification therefore asserts **set equality**
+— which is what PSI must actually prove (the correct intersection is computable without either
+party revealing its ID list) — and reports ordering as a documented difference.
+
+### ⚠️ `run_psi` writes to a hard-coded global path — third encounter
+
+`psi_client.run_psi()` returns the intersection **and** writes it to a module-level
+`OUTPUT_PATH` pointing at the real `data/processed/ordered_id_list.json`. This has now
+destroyed that file twice (once via `pytest` — §I; once via the first run of `verify_psi.py`).
+Both times the fix was to redirect `OUTPUT_PATH` at the call site.
+
+**A durable fix would be an `output_path` parameter on `run_psi`** so the write is opt-in rather
+than an invisible side effect of a function that already returns its result. Two workarounds for
+the same hazard is a signal the API is wrong, not the callers. `psi/` is Wyatt's module —
+flagging rather than changing.
 
 **Not blocking** the run matrix — it validates a claim rather than producing data. Schedule it
 before the write-up, not before §D3.
@@ -1051,8 +1403,13 @@ and report the negative result as-is? (Note §F is worth doing either way.)
 | 5 | ✅ **§K1–K3 DONE** — horizon settled at **T=200** (shared) | See K2 probe + K3 decision |
 | 6 | **§D3** run matrix (3 variants × 4 DP modes × seeds) | Needs 1–5 in place |
 | 7 | **§B2** freeze defense config → hand to Wyatt for attacks | Breaks the tuning feedback loop |
-| 8 | **§M** full-check run over the whole setting cross-product | Final combined-correctness sweep |
-| 9 | **§P1–P3** attack handoff (freeze config, fix attack loader, hand over) | ⏳ **TRUE LAST** — attacks sit on top; nothing else depends on these |
+| 8 | ~~**§M** full-check sweep~~ | ⛔ **DISSOLVED** — subsumed by §D3; parameter-sweep remnant deferred to a wandb-tracked study |
+| 9 | **§P1–P3** attack handoff (freeze config, fix attack loader, hand over) | ⏳ **TRUE LAST** — attacks sit on top; nothing else depends on these. P1 ✅ done |
+
+**⚠️ Also outstanding — see `docs/HANDOFF.md`:**
+- **§Q3 §D3 re-run in simulation** (deferred 2026-07-30) — the current §D3 numbers predate the
+  replay-skip fix and are biased slightly against the no-DP ceiling.
+- **Attack ASR at n≈200** — n=20 gives SE 0.112, which cannot resolve DP differences.
 | — | **§G** PSI verification | Not blocking; validates a claim. Do before write-up |
 
 **⏳ END-OF-PROCESS REVIEW LIST** — check these before the write-up, not before the next step:

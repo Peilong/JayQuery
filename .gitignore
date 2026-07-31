@@ -73,3 +73,5 @@ logs/
 
 # ── Other ────────────────────────────────────────────────────────
 *.fab
+# Generated results bundle — rebuilt by scripts/reproduce_all.sh, never committed.
+results/

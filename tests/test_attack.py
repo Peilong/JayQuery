@@ -55,13 +55,18 @@ def test_inversion_returns_expected_schema() -> None:
 
     result = run_inversion_attack(model, real_emb, true_band, num_iters=50)
 
-    assert set(result) == {"success", "predicted_imd_band", "true_imd_band", "final_loss", "iters"}
+    assert set(result) == {
+        "success", "predicted_imd_band", "true_imd_band", "final_loss", "iters",
+        "reconstruction",
+    }
     assert isinstance(result["success"], bool)
     assert isinstance(result["predicted_imd_band"], int)
     assert 0 <= result["predicted_imd_band"] <= 9
     assert result["true_imd_band"] == true_band
     assert isinstance(result["final_loss"], float)
     assert result["iters"] == 50
+    # The full recovered row, not just the one column that used to be read out.
+    assert result["reconstruction"].shape == (SILO_A_INPUT_DIM,)
 
 
 def test_inversion_infers_input_dim_from_model() -> None:

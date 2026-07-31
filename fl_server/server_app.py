@@ -141,7 +141,23 @@ def main(grid: Grid, context: Context) -> None:
     combined_target = float(context.run_config.get("combined-target-epsilon", 3.0))
     server_tracker: PrivacyBudgetTracker | None = None
     client_trackers: dict[int, PrivacyBudgetTracker] = {}
+    # Raw per-silo privacy records (accountant primitives + the cut-layer mechanism audit
+    # from fl_client/common.py). Kept alongside the trackers because from_dict() drops the
+    # audit fields, and meta.json needs them to be auditable after the fact.
+    client_privacy_raw: dict[int, dict] = {}
+    server_sigma: float | None = None
     stopped_early = False
+    # WHY a run ended, not just that it ended early. Four unrelated causes set
+    # stopped_early, and conflating them misreports results: "ran out of privacy budget"
+    # (a privacy artifact that makes a point under-trained) and "stopped improving"
+    # (ordinary convergence) mean opposite things. One of:
+    #   None | "silo_budget" | "server_budget" | "combined_cap" | "val_early_stop"
+    stop_reason: str | None = None
+
+    # Per-silo count of bottom-model updates skipped due to a replay mismatch. Simulation
+    # only; deployment shows zero (docs/action_plan.md section Q). Recorded in meta.json so
+    # a run can never hide a silently-dropped update.
+    replay_skips: dict[int, int] = {}
 
     eval_every = int(context.run_config.get("eval-every", 5))
     patience = int(context.run_config.get("early-stop-patience", 8))
@@ -180,13 +196,31 @@ def main(grid: Grid, context: Context) -> None:
             batch_seed=seed * 100_000 + round_num, sample_rate=sample_rate,
         )
         for pos, prims in rd.client_privacy.items():
-            client_trackers[pos] = PrivacyBudgetTracker.from_dict(prims)
+            tracker = PrivacyBudgetTracker.from_dict(prims)
+            # SERVER-AUTHORITATIVE STEP COUNT. A silo that transmitted this round spent
+            # exactly one step, so after round R its accountant must stand at R. The
+            # client's own count can come back one short: under Ray a respawned actor
+            # restores context.state (including the accountant) from a snapshot one round
+            # stale, losing a step. That made the REPORTED epsilon lower than the epsilon
+            # actually spent — small (~0.0005 on a 1.0 budget) but in the one direction a
+            # privacy claim can never be wrong in. Observed on 46 simulation runs and 0
+            # deployment runs (docs/action_plan.md §R1/§Q).
+            #
+            # A silo that reported budget-exhausted did NOT step this round, so it keeps
+            # its own count.
+            if pos not in rd.exhausted:
+                reported = tracker.steps
+                tracker.steps = round_num
+                prims = {**dict(prims), "steps": round_num, "steps_client_reported": reported}
+            client_trackers[pos] = tracker
+            client_privacy_raw[pos] = dict(prims)
+        replay_skips.update(rd.replay_skips)
 
         if rd.exhausted:
             log(WARNING, "Silo(s) %s out of privacy budget — stopping run at round %d",
                 rd.exhausted, round_num)
             _send_stop(grid, node_ids, eps_tag)
-            stopped_early = True
+            stopped_early, stop_reason = True, "silo_budget"
             break
 
         emb_a, emb_b, labels, node_pos_map = rd.emb_a, rd.emb_b, rd.labels, rd.node_pos_map
@@ -215,6 +249,7 @@ def main(grid: Grid, context: Context) -> None:
                 expected_batch_size=expected_batch,
             )
             wrapped = True
+            server_sigma = sigma
             log(INFO, "DP wrap OK: expected_batch=%d, sigma=%.4f, horizon=%d steps",
                 expected_batch, sigma, num_rounds)
             server_tracker = PrivacyBudgetTracker(
@@ -228,7 +263,7 @@ def main(grid: Grid, context: Context) -> None:
             log(WARNING, "Server budget would be exceeded — stopping run before round %d step",
                 round_num)
             _send_stop(grid, node_ids, eps_tag)
-            stopped_early = True
+            stopped_early, stop_reason = True, "server_budget"
             break
 
         current_lr = max(lr_min, base_lr * _warmup_factor(round_num, warmup_rounds, warmup_start)
@@ -352,7 +387,7 @@ def main(grid: Grid, context: Context) -> None:
             log(INFO,
                 "Early stop: no val/auc gain for %d evals (best %.4f @ round %d, now round %d)",
                 patience, best_val_auc, best_round, round_num)
-            stopped_early = True
+            stopped_early, stop_reason = True, "val_early_stop"
             break
 
         next_combined = _next_round_combined(server_tracker, client_trackers, dp["delta"])
@@ -361,7 +396,7 @@ def main(grid: Grid, context: Context) -> None:
                 "Next round would push combined epsilon to %.4f > %.4f — stopping after round %d",
                 next_combined, combined_target, round_num)
             _send_stop(grid, node_ids, eps_tag)
-            stopped_early = True
+            stopped_early, stop_reason = True, "combined_cap"
             break
 
     ckpt_dir = Path("experiments/checkpoints") / eps_tag
@@ -427,11 +462,21 @@ def main(grid: Grid, context: Context) -> None:
         "batch_sample_rate": sample_rate,
         "combined_target_epsilon": combined_target,
         "stopped_early": stopped_early,
+        # Which of the four causes ended the run — see the stop_reason declaration.
+        "stop_reason": stop_reason,
         "best_val_auc": None if best_val_auc == float("-inf") else best_val_auc,
         "best_round": best_round,
         "tuned_threshold": tuned_threshold,
         "threshold_objective": thr_objective,
+        "replay_skips": {_pos_name(k): v for k, v in sorted(replay_skips.items())},
+        "replay_skips_total": int(sum(replay_skips.values())),
         "epsilon_spent": _epsilon_metrics(server_tracker, client_trackers, dp["delta"]),
+        # Everything needed to recompute epsilon from primitives, plus the measured
+        # evidence that the mechanism ran as specified. Without this block a checkpoint
+        # cannot be audited after the fact (docs/privacy_presentation_plan.md section 2.4).
+        "mechanism": _mechanism_record(
+            context, dp, sample_rate, server_sigma, client_privacy_raw
+        ),
         "metrics": test_metrics,
         "metrics_at_0.5": test_metrics_at_half,
     }
@@ -481,6 +526,60 @@ def _warmup_factor(round_num: int, warmup_rounds: int, start_factor: float) -> f
 
 def _pos_name(pos: int) -> str:
     return "silo_a" if pos == _SILO_A_POS else "silo_b"
+
+
+def _mechanism_record(
+    context: Context,
+    dp: dict,
+    sample_rate: float,
+    server_sigma: float | None,
+    client_privacy_raw: dict[int, dict],
+) -> dict:
+    """Every DP primitive this run used, plus the client-side mechanism audit.
+
+    A reported epsilon is only reproducible if the artifact carries the values it was
+    computed from. This records the server DP-SGD parameters, the per-silo cut-layer
+    parameters (target epsilon, clip S, solved sigma, steps charged), and the measured
+    row-norm / noise-std audit each silo reported for its final round.
+
+    Note the coverage boundary: these primitives describe the TRAINING releases only.
+    Validation and test embeddings are clipped but not noised and take no accountant
+    step, so they are outside the reported guarantee — recorded here explicitly so the
+    limitation travels with the artifact.
+
+    Args:
+        context: The ServerApp context (read for run-config values).
+        dp: The server DP-SGD config from _server_dp_config.
+        sample_rate: Poisson sampling rate q shared by every accountant.
+        server_sigma: Noise multiplier solved for the top model, or None if server DP is off.
+        client_privacy_raw: Per-position privacy records as reported by the silos.
+
+    Returns:
+        A JSON-serializable dict of mechanism primitives and audit values.
+    """
+    rc = context.run_config
+    cut_enabled = bool(rc.get("cut-noise-enabled", False))
+    return {
+        "sample_rate": sample_rate,
+        "server_dp": {
+            "enabled": dp["enabled"],
+            "target_epsilon": dp["epsilon"] if dp["enabled"] else None,
+            "delta": dp["delta"],
+            "max_grad_norm": dp["max_grad_norm"],
+            "noise_multiplier": server_sigma,
+        },
+        "cut_noise": {
+            "enabled": cut_enabled,
+            "target_epsilon": float(rc.get("cut-noise-target-epsilon", 1.0))
+            if cut_enabled else None,
+            "delta": float(rc.get("cut-noise-delta", 1e-5)),
+            "max_norm_a": float(rc.get("cut-noise-max-norm-a", 1.0)),
+            "max_norm_b": float(rc.get("cut-noise-max-norm-b", 1.0)),
+        },
+        "per_silo": {_pos_name(pos): prims for pos, prims in sorted(client_privacy_raw.items())},
+        "eval_releases_noised": False,  # clipped only — see the docstring's coverage note
+        "eval_every": int(rc.get("eval-every", 5)),
+    }
 
 
 def _epsilon_metrics(
@@ -549,6 +648,7 @@ class _RoundData:
     n_pos: int = 0
     client_privacy: dict[int, dict] = field(default_factory=dict)
     exhausted: list[int] = field(default_factory=list)
+    replay_skips: dict[int, int] = field(default_factory=dict)
 
 
 def _get_embeddings(
@@ -598,6 +698,8 @@ def _get_embeddings(
             continue
         if "n-total" in cfg:
             rd.n_total = int(cfg["n-total"])
+        if "replay-skips" in cfg:
+            rd.replay_skips[pos] = int(cfg["replay-skips"])
         if pos == _SILO_A_POS and "n-pos" in cfg:
             rd.n_pos, rd.n_neg = int(cfg["n-pos"]), int(cfg["n-neg"])
         emb = torch.from_numpy(reply.content["arrays"]["embedding"].numpy())
