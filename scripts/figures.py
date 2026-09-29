@@ -14,8 +14,10 @@ Figures follow the plan in docs/privacy_presentation_plan.md section 5:
 
   fig1  privacy-utility curve   AUC and recall@p70 vs epsilon, truncation confounds marked
   fig2  epsilon isocline        utility spread at IDENTICAL epsilon (the strongest result)
-  fig3  attack vs epsilon       ASR with its floor, so the y-axis is interpretable
+  fig3  attack by defense       ASR per DP mode with its floor, so the y-axis is readable
   fig4  variance vs epsilon     seed sd explodes as the budget tightens
+  fig5  attack vs epsilon       inversion ASR across the budget grid — the privacy companion
+                                to fig1; measured to be a STEP, not a curve
 
 Truncated and budget-exhausted points are drawn HOLLOW rather than dropped: hiding them
 would overstate the curve, and dropping them would hide that the low-epsilon end is partly
@@ -44,6 +46,8 @@ from results_lib import (  # noqa: E402
     FAMILIES,
     RESULTS,
     Family,
+    attack_values,
+    group_attack_rows,
     load_attack_rows,
     load_family,
     sortable,
@@ -115,8 +119,7 @@ def _eps_series(metric: str) -> tuple[list[float], list[float], list[float], lis
         ys.append(statistics.mean(vals))
         es.append(statistics.stdev(vals) if len(vals) > 1 else 0.0)
         # A point is compromised when its runs did not train the full horizon: either the
-        # budget gate stopped them (low epsilon, and epsilon=4 via the combined cap) or
-        # they were still improving at the end.
+        # budget gate or validation early stopping ended them before the last round.
         bad.append(groups[key].n_early > 0)
     return xs, ys, es, bad
 
@@ -158,7 +161,7 @@ def fig_privacy_utility(path: Path) -> bool:
         xs, ys, es, bad = _eps_series(metric)
         ax.errorbar(xs, ys, yerr=es, color=colour, linewidth=1.6, zorder=3,
                     capsize=3, elinewidth=1.0, label=label)
-        # Solid = ran the full horizon; hollow = budget-exhausted, so under-trained.
+        # Solid = ran the full horizon; hollow = at least one seed stopped early.
         for x, y, is_bad in zip(xs, ys, bad, strict=True):
             ax.plot(x, y, marker=marker, markersize=6.5, zorder=4, color=colour,
                     markerfacecolor="white" if is_bad else colour,
@@ -176,8 +179,8 @@ def fig_privacy_utility(path: Path) -> bool:
            "epsilon (cut-layer, per silo)", "test-set value")
     ax.legend(fontsize=8, frameon=False, loc="lower right")
     fig.text(0.01, 0.015,
-             "Hollow markers: runs stopped early by the privacy budget gate — under-trained, "
-             "not only over-noised.\nDotted lines: the no-noise ceiling. "
+             "Hollow markers: at least one seed stopped before the full horizon (validation "
+             "early stopping or the budget gate — see t4).\nDotted lines: the no-noise ceiling. "
              "Error bars: sd across seeds.",
              fontsize=7, color=MUTED)
     fig.tight_layout(rect=(0, 0.07, 1, 1))
@@ -255,20 +258,35 @@ def fig_attack(path: Path) -> bool:
     Returns:
         True if the figure was written (False when no attack sweep exists yet).
     """
-    rows = [r for r in load_attack_rows() if not r.get("error")]
-    if not rows:
+    grouped = group_attack_rows(load_attack_rows())
+    if not grouped:
         return False
 
-    labels = [str(r["eps_tag"]).replace("d3_dedup_first_", "").replace("_s42", "")
-              for r in rows]
-    asr = [float(r["inv_asr"]) for r in rows]
-    lo = [float(r["inv_asr"]) - float(r["inv_asr_ci_low"]) for r in rows]
-    hi = [float(r["inv_asr_ci_high"]) - float(r["inv_asr"]) for r in rows]
-    floor = [float(r["inv_asr_majority"]) for r in rows]
-    label_acc = [float(r["label_acc"]) for r in rows if r.get("label_acc") == r.get("label_acc")]
+    # Pool across the seeds whose checkpoints were attacked; error bars are the spread
+    # across seeds when there is more than one, else the within-run Wilson interval.
+    labels, asr, lo, hi, floor, label_acc = [], [], [], [], [], []
+    for arm, rows in grouped.items():
+        vals = attack_values(rows, "inv_asr")
+        if not vals:
+            continue
+        mean = statistics.mean(vals)
+        if len(vals) > 1:
+            half = statistics.stdev(vals)
+        else:
+            half = max(
+                mean - (attack_values(rows, "inv_asr_ci_low") or [mean])[0],
+                (attack_values(rows, "inv_asr_ci_high") or [mean])[0] - mean,
+            )
+        labels.append(f"{arm}\n(n={len(vals)})")
+        asr.append(mean)
+        lo.append(half)
+        hi.append(half)
+        floor.append(statistics.mean(attack_values(rows, "inv_asr_majority") or [0.0]))
+        if lab := attack_values(rows, "label_acc"):
+            label_acc.append(statistics.mean(lab))
 
     fig, ax = plt.subplots(figsize=(6.6, 4.0))
-    xs = list(range(len(rows)))
+    xs = list(range(len(labels)))
     ax.errorbar(xs, asr, yerr=[lo, hi], fmt="o", color=ACCENT, markersize=7,
                 capsize=4, elinewidth=1.1, zorder=4, label="inversion ASR (95% CI)")
     ax.plot(xs, floor, linestyle="--", color=MUTED, linewidth=1.4, zorder=3,
@@ -334,11 +352,89 @@ def fig_variance(path: Path) -> bool:
     return True
 
 
+def fig_attack_vs_epsilon(path: Path) -> bool:
+    """Figure 5: inversion success against the cut-layer epsilon budget.
+
+    The privacy companion to fig1. Plots the epsilon-grid attack points with the
+    always-guess-modal floor and the no-noise reference, so the shape of the privacy
+    trade-off is visible rather than inferred from a table.
+
+    The measured shape is a STEP, not a curve: across every tested budget the injected
+    noise still dominates the per-component signal (the clip caps the whole embedding at
+    S over 32 dimensions, so each component carries only ~S/sqrt(32)), and the attack sees
+    nothing anywhere. Only removing the noise entirely restores it. The annotation says so
+    on the figure, because a reader seeing a flat line will otherwise assume a broken axis.
+
+    Args:
+        path: Output file path.
+
+    Returns:
+        True if the figure was written (False when no epsilon-grid rows exist).
+    """
+    grouped = group_attack_rows(load_attack_rows())
+    points = {k: v for k, v in grouped.items() if k.startswith("eps=")}
+    if len(points) < 2:
+        return False
+
+    xs, ys, es = [], [], []
+    ceiling = None
+    for name, rows in points.items():
+        vals = attack_values(rows, "inv_asr")
+        if not vals:
+            continue
+        eps = name.removeprefix("eps=")
+        mean = statistics.mean(vals)
+        sd = statistics.stdev(vals) if len(vals) > 1 else 0.0
+        if eps == "inf":          # the no-noise arm is a reference line, not an x point
+            ceiling = (mean, sd)
+            continue
+        xs.append(float(eps))
+        ys.append(mean)
+        es.append(sd)
+    if not xs:
+        return False
+
+    floor = statistics.mean(
+        [v for rows in points.values() for v in attack_values(rows, "inv_asr_majority")]
+    )
+    order = sorted(range(len(xs)), key=lambda i: xs[i])
+    xs, ys, es = [xs[i] for i in order], [ys[i] for i in order], [es[i] for i in order]
+
+    fig, ax = plt.subplots(figsize=(6.6, 4.2))
+    ax.errorbar(xs, ys, yerr=es, color=ACCENT, marker="o", markersize=7, linewidth=1.6,
+                capsize=4, elinewidth=1.1, zorder=4, label="inversion ASR (sd across seeds)")
+    ax.axhline(floor, color=MUTED, linestyle="--", linewidth=1.4, zorder=3,
+               label="floor: always guess the modal value")
+    if ceiling is not None:
+        ax.axhline(ceiling[0], color=WARM, linestyle=":", linewidth=1.6, zorder=3,
+                   label=f"no cut-layer noise ({ceiling[0]:.3f})")
+    ax.set_xscale("log")
+    # Label the epsilon values actually swept. Matplotlib's default log formatter renders
+    # them as 6x10^-1 / 2x10^0, which is unreadable for a budget grid.
+    ax.set_xticks(xs)
+    ax.set_xticklabels([f"{x:g}" for x in xs])
+    ax.minorticks_off()
+    ax.set_ylim(0, max(ceiling[0] if ceiling else 0.5, max(ys)) * 1.25)
+    _style(ax, "Inversion success vs the cut-layer privacy budget",
+           "epsilon (cut-layer, per silo)", "attack success rate")
+    ax.legend(fontsize=8, frameon=False, loc="center right")
+    fig.text(0.01, 0.015,
+             "Flat by design, not a broken axis: the clip caps the embedding at S over 32 "
+             "dimensions (~S/sqrt(32) per\ncomponent), so noise dominates the signal at every "
+             "budget tested. The trade-off is a STEP — noise vs none.",
+             fontsize=7, color=MUTED)
+    fig.tight_layout(rect=(0, 0.07, 1, 1))
+    fig.savefig(path, dpi=200)
+    plt.close(fig)
+    return True
+
+
 FIGURES = (
     ("fig1_privacy_utility_curve", fig_privacy_utility),
     ("fig2_epsilon_isocline", fig_isocline),
     ("fig3_attack_vs_epsilon", fig_attack),
     ("fig4_variance_vs_epsilon", fig_variance),
+    ("fig5_attack_vs_epsilon", fig_attack_vs_epsilon),
 )
 
 

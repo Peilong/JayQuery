@@ -32,14 +32,31 @@ set -euo pipefail
 SEEDS="42 43 44 45 46"        # 5 seeds: DP arms have sd ~0.014, so 3 is marginal (§K)
 ROUNDS=200                    # §K3 settled shared horizon
 MODE="sim"                    # sim for sweeps; the deploy stage covers deployment
-DEPLOY_SEEDS="42"             # deployment is ~27 min/run, so the headline arms use 1 seed
+DEPLOY_SEEDS="42 43 44"       # deployment is ~27 min/run: 3 seeds x 4 arms ~5.5 h, gives CIs
 # Transmissions per student an averaging adversary sees: round(batch-sample-rate * rounds).
 # 1 would model an artificially weak single-shot attacker.
 ATTACK_OBS=10
+# L-BFGS steps per student — the dominant cost. Measured on a real checkpoint: 200 and 50
+# reach the same conclusion, and 50 is ~2x faster. Kept at 200 so the reported attacker is
+# the strongest one we can afford; lower it only to iterate.
+ATTACK_ITERS=200
+# Seeds whose checkpoints get attacked. Attack numbers had no CI at one seed, unlike every
+# other result. ~13 min per checkpoint at n=200, so 3 seeds x 4 arms is ~2.5 h.
+ATTACK_SEEDS="42 43 44"
+ATTACK_STUDENTS=200
+# Epsilon grid to attack, on top of the four DP-mode arms. Answers whether attack success
+# degrades GRADUALLY with epsilon or is a step function — the privacy companion to fig1.
+# ~15 min per checkpoint at n=200, so each point costs (seeds x 15) min.
+# NOTE: eps 0.1 and 0.25 trained only 10-50 rounds before validation early stopping (AUC
+# 0.58/0.62), so a null attack result there is confounded — the model may simply have had
+# nothing extractable. Default starts at 0.5 for that reason; add them for completeness,
+# not for inference. Empty string disables the grid.
+ATTACK_EPS_POINTS="0.5 1.0 2.0 4.0 inf"
+ATTACK_EPS_SEEDS="42 43 44"
 PRIMARY="dedup_first"
 VARIANTS="dedup_first dedup_best dedup_worst"
 WANDB_GROUP="paper-v1"
-ALL_STAGES="env,data,psi,baselines,matrix,deploy,eps,clip,audit,attack,publish"
+ALL_STAGES="env,data,psi,baselines,matrix,deploy,equiv,eps,clip,audit,attack,publish"
 STAGES="$ALL_STAGES"
 FRESH=0
 DRY_RUN=0
@@ -61,6 +78,11 @@ while [ $# -gt 0 ]; do
     --seeds)    SEEDS="$2"; shift 2 ;;
     --deploy-seeds) DEPLOY_SEEDS="$2"; shift 2 ;;
     --attack-obs)   ATTACK_OBS="$2"; shift 2 ;;
+    --attack-iters) ATTACK_ITERS="$2"; shift 2 ;;
+    --attack-seeds) ATTACK_SEEDS="$2"; shift 2 ;;
+    --attack-students) ATTACK_STUDENTS="$2"; shift 2 ;;
+    --attack-eps)   ATTACK_EPS_POINTS="$2"; shift 2 ;;
+    --attack-eps-seeds) ATTACK_EPS_SEEDS="$2"; shift 2 ;;
     --rounds)   ROUNDS="$2"; shift 2 ;;
     --mode)     MODE="$2"; shift 2 ;;
     --variants) VARIANTS="$2"; shift 2 ;;
@@ -171,6 +193,21 @@ if stage_enabled deploy; then
   fi
 fi
 
+# ── equiv (§L5): simulation vs deployment, paired on seed ────────────────────
+# no_dp only (smallest seed variance = most power per deployment run). Without this stage
+# a --fresh rebuild kept the pre-mechanism-record l5 artifacts, so the equivalence table
+# came from a different code version than every other table.
+if stage_enabled equiv; then
+  say equiv "Sim vs deployment equivalence (no_dp x $(echo $DEPLOY_SEEDS | wc -w) seed(s) x 2 modes)"
+  if have experiments/l5_results.json; then
+    skip experiments/l5_results.json
+  else
+    run "run_matrix --jobs l5" $PY scripts/run_matrix.py --jobs l5 \
+      --variants "$PRIMARY" --seeds $DEPLOY_SEEDS --rounds "$ROUNDS" \
+      --out experiments/l5_results.json $(resume_flag)
+  fi
+fi
+
 # ── matrix (§D3): DP mode x dedup variant x seed ─────────────────────────────
 if stage_enabled matrix; then
   say matrix "Utility matrix — 4 DP modes x $(echo $VARIANTS | wc -w) variants x $(echo $SEEDS | wc -w) seeds"
@@ -221,20 +258,38 @@ fi
 
 # ── attack: empirical leakage vs epsilon, against the WIRE representation ────
 if stage_enabled attack; then
-  say attack "Attacks vs epsilon (wire-faithful, n=200)"
+  say attack "Attacks (wire-faithful, n=$ATTACK_STUDENTS, arm seeds: $ATTACK_SEEDS, eps grid: ${ATTACK_EPS_POINTS:-none})"
   if have experiments/attack_sweep.csv; then
     skip experiments/attack_sweep.csv
   else
-    # One checkpoint per DP mode at the primary variant, seed 42. The no_dp arm is
-    # included deliberately: it measures the ceiling instead of assuming one.
+    # Every DP mode x seed at the primary variant. The no_dp arm is included deliberately:
+    # it MEASURES the ceiling instead of assuming one, and it is what makes a null result
+    # meaningful — without it, "the attack recovered nothing" could just mean the attack
+    # never worked.
     TAGS=""
     for arm in no_dp server_only cut_only all_dp; do
-      TAGS="$TAGS d3_${PRIMARY}_${arm}_s42"
+      for seed in $ATTACK_SEEDS; do
+        TAGS="$TAGS d3_${PRIMARY}_${arm}_s${seed}"
+      done
     done
-    run "run_attack --sweep" $PY scripts/run_attack.py \
+    # The epsilon grid: the same attack against cut-layer noise at varying budgets. Answers
+    # whether attack success degrades gradually with epsilon or is a step function.
+    for eps in $ATTACK_EPS_POINTS; do
+      for seed in $ATTACK_EPS_SEEDS; do
+        TAGS="$TAGS eps_${eps}_s${seed}"
+      done
+    done
+    NTAGS=$(echo $TAGS | wc -w)
+    echo "  $NTAGS checkpoints x ~15 min = ~$(( NTAGS * 15 / 60 ))h$(( NTAGS * 15 % 60 ))m"
+    echo "  (the CSV is rewritten after every checkpoint — safe to interrupt)"
+    # torch spawns one thread per core for a batch-of-1 forward through a tiny MLP, where
+    # contention costs more than the parallelism buys: measured 1.4x FASTER single-threaded,
+    # with identical results.
+    run "run_attack --sweep" env OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 $PY scripts/run_attack.py \
       --processed-dir "data/processed/$PRIMARY" \
       --checkpoint-dir experiments/checkpoints \
-      --sweep $TAGS --n-students 200 --observations "$ATTACK_OBS" \
+      --sweep $TAGS --n-students "$ATTACK_STUDENTS" --observations "$ATTACK_OBS" \
+      --num-iters "$ATTACK_ITERS" \
       --results-csv experiments/attack_sweep.csv
   fi
 fi

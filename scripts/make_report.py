@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -51,14 +52,19 @@ from results_lib import (  # noqa: E402
     PRIMARY_METRIC,
     RESULTS,
     Family,
+    attack_values,
     family_sources,
     fmt_mean_sd,
+    group_attack_rows,
     load_attack_rows,
     load_audit,
     load_baselines,
     load_family,
     load_variants,
 )
+
+# meta.json path of the composed (all-sources) epsilon — the reported guarantee.
+COMBINED_EPS = "epsilon_spent.privacy/combined_epsilon"
 
 
 # ── table construction ───────────────────────────────────────────────────────
@@ -75,11 +81,14 @@ def family_table(family: Family) -> tuple[list[str], list[list[str]]]:
     if not groups:
         return [], []
     key_names = next(iter(groups.values())).key_names
-    headers = [*key_names, "n", *[label for _, label, _ in METRICS],
+    headers = [*key_names, "n", "eps composed", *[label for _, label, _ in METRICS],
                "trunc", "budget-stop", "val-stop", "audit"]
     rows = []
     for group in groups.values():
-        cells = [*group.key, str(group.n)]
+        # The composed (all-sources) epsilon is the system's actual guarantee, so every
+        # table carries it next to the utility it bought. "-" = no DP source was active.
+        cells = [*group.key, str(group.n),
+                 fmt_mean_sd(group.values(COMBINED_EPS), 3)]
         for dotted, _, dec in METRICS:
             cells.append(fmt_mean_sd(group.values(dotted), dec))
         unknown = f"+{group.n_stop_unknown}?" if group.n_stop_unknown else ""
@@ -176,21 +185,34 @@ def attack_table() -> tuple[list[str], list[list[str]]]:
     rows_in = load_attack_rows()
     if not rows_in:
         return [], []
-    # Per-attribute recovery columns are the headline: which protected attributes came
-    # back, and by how much over the always-guess-majority floor.
-    attr_cols = sorted(c for c in rows_in[0] if c.startswith("attr_") and c.endswith("_lift"))
-    cols = ["eps_tag", "epsilon", "inv_asr", "inv_asr_lift",
-            "silo_a_nrmse", "silo_a_corr", "silo_b_nrmse", "silo_b_corr",
-            *attr_cols, "label_acc", "label_acc_majority"]
-    cols = [c for c in cols if c in rows_in[0]]
+    grouped = group_attack_rows(rows_in)
+    if not grouped:
+        return [], []
+    # Per-attribute recovery is the headline: which protected attributes came back, and by
+    # how much over the always-guess-majority floor. Reported as mean ± sd across the seeds
+    # whose checkpoints were attacked.
+    attr_cols = sorted(
+        c for c in rows_in[0] if c.startswith("attr_") and c.endswith("_lift")
+    )
+    metrics = [
+        ("inv_asr", "ASR", 3), ("inv_asr_majority", "floor", 3),
+        ("inv_asr_lift", "lift", 3),
+        ("silo_a_nrmse", "A nRMSE", 2), ("silo_b_nrmse", "B nRMSE", 2),
+        *[(c, c.replace("attr_", "").replace("_lift", " lift"), 3) for c in attr_cols],
+        ("label_acc", "label acc", 3), ("label_acc_majority", "label floor", 3),
+    ]
+    headers = ["arm", "seeds", *[label for _, label, _ in metrics], "leak"]
     rows = []
-    for r in rows_in:
-        rows.append([
-            "-" if (v := r.get(c)) is None or v != v
-            else (f"{v:.4f}" if isinstance(v, float) else str(v))
-            for c in cols
-        ])
-    return cols, rows
+    for arm, arm_rows in grouped.items():
+        cells = [arm, str(len(arm_rows))]
+        for key, _, dec in metrics:
+            cells.append(fmt_mean_sd(attack_values(arm_rows, key), dec))
+        # A negative lift is not "anti-leakage": a real attacker who does worse than the
+        # floor would just guess the modal value. Leakage is therefore max(0, lift).
+        lifts = attack_values(arm_rows, "inv_asr_lift")
+        cells.append(f"{max(0.0, sum(lifts) / len(lifts)):.3f}" if lifts else "-")
+        rows.append(cells)
+    return headers, rows
 
 
 def claims_table() -> tuple[list[str], list[list[str]]]:
@@ -271,7 +293,35 @@ def known_issues(caveats: dict) -> list[list[str]]:
                 if auc >= ceiling:
                     beating.append(f"{name} {auc:.4f}")
 
+    # Label inference against the (un-noised) gradient channel. Out of the threat model by
+    # decision (CLAUDE.md), but the paper must say so — so it stays visible here.
+    label_accs = [
+        float(r["label_acc"]) for r in load_attack_rows() if r.get("label_acc") not in (None, "")
+    ]
+    # autodp vs Opacus-RDP disagreement: both should upper-bound the same epsilon, so a
+    # large gap means the reported number rests on whichever accountant is trusted.
+    v1_gaps = _v1_gaps(audit.get("checks", []) or load_audit().get("checks", []))
+
     return [
+        [
+            "Labels recoverable from gradients",
+            ("OPEN (out of threat model — must be stated in the paper)" if label_accs
+             else "not checked"),
+            (f"label-inference accuracy {min(label_accs):.3f}-{max(label_accs):.3f} across "
+             f"{len(label_accs)} attacked checkpoints, every DP config included. Gradients "
+             "are not noised; labels are treated as known to the silos.")
+            if label_accs else "run the attack stage",
+            "CLAUDE.md threat model",
+        ],
+        [
+            "autodp and Opacus-RDP disagree on epsilon",
+            "OPEN" if v1_gaps else "clear",
+            ("autodp is lower than Opacus-RDP by more than 5% on: "
+             + "; ".join(f"{arm} (max {gap:.0f}%)" for arm, gap in v1_gaps.items())
+             + ". Report the larger (conservative) value, or justify autodp's tighter bound.")
+            if v1_gaps else "the two accountants agree within 5% on every run",
+            "privacy_audit.md V1",
+        ],
         [
             "Baseline matches or beats the federated model",
             "OPEN" if beating else ("clear" if baselines else "not checked"),
@@ -324,6 +374,109 @@ def known_issues(caveats: dict) -> list[list[str]]:
 
 
 # ── rendering ────────────────────────────────────────────────────────────────
+_V1_RE = re.compile(r"autodp ([\d.]+) vs opacus-RDP ([\d.]+)")
+
+
+def _v1_gaps(checks: list[dict], threshold: float = 0.05) -> dict[str, float]:
+    """Arms where autodp's epsilon is materially below the Opacus-RDP cross-check.
+
+    Args:
+        checks: Rows of experiments/privacy_audit.json.
+        threshold: Relative gap (Opacus / autodp - 1) below which a WARN is ignored.
+
+    Returns:
+        {arm tag without the seed suffix: largest gap in percent}.
+    """
+    gaps: dict[str, float] = {}
+    for c in checks:
+        if not c["check"].startswith("V1") or c["status"] != "WARN":
+            continue
+        m = _V1_RE.search(c["detail"])
+        if not m or float(m.group(1)) <= 0:
+            continue
+        gap = float(m.group(2)) / float(m.group(1)) - 1
+        if gap > threshold:
+            arm = re.sub(r"_s\d+$", "", c["run"])
+            gaps[arm] = max(gaps.get(arm, 0.0), 100 * gap)
+    return gaps
+
+
+def digest(
+    tables: dict[str, tuple[list[str], list[list[str]]]],
+    caveats: dict,
+    provenance: dict,
+    audit: dict,
+) -> str:
+    """A single dense page with every number, for a later Claude session writing the paper.
+
+    README.md is for a human browsing the folder (figures, links). DIGEST.md is the one
+    file to read when drafting text: all tables inline, the open issues, the audit
+    rolled up by check, and the statements the paper is obliged to make. Nothing here is
+    interpreted beyond what the artifacts say.
+
+    Args:
+        tables: Built tables.
+        caveats: Output of analyze.collect_caveats.
+        provenance: The provenance dict.
+        audit: Parsed privacy_audit.json.
+
+    Returns:
+        Markdown text.
+    """
+    git = provenance.get("git", {})
+    parts = [
+        "# JayQuery results digest",
+        "",
+        "_Machine-oriented summary: every table inline, no figures. Regenerated by "
+        "`scripts/make_report.py`; do not edit._",
+        "",
+        "## Provenance",
+        "",
+        f"- generated: {provenance.get('generated_utc')}",
+        f"- commit: `{(git.get('commit') or '?')[:10]}` on `{git.get('branch')}`"
+        + (" (UNCOMMITTED CHANGES)" if git.get("dirty") else ""),
+        "- runs: " + ", ".join(f"{k}={v}" for k, v in provenance.get("run_counts", {}).items()),
+        "- audit: " + ", ".join(f"{k}={v}" for k, v in audit.get("counts", {}).items()),
+        "",
+        "## Open issues",
+        "",
+        md_table(["issue", "status", "detail", "reference"], known_issues(caveats)),
+        "",
+    ]
+
+    checks = audit.get("checks", [])
+    if checks:
+        roll: dict[tuple[str, str], int] = {}
+        for c in checks:
+            key = (re.sub(r" \[.*\]$", "", c["check"]), c["status"])
+            roll[key] = roll.get(key, 0) + 1
+        parts += ["## Privacy audit by check", "",
+                  md_table(["check", "status", "runs"],
+                           [[k, st, str(n)] for (k, st), n in sorted(roll.items())]), ""]
+
+    parts += [
+        "## Statements the paper must make",
+        "",
+        "- Threat model protects silo FEATURES (embeddings on the wire + server). Labels are "
+        "out of scope: gradients are not noised and label inference is ~100% (t7).",
+        "- Val/test embeddings are clipped but not noised; val/test students are outside the "
+        "formal guarantee.",
+        "- The reported guarantee is the COMPOSED epsilon (`eps composed` column), not the "
+        "per-mechanism target.",
+        "- DP arms keep AUC but predictions collapse toward the base rate (`pred_std` ~0.01-0.02 "
+        "vs ~0.36 without noise): ranking survives, probabilities are not calibrated.",
+        "- Attack `leak` = max(0, lift); a lift below the floor is 'no better than guessing', "
+        "not negative leakage.",
+        "- Rows with `trunc` > 0 were still improving at the round horizon.",
+        "",
+        "## Tables",
+        "",
+    ]
+    for name, (headers, rows) in tables.items():
+        parts += [f"### {name}", "", md_table(headers, rows), ""]
+    return "\n".join(parts)
+
+
 def md_table(headers: list[str], rows: list[list[str]]) -> str:
     """Render a markdown table.
 
@@ -472,7 +625,10 @@ def build(out_dir: Path, do_figures: bool = True) -> dict[str, tuple[list[str], 
     }
     (out_dir / "provenance.json").write_text(json.dumps(provenance, indent=2))
 
-    # 6. README — the entry point
+    # 6. DIGEST — every number on one page, for drafting the paper
+    (out_dir / "DIGEST.md").write_text(digest(tables, caveats, provenance, audit) + "\n")
+
+    # 7. README — the entry point
     (out_dir / "README.md").write_text(
         readme(tables, caveats, provenance, written_figs) + "\n"
     )
@@ -539,14 +695,18 @@ def readme(
         parts += ["## Figures", ""]
         captions = {
             "fig1_privacy_utility_curve": "Privacy-utility trade-off. Hollow markers are "
-                                          "budget-truncated runs (under-trained, not only "
-                                          "over-noised).",
+                                          "points where at least one seed stopped early "
+                                          "(validation early stopping or the budget gate; "
+                                          "t4 says which).",
             "fig2_epsilon_isocline": "Utility spread at an IDENTICAL formal guarantee "
                                      "(epsilon = 1.0). The clip S does not enter the epsilon "
                                      "calculation, so this spread costs no privacy.",
             "fig3_attack_vs_epsilon": "Attack success against the transmitted (clipped + "
                                       "noised) embedding, with the uninformed-attacker floor.",
             "fig4_variance_vs_epsilon": "Seed-to-seed variance against epsilon.",
+            "fig5_attack_vs_epsilon": "Inversion attack success against the cut-layer "
+                                      "epsilon, with the no-noise level and the "
+                                      "uninformed-attacker floor.",
         }
         for fig in figs:
             stem = Path(fig).stem
@@ -562,6 +722,7 @@ def readme(
               "| file | what it is |",
               "|---|---|",
               "| `README.md` | this page |",
+              "| `DIGEST.md` | every table + open issues on one page (for drafting the paper) |",
               "| `claims.csv` | every comparison: delta, 95% CI, p, n, caveats |",
               "| `caveats.json` | machine-readable run-health and audit findings |",
               "| `privacy_audit.md` | the V1-V6 guarantee audit |",

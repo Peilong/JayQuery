@@ -45,8 +45,15 @@ Current design:
 5. **Combined epsilon.** The system spends budget on both mechanisms; report the **composed** total.
 
 **Threat model:** honest-but-curious server / man-in-the-middle on the inter-silo channel. Protected
-surface = embeddings and gradients on the wire + the aggregating server. Local silo weights are assumed
-protected by institutional trust boundaries (an attacker who can read them can read the raw data).
+surface = **silo features**, as exposed through the embeddings on the wire and to the aggregating server.
+Local silo weights are assumed protected by institutional trust boundaries (an attacker who can read
+them can read the raw data).
+
+**Out of scope — labels.** The server→silo gradients are **not** noised, so the dropout label is
+recoverable from them (measured label-inference accuracy ≈ 1.0 under every DP config). Labels are
+treated as known to both silos and to anyone who can observe the gradient channel. The paper must state
+this as a limitation, not claim label privacy. Val/test embeddings are clipped but not noised, so
+val/test students are also outside the formal guarantee.
 
 ---
 
@@ -218,16 +225,11 @@ Starts `flower-superlink` + one `flower-supernode` per silo (partition-id 0 = Si
 Iterate in simulation; report from deployment. **Never mix the two modes inside one
 comparison table.**
 
-> **Equivalence caveat (measured 2026-07-28, UNRESOLVED).** One paired run — same config,
-> same seed, 20 rounds, `dedup_first` — gave sim AUC **0.7064** vs deployment **0.7378**,
-> a gap of **0.0314**. That exceeds the n=2552 Hanley–McNeil bar of 0.0250, so this does
-> **not** demonstrate equivalence. It also does not demonstrate a systematic difference:
-> that bar measures *test-set sampling* uncertainty, whereas two runs with different RNG
-> streams differ by *training stochasticity*, a separate and usually larger source. Both
-> runs were also truncated at 20 rounds (`best_val` at the final round), the noisiest phase
-> of training. Resolving this needs several seeds per mode — tracked as §L in
-> `docs/action_plan.md`. **Until then, do not report a simulation number as a deployment
-> number.**
+> **Equivalence (resolved 2026-07-31, §L5).** 3 paired seeds per mode, 200 rounds, no_dp,
+> `dedup_first`: sim AUC **0.9037** vs deployment **0.9039**, delta −0.0003, 95% CI
+> [−0.0049, +0.0044], p = 0.89. The earlier 0.031 gap (one 20-round pair, 2026-07-28) was
+> training stochasticity in a truncated run. Sim numbers may back CIs; the headline table
+> still comes from deployment, and the two modes are still not mixed in one table.
 
 The DP guarantee is unaffected either way: ε is computed analytically from
 sigma/steps/sample-rate, never from the realized noise.

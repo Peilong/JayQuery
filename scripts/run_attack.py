@@ -733,6 +733,7 @@ def run_all_attacks(
     models: tuple[BottomModelA, BottomModelB, TopModel] | None = None,
     wire: bool = True,
     n_observations: int = 1,
+    num_iters: int = 200,
 ) -> dict:
     """Run all three attacks against one checkpoint and return their metrics.
 
@@ -784,10 +785,10 @@ def run_all_attacks(
     for name, fn in (
         ("inversion_a", lambda: run_inversion(
             df, model_a, n_students=n_students, max_norm=norm_a, noise_std=std_a,
-            silo="a", n_observations=n_observations)),
+            silo="a", n_observations=n_observations, num_iters=num_iters)),
         ("inversion_b", lambda: run_inversion(
             df, model_b, n_students=n_students, max_norm=norm_b, noise_std=std_b,
-            silo="b", n_observations=n_observations)),
+            silo="b", n_observations=n_observations, num_iters=num_iters)),
         ("label_inference", lambda: run_label_inference(df, model_a, model_b, top)),
     ):
         try:
@@ -822,6 +823,7 @@ def run_sweep(
     wire: bool = True,
     n_observations: int = 1,
     out_path: str | Path | None = None,
+    num_iters: int = 200,
 ) -> list[dict]:
     """Attack several checkpoints and return one flat summary row per run.
 
@@ -859,6 +861,7 @@ def run_sweep(
             res = run_all_attacks(
                 df, checkpoint_dir=checkpoint_dir, eps_tag=tag,
                 n_students=n_students, wire=wire, n_observations=n_observations,
+                num_iters=num_iters,
             )
         except (FileNotFoundError, ValueError, KeyError) as exc:
             print(f"  [warn] {tag}: {type(exc).__name__}: {exc}")
@@ -910,28 +913,42 @@ def _print_sweep(rows: list[dict]) -> None:
     Args:
         rows: Output of run_sweep.
     """
-    print("\n==== Attack vs epsilon ====")
+    def cell(row: dict, key: str, width: int, prec: int = 3, sign: str = "") -> str:
+        """Format one numeric cell, tolerating a missing or non-numeric value.
+
+        Deliberately defensive: this runs AFTER a sweep that can take an hour, and a
+        KeyError here previously killed the process before the results were written,
+        discarding every completed checkpoint. A report function must never be able to
+        destroy the data it is reporting on.
+        """
+        value = row.get(key)
+        if not isinstance(value, int | float) or value != value:
+            return f"{'-':>{width}}"
+        return f"{value:>{width}.{prec}f}" if not sign else f"{value:>{sign}{width}.{prec}f}"
+
+    print("\n==== Attack vs defense configuration ====")
     hdr = (
-        f"{'run':<28} {'eps':>7} {'inv ASR':>9} {'95% CI':>17} "
-        f"{'floor':>7} {'lift':>7} {'RMSE':>7} {'label':>7}"
+        f"{'run':<30} {'eps':>6} {'inv ASR':>8} {'floor':>7} {'lift':>7} "
+        f"{'A nRMSE':>8} {'B nRMSE':>8} {'label':>7}"
     )
     print(hdr)
     print("-" * len(hdr))
     for r in rows:
         if r.get("error"):
-            print(f"{r['eps_tag']:<28} {'ERROR: ' + r['error'][:60]}")
+            print(f"{str(r.get('eps_tag', '?')):<30} ERROR: {str(r['error'])[:60]}")
             continue
-        eps = f"{r['epsilon']:.3f}" if r.get("epsilon") else "-"
-        ci = f"[{r['inv_asr_ci_low']:.3f},{r['inv_asr_ci_high']:.3f}]"
+        tag = str(r.get("eps_tag", "?"))[:30]
         print(
-            f"{r['eps_tag']:<28} {eps:>7} {r['inv_asr']:>9.3f} {ci:>17} "
-            f"{r['inv_asr_majority']:>7.3f} {r['inv_asr_lift']:>+7.3f} "
-            f"{r['inv_recon_rmse']:>7.3f} {r['label_acc']:>7.3f}"
+            f"{tag:<30} {cell(r, 'epsilon', 6)} {cell(r, 'inv_asr', 8)} "
+            f"{cell(r, 'inv_asr_majority', 7)} {cell(r, 'inv_asr_lift', 7, sign='+')} "
+            f"{cell(r, 'silo_a_nrmse', 8)} {cell(r, 'silo_b_nrmse', 8)} "
+            f"{cell(r, 'label_acc', 7)}"
         )
     print("-" * len(hdr))
-    print("  floor = always-guess-modal-imd_band; lift = ASR - floor (0 means no leakage")
-    print("  beyond what an uninformed attacker gets). label = label inference accuracy,")
-    print("  an UNDEFENDED channel by design — it should not fall with epsilon.")
+    print("  floor = always-guess-the-modal-value; lift = ASR - floor. A lift at or below")
+    print("  zero means no leakage beyond an uninformed attacker. nRMSE >= 1.0 means the")
+    print("  reconstruction is no better than predicting each feature's mean.")
+    print("  label = label inference, an UNDEFENDED channel by design — it does not fall.")
 
 
 # --------------------------------------------------------------------------------------
@@ -1033,6 +1050,13 @@ def main() -> None:
              "no-DP run so the ceiling is measured.",
     )
     parser.add_argument(
+        "--num-iters", type=int, default=200,
+        help="L-BFGS steps per student. Each step runs up to 20 closure evaluations, so "
+             "this dominates runtime: 200 students x 2 silos x 4 checkpoints x 200 steps "
+             "is ~6.4M forward+backward passes (~2h). Lower it if the attack converges "
+             "sooner — check mean_final_loss is unchanged.",
+    )
+    parser.add_argument(
         "--observations", type=int, default=1,
         help="Transmissions per student the attacker averages. 1 = single-shot (weak). "
              "round(batch-sample-rate * num-server-rounds) — about 10 at q=0.05, T=200 — "
@@ -1071,6 +1095,7 @@ def main() -> None:
             df, args.checkpoint_dir, args.sweep,
             n_students=args.n_students, wire=not args.no_wire,
             n_observations=args.observations, out_path=out,
+            num_iters=args.num_iters,
         )
         _print_sweep(rows)
         print(f"\nWrote sweep -> {out}")
@@ -1090,6 +1115,7 @@ def main() -> None:
         models=models,
         wire=not args.no_wire,
         n_observations=args.observations,
+        num_iters=args.num_iters,
     )
     _print_report(results)
     if args.results_csv:

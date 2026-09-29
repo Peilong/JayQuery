@@ -84,6 +84,61 @@ Cut-layer noise, 5 seeds/point, S=1.0, T=200, wandb group `eps-sweep`.
 
 ---
 
+## 2d. Empirical privacy — attacks against the wire (NEW 2026-07-31)
+
+Measured against the **transmitted** embedding (clipped + noised, using each run's own
+recorded defense parameters), n=200 students, an adversary averaging 10 observations.
+Evidence: `FINDINGS.md` / `action_plan.md` §R10, `results/tables/t7_attack_results.*`,
+`results/figures/fig3_attack_vs_epsilon.png`.
+
+- 🟡 **The attack works when the wire is unprotected.** `no_dp` inversion ASR **0.355 vs a
+  0.135 floor** (+0.220 lift, 2.6x), recovering **region** (+0.300) and **gender** (+0.195)
+  well above chance. **This measured ceiling is what makes the null results interpretable** —
+  without it, "recovered nothing" could mean the attack simply never worked.
+- 🟡 **Server DP-SGD buys NO wire protection.** ASR identical at 0.355. It perturbs the top
+  model's *parameter* gradients, never the transmitted embedding.
+- 🟡 **Cut-layer noise defeats the attack outright.** ASR 0.080 (`cut_only`) / 0.055
+  (`all_dp`), at or below the floor on every attribute.
+- 🔵 **This answers §10's open question.** Cut-layer noise costs 25x more utility *and buys
+  the entire wire defense*. The mechanisms are **not substitutes at different price
+  points — they defend different adversaries.** The utility asymmetry and the privacy
+  asymmetry are complements, and together they are the paper's spine:
+
+  | mechanism | utility cost (ε=1) | wire protection |
+  |---|---|---|
+  | server DP-SGD | ~0 (−0.0022) | none |
+  | cut-layer noise | −0.0562 | complete |
+
+- 🔵 **Label inference is 1.000 in every configuration.** The returned activation gradient is
+  noised by neither mechanism, so labels leak regardless of ε — the empirical counterpart of
+  the scope decision in §7. Present it as a *quantified limitation*, never as a defense
+  evaluation.
+- ⚠️ **Reporting discipline for `lift`.** `floor` = always-guess-the-modal-value on the
+  attacked sample (a harder bar than uniform guessing). Negative lift means **no usable
+  signal**, not negative information: a noise-driven reconstruction scatters its guesses and
+  lands below the floor by construction. At n=200 the SE on ASR is ~0.024, so say **"no
+  measurable leakage"**, never "below chance". And it is an **upper bound on demonstrated
+  leakage** under *this* attack — not proof nothing is recoverable.
+- 🟢 **The privacy trade-off is a STEP, not a curve** (3 seeds, epsilon grid 0.5→4.0).
+  ASR is flat at 0.075–0.102 across every budget — Spearman rho **−0.076, p=0.813** — and
+  jumps to 0.388 only when the noise is removed entirely. Every noised point is
+  significantly below the ceiling (Δ ≈ −0.26 to −0.28, all p<0.001); no point differs from
+  its neighbours.
+  - 🔵 **Why:** `S=1.0` caps the whole embedding at L2 norm 1.0 over 32 dimensions, so each
+    component carries ~0.177 of magnitude while sigma runs 5.60 (ε=0.5) → 1.16 (ε=4). **Even
+    at ε=4 the noise is ~6.6x the per-component signal.** Extrapolating, the attack would not
+    recover signal until **ε ≈ 30–40**.
+  - **Claim:** *within every usable privacy budget, cut-layer noise fully blocks inversion —
+    the privacy trade-off has no interior.* Stronger than a graded curve: the utility cost
+    buys a complete defense, not a proportional one.
+  - ⚠️ This is a property of the **clip**, not of ε alone. A larger S leaves ε unchanged
+    (§2.2 isocline) but moves where the step sits — worth stating so it is not read as a
+    universal law.
+- ⚪ **Still owed:** membership inference — the attack DP is literally defined against, and
+  the most conspicuous absence for a reviewer.
+
+---
+
 ## 3. Variance, and why it is a finding not a nuisance
 
 - 🟢 **DP training variance is 10× the no-DP variance.** Seed-to-seed σ(AUC): no_dp 0.0021,
@@ -245,10 +300,11 @@ Cut-layer noise, 5 seeds/point, S=1.0, T=200, wandb group `eps-sweep`.
 
 ## 10. Open questions / future work
 
-- Does **attack success collapse in the same ε region where utility does**? The cleanest version
-  of the paper's story — and the reason server-vs-cut asymmetry matters: if cut-layer noise
-  costs 25× more utility, does it buy proportionally more attack resistance? **If not, the
-  architecture should drop it.**
+- ~~Does **attack success collapse in the same ε region where utility does**?~~ ✅ **ANSWERED
+  2026-07-31 — see §2d.** Cut-layer noise costs 25× more utility *and* buys the entire wire
+  defense; server DP-SGD buys none. They defend different adversaries, so neither is
+  droppable. Still open: whether ASR falls *gradually* across the ε grid or is a step
+  function — the current sweep has only the four DP modes, not the ε grid.
 - **Per-mechanism ε allocation.** Given the asymmetry, spending budget on server DP-SGD and
   little/none on cut-layer noise may dominate — but only if the threat model permits it
   (cut-layer noise protects the *wire*, server DP protects the *aggregate*).

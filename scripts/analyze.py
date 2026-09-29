@@ -44,6 +44,9 @@ from results_lib import (  # noqa: E402
     RESULTS,
     Family,
     Group,
+    attack_values,
+    group_attack_rows,
+    load_attack_rows,
     load_audit,
     load_baselines,
     load_family,
@@ -191,6 +194,69 @@ def _compare_federation_cost(metric_keys: list[str]) -> list[dict]:
     return rows
 
 
+def _compare_attacks() -> list[dict]:
+    """Attack success per DP arm, compared against the UNDEFENDED arm.
+
+    Two comparisons matter and they answer different questions:
+
+    * arm vs ``no_dp`` — does this defense reduce attack success? A significant negative
+      delta means the mechanism demonstrably blocks the attack.
+    * lift vs zero — does the attack beat an uninformed attacker at all? Reported as the
+      ``inv_asr_lift`` rows, whose CI tells you whether any leakage is measurable.
+
+    Without the ``no_dp`` arm a null result is uninterpretable: "the attack recovered
+    nothing" could just mean the attack never worked. Comparing to a measured ceiling is
+    what makes the null meaningful.
+
+    Returns:
+        One dict per (arm, metric) comparison, ready for CSV.
+    """
+    grouped = group_attack_rows(load_attack_rows())
+    ceiling = grouped.get("no_dp")
+    if not ceiling:
+        return []
+
+    keys = ["inv_asr", "silo_a_nrmse", "silo_b_nrmse", "label_acc"]
+    keys += sorted({
+        c for rows in grouped.values() for r in rows for c in r
+        if c.startswith("attr_") and c.endswith("_lift")
+    })
+
+    rows: list[dict] = []
+    for arm, arm_rows in grouped.items():
+        if arm == "no_dp":
+            continue
+        for key in keys:
+            arm_vals, base_vals = attack_values(arm_rows, key), attack_values(ceiling, key)
+            res = welch(arm_vals, base_vals)
+            if res is None:
+                continue
+            rows.append({
+                "family": "attack",
+                "split": "dedup_first",
+                "arm": arm,
+                "baseline": "no_dp",
+                "metric": key,
+                "n_arm": len(arm_vals),
+                "n_baseline": len(base_vals),
+                "mean_arm": round(res["mean_arm"], 6),
+                "mean_baseline": round(res["mean_baseline"], 6),
+                "delta": round(res["delta"], 6),
+                "ci_low": round(res["ci_low"], 6),
+                "ci_high": round(res["ci_high"], 6),
+                "se": round(res["se"], 6),
+                "df": round(res["df"], 2),
+                "p_value": round(res["p_value"], 6),
+                "significant": res["significant"],
+                "caveats": (
+                    "attack success measured against the WIRE representation using each "
+                    "run's own recorded defense parameters; an upper bound on demonstrated "
+                    "leakage under THIS attack, not proof that nothing is recoverable"
+                ),
+            })
+    return rows
+
+
 def collect_caveats() -> dict:
     """Gather every standing caveat that qualifies the results, from the artifacts.
 
@@ -257,6 +323,7 @@ def main() -> None:
     for family in FAMILIES:
         rows.extend(_compare_family(family, metric_keys))
     rows.extend(_compare_federation_cost(metric_keys))
+    rows.extend(_compare_attacks())
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     claims_path = args.out_dir / "claims.csv"

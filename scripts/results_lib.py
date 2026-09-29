@@ -387,6 +387,72 @@ def load_attack_rows() -> list[dict]:
     return pd.read_csv(path).to_dict(orient="records")
 
 
+def group_attack_rows(rows: list[dict]) -> dict[str, list[dict]]:
+    """Group attack-sweep rows by DP arm, pooling across seeds.
+
+    Sweep rows are one per attacked checkpoint, tagged
+    ``d3_<variant>_<arm>_s<seed>``. Grouping by arm is what turns single-shot attack
+    numbers into means with a spread, so an attack result can be reported the same way as
+    every utility result rather than as one unreplicated observation.
+
+    Args:
+        rows: Rows from load_attack_rows().
+
+    Returns:
+        {arm: [row, ...]}, ordered no_dp, server_only, cut_only, all_dp where present.
+        Rows whose tag does not parse are grouped under their raw tag.
+    """
+    order = ["no_dp", "server_only", "cut_only", "all_dp"]
+    arm_rx = re.compile(
+        r"^d3(?:dep)?_[a-z_]+?_(?P<arm>no_dp|server_only|cut_only|all_dp)_s\d+$"
+    )
+    # Epsilon-grid checkpoints (eps_<value>_s<seed>) group by their epsilon point. Without
+    # this they fell through to the raw-tag branch, so every seed became its own group of
+    # one — no pooling and no error bars on the epsilon curve.
+    eps_rx = re.compile(r"^eps_(?P<eps>[\d.]+|inf)_s\d+$")
+    grouped: dict[str, list[dict]] = {}
+    for row in rows:
+        if row.get("error"):
+            continue
+        tag = str(row.get("eps_tag", ""))
+        if m := arm_rx.match(tag):
+            key = m.group("arm")
+        elif m := eps_rx.match(tag):
+            key = f"eps={m.group('eps')}"
+        else:
+            key = tag
+        grouped.setdefault(key, []).append(row)
+
+    def sort_key(name: str) -> tuple:
+        """Arms first in mechanism order, then epsilon points ascending, 'inf' last."""
+        if name in order:
+            return (0, order.index(name), 0.0, "")
+        if name.startswith("eps="):
+            v = name.removeprefix("eps=")
+            return (1, 0, float("inf") if v == "inf" else float(v), "")
+        return (2, 0, 0.0, name)
+
+    return {k: grouped[k] for k in sorted(grouped, key=sort_key)}
+
+
+def attack_values(rows: list[dict], key: str) -> list[float]:
+    """Numeric values for one attack metric across a group's rows.
+
+    Args:
+        rows: Rows for one arm.
+        key: Column name (e.g. "inv_asr", "attr_gender_lift").
+
+    Returns:
+        The present numeric values, skipping blanks and NaNs.
+    """
+    out = []
+    for row in rows:
+        v = row.get(key)
+        if isinstance(v, int | float) and v == v:
+            out.append(float(v))
+    return out
+
+
 def load_variants() -> list[dict]:
     """Dataset provenance, one record per prepared variant.
 

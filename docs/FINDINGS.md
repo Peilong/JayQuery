@@ -207,7 +207,38 @@ Cost vs the no-noise ceiling (Welch, n=5): ε=0.1 **−0.3165**, ε=0.25 −0.25
 **ε=1 reproduces §D3's `cut_only` (−0.0564 vs −0.0562)** — independent replication via a
 different job list.
 
-#### ⚠️ Two truncation confounds — do not read the curve naively
+> ## ⚠️ SUPERSEDED 2026-07-31 — re-run with `combined-target-epsilon = 10.0`
+>
+> The table above and both confounds below were measured under a **3.0** composed-epsilon
+> cap. The overnight `--fresh` run used **10.0**, and the curve changed:
+>
+> | ε | AUC (cap 3.0) | **AUC (cap 10.0)** | rounds | stop reason |
+> |---|---|---|---|---|
+> | 0.1 | 0.5862 | 0.5788 | 10–35 | `val_early_stop` |
+> | 0.25 | 0.6464 | 0.6210 | 10–50 | `val_early_stop` |
+> | 0.5 | 0.7324 | 0.7185 | 10–200 | 2 val, 3 completed |
+> | 1.0 | 0.8463 | 0.8403 | 195–200 | completed |
+> | 2.0 | 0.8609 | 0.8583 | 195–200 | completed |
+> | **4.0** | **0.7805 (invalid)** | **0.8690 (valid)** | **195–200** | **completed** |
+> | off | 0.9027 | 0.9028 | 195–200 | completed |
+>
+> **Both original confounds are resolved or wrong:**
+>
+> 1. **ε=4 is now VALID.** Raising the cap removed the truncation; it runs the full horizon
+>    and scores 0.8690. The curve is monotone throughout and the "do not plot ε=4" warning
+>    no longer applies.
+> 2. **The low-ε claim was WRONG.** They were described as budget-exhausted — "the
+>    accountant working as designed". With `stop_reason` now recorded (§R8) they are all
+>    **`val_early_stop`**: σ was sized for 200 rounds, only ~20 were used, so the budget
+>    never ran out. The model simply stopped improving. That is ordinary convergence
+>    behaviour, not a privacy artifact, and it must be described that way.
+>
+> The low-ε points are still not clean readings — a model that trained 10–50 rounds to
+> AUC 0.58 is under-trained — but the *reason* is early stopping, not budget exhaustion.
+> This also confounds any ATTACK result at those points: "the attack recovered nothing"
+> cannot be separated from "the model never learned anything extractable" (§R10).
+
+#### ⚠️ Two truncation confounds (as measured under the old 3.0 cap — see the box above)
 
 **1. ε=4 is INVALID as a noise measurement.** It scores *worse* than ε=2, which is backwards.
 Cause: `combined-target-epsilon = 3.0` caps the **composed** budget across both silos. At ε=4

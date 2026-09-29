@@ -1066,6 +1066,155 @@ early"*, not *"large S exhausts the privacy budget"*. Restate it that way.
 
 All are **upper bounds** until §R6b matches the training budgets.
 
+### R10. ✅ ATTACK RESULTS — the privacy side is now measured (2026-07-31)
+
+First wire-faithful attack numbers against real trained checkpoints (`dedup_first`, seed 42,
+n=200 students, 10 averaged observations, L-BFGS 200 steps).
+
+| config | inv ASR | floor | **lift** | Silo A nRMSE | Silo B nRMSE | label acc |
+|---|---|---|---|---|---|---|
+| no_dp | 0.355 | 0.135 | **+0.220** | 1.90 | 4.55 | 1.000 |
+| server_only | 0.355 | 0.135 | **+0.220** | 1.97 | 4.80 | 1.000 |
+| cut_only | 0.080 | 0.135 | **−0.055** | 2.80 | 6.07 | 1.000 |
+| all_dp | 0.055 | 0.135 | **−0.080** | 2.75 | 6.06 | 1.000 |
+
+Per-attribute lift on Silo A (`region` floor 0.125, `gender` floor 0.505):
+
+| attribute | no_dp | server_only | cut_only | all_dp |
+|---|---|---|---|---|
+| region | **+0.300** | **+0.215** | −0.060 | −0.070 |
+| gender | **+0.195** | **+0.145** | −0.040 | +0.020 |
+
+#### What this establishes
+
+1. **The attack genuinely works when the wire is unprotected.** `no_dp` reaches 2.6x its
+   floor and recovers region and gender well above chance. **This is what makes the null
+   results meaningful** — without a measured ceiling, "the attack recovered nothing" could
+   simply mean the attack never worked.
+2. **Server DP-SGD provides ~no wire protection.** ASR is identical to `no_dp` (0.355).
+   Mechanically expected — it perturbs the top model's *parameter* gradients, not the
+   transmitted embedding — but now measured rather than argued.
+3. **Cut-layer noise defeats the attack.** ASR falls to the floor or below; every attribute
+   lands at or under chance.
+4. **Labels leak perfectly (1.000) in every configuration**, confirming §R2/§7's scope
+   statement empirically: DP protects features, not labels.
+
+#### This answers `paper_topics.md` §10's open question
+
+*"If cut-layer noise costs 25x more utility, does it buy proportionally more attack
+resistance? If not, the architecture should drop it."*
+
+**It buys the entire wire defense.** The two mechanisms are not substitutes at different
+price points — they defend **different adversaries**, and the utility and privacy results
+are complements:
+
+| mechanism | utility cost | wire protection |
+|---|---|---|
+| server DP-SGD (ε=1) | ~0 (−0.0022) | **none** |
+| cut-layer noise (ε=1) | −0.0562 | **complete** |
+
+#### How to read `lift` (and why negative is expected)
+
+`floor` = accuracy of an attacker who ignores the embedding and always guesses the modal
+value, measured on the attacked sample. It is deliberately a harder bar than uniform
+guessing (0.135 vs 0.10 for a 10-level attribute). `lift = ASR − floor` answers the only
+question that matters: *does seeing the wire help beyond knowing the population
+distribution?*
+
+**Negative lift means no usable signal, not "negative information".** When the
+reconstruction is noise, decoded guesses scatter instead of concentrating on the mode, so a
+noise-driven attack lands at or below the floor essentially by construction. Two rules:
+
+- **Magnitude of a negative lift is not meaningful.** At n=200 with floor 0.135 the SE on
+  ASR is ~0.024 (±0.048 at 95%), so `cut_only`'s −0.055 is indistinguishable from zero.
+  Report "no measurable leakage", never "below chance". `no_dp`'s +0.220 is ~9 SE out.
+- **It is an upper bound on demonstrated leakage**, not proof that nothing is recoverable.
+  The honest claim is "this attack, given the wire representation and 10 averaged
+  observations, recovers nothing."
+
+#### Caveats
+
+- Single seed so far. **Fixed:** the attack stage now sweeps `--attack-seeds` (default
+  42 43 44), `make_report` pools by arm as mean ± sd, and `analyze.py` emits
+  `family=attack` rows in `claims.csv` with Welch CIs vs the `no_dp` ceiling.
+- `disability` lift is negative even at `no_dp` because its floor is 0.920 (92% of students
+  report none) — a floor artifact, not a defense success.
+- `all_dp` gender at +0.020 is inside single-seed noise.
+
+### R12. The privacy trade-off is a STEP, not a curve (2026-07-31, 3 seeds)
+
+27-checkpoint attack sweep: 4 DP modes x 3 seeds, plus an epsilon grid at 3 seeds.
+
+| group | ASR | vs no_dp ceiling |
+|---|---|---|
+| no_dp | 0.357 ± 0.008 | — |
+| server_only | 0.357 ± 0.047 | +0.0000 [−0.1134, +0.1134] |
+| cut_only | 0.077 ± 0.018 | **−0.2800 [−0.3172, −0.2428]** |
+| all_dp | 0.085 ± 0.005 | **−0.2717 [−0.2873, −0.2561]** |
+| eps=0.5 | 0.085 ± 0.010 | **−0.2717 [−0.2924, −0.2509]** |
+| eps=1.0 | 0.093 ± 0.020 | **−0.2633 [−0.3072, −0.2195]** |
+| eps=2.0 | 0.102 ± 0.008 | **−0.2550 [−0.2723, −0.2377]** |
+| eps=4.0 | 0.075 ± 0.017 | **−0.2817 [−0.3183, −0.2450]** |
+| eps=inf | 0.388 ± 0.045 | +0.0317 [−0.0755, +0.1389] |
+
+Floor (always-guess-modal) = 0.135 throughout.
+
+**There is no gradient across the budget grid.** Spearman rho across eps 0.5→4.0 is
+**−0.076 (p = 0.813)**; eps=4 vs eps=2 is p = 0.100. Every noised point sits at 0.075–0.102,
+below the floor and statistically indistinguishable from the others. Noise-off vs any-noise
+is +0.2996 (p = 0.006). **Do not read the small eps=4 dip as a trend — it is ~1 SE.**
+
+#### Why it is a step — the SNR argument
+
+`S = 1.0` caps the WHOLE embedding at L2 norm 1.0 across 32 dimensions, so each component
+carries only ~1/sqrt(32) ≈ 0.177 of magnitude. Injected noise std is sigma (since
+noise_std = sigma·S):
+
+| eps | sigma = noise std | per-component SNR |
+|---|---|---|
+| 0.5 | 5.597 | 0.032 |
+| 1.0 | 3.075 | 0.058 |
+| 2.0 | 1.796 | 0.098 |
+| 4.0 | 1.164 | **0.152** |
+
+**Even at eps=4 the noise is ~6.6x the per-component signal.** The whole tested grid sits in
+the noise-dominated regime, so the attack sees nothing anywhere. Extrapolating sigma(eps),
+the attack would not begin recovering signal until sigma ≈ 0.18, around **eps ≈ 30–40** —
+far outside any defensible budget.
+
+**Paper claim:** *within every usable privacy budget, cut-layer noise fully blocks inversion;
+the privacy trade-off has no interior.* This is stronger than a graded curve — it means the
+utility cost of cut-layer noise buys a complete defense rather than a proportional one, and
+it pairs with §R10's finding that server DP-SGD buys none.
+
+⚠️ Note this is a property of the CLIP, not of epsilon alone: it holds because S=1.0 makes
+the signal small relative to sigma·S. A larger S would not change epsilon (§2.2 isocline)
+but would change where the step sits.
+
+#### Two reporting bugs fixed alongside
+
+- `group_attack_rows` matched only `d3_*` tags, so every `eps_*` checkpoint became its own
+  group of one — no pooling, no error bars. Now groups by epsilon point.
+- **There was no ASR-vs-epsilon figure at all.** `fig3` is a categorical arm comparison.
+  Added `fig5_attack_vs_epsilon` as the privacy companion to `fig1`, annotated so a reader
+  seeing a flat line does not assume a broken axis.
+
+### R11. `_print_sweep` KeyError destroyed a completed sweep — twice averted (2026-07-31)
+
+`_print_sweep` still referenced `inv_recon_rmse`, a key removed when the inversion driver
+was rewritten to score whole rows (§R7). `_print_report` was updated; `_print_sweep` was
+not, and only the single-checkpoint path was tested.
+
+**Consequence:** the overnight sweep completed all four checkpoints (~73 min) and then died
+in the *formatter*. With no incremental write, every result was lost, and `set -euo
+pipefail` killed `reproduce_all.sh` before `publish` — which is why that run produced no
+`results/`.
+
+✅ **Fixed twice over:** `run_sweep(out_path=...)` rewrites the CSV after every checkpoint
+(this saved all 4 rows on the very next run), and every cell in `_print_sweep` now tolerates
+a missing or non-numeric value, with a regression test on a row containing only a tag.
+**A report function must never be able to destroy the data it reports on.**
+
 ### R5. Two of the five headline `all_dp` runs stopped early
 
 Surfaced by the generated report's `early` column: `dedup_first / all_dp` shows **2/5** runs
