@@ -21,6 +21,8 @@ Partition mapping (set via --node-config or simulation config):
 
 Each silo's handlers module must expose exactly:
     get_emb(msg: Message, context: Context) -> Message
+    get_eval_emb(msg: Message, context: Context) -> Message
+    score(msg: Message, context: Context) -> Message
     apply_grad(msg: Message, context: Context) -> Message
 
 Adding a silo: drop in fl_client/silo_x/handlers.py with that same signature,
@@ -70,6 +72,16 @@ def get_emb(msg: Message, context: Context) -> Message:
 def get_eval_emb(msg: Message, context: Context) -> Message:
     """Forward to this node's silo-specific embedding handler."""
     return _handlers_for(context).get_eval_emb(msg, context)
+
+@app.query("score_split")
+def score(msg: Message, context: Context) -> Message:
+    """Forward to this node's scoring handler (label holder only).
+
+    The coordinator holds no ground truth, so it sends predicted
+    probabilities here and receives metrics back.
+    """
+    return _handlers_for(context).score(msg, context)
+
 
 @app.train("apply_gradients")
 def apply_grad(msg: Message, context: Context) -> Message:

@@ -358,21 +358,43 @@ class TestSendGradients:
 class TestCollectEvalPredictions:
     """_collect_eval_predictions: one distributed eval round -> (labels, probs)."""
 
-    def test_returns_flat_labels_and_probabilities(self, server_module) -> None:
+    def test_returns_probabilities_and_node_map(self, server_module) -> None:
+        """Post-refactor contract: the coordinator gets predictions and the
+        node map, NOT labels. It holds no ground truth."""
         from fl_server.top_model import TopModel
 
         grid = FakeGrid(node_ids=[11, 22])
         grid.labels = balanced_labels(n_rows=8, n_pos=3)
         top = TopModel(embedding_dim=4, hidden_dim=8)
 
-        labels, probs = server_module._collect_eval_predictions(
+        probs, node_pos_map = server_module._collect_eval_predictions(
             grid, [11, 22], top, split="val"
         )
 
-        assert labels.shape == (8,)
         assert probs.shape == (8,), "probs must be 1-D (squeezed), not (N, 1)"
         assert torch.all((probs >= 0.0) & (probs <= 1.0)), "sigmoid output out of range"
-        assert torch.equal(labels, grid.labels)
+        assert node_pos_map == {11: SILO_A_POS, 22: SILO_B_POS}
+
+    def test_coordinator_never_receives_eval_labels(self, server_module) -> None:
+        """THE neutral-coordinator invariant. Eval labels must not cross the
+        wire at all: if they did, the label-DP guarantee would hold for
+        training and silently leak the entire test split at evaluation."""
+        from fl_server.top_model import TopModel
+
+        grid = FakeGrid(node_ids=[11, 22])
+        grid.labels = balanced_labels(n_rows=8, n_pos=3)
+
+        server_module._collect_eval_predictions(
+            grid, [11, 22], TopModel(embedding_dim=4, hidden_dim=8), split="test"
+        )
+
+        for batch in grid.received:
+            for reply in batch:
+                arrays = reply.content.get("arrays", {})
+                assert "labels" not in arrays, (
+                    "a silo returned labels in its eval reply — the "
+                    "coordinator must never see ground truth"
+                )
 
     def test_puts_model_in_eval_mode(self, server_module) -> None:
         """Dropout must be off during eval, or the reported metric is noise."""
@@ -393,8 +415,8 @@ class TestCollectEvalPredictions:
         grid.emb_seed = 3  # same embeddings both calls, so only dropout could differ
         top = TopModel(embedding_dim=4, hidden_dim=8, dropout_rate=0.5)
 
-        _, probs1 = server_module._collect_eval_predictions(grid, [11, 22], top, "val")
-        _, probs2 = server_module._collect_eval_predictions(grid, [11, 22], top, "val")
+        probs1, _ = server_module._collect_eval_predictions(grid, [11, 22], top, "val")
+        probs2, _ = server_module._collect_eval_predictions(grid, [11, 22], top, "val")
         assert torch.allclose(probs1, probs2)
 
     def test_split_and_extra_config_reach_the_clients(self, server_module) -> None:
@@ -1381,3 +1403,99 @@ class TestEvalContentlessReply:
             server_module._collect_eval_predictions(
                 grid, [11, 22], TopModel(embedding_dim=EMB_DIM, hidden_dim=8), "val"
             )
+
+
+_LABEL_PRIMS = {
+    "mechanism": "randomized response",
+    "neighboring_relation": "label-adjacent (one student's label differs)",
+    "epsilon": 2.0,
+    "delta": 0.0,
+    "keep_prob": 0.8807970779778823,  # sigmoid(2.0)
+    "seed": 5,
+    "steps": 0,
+}
+
+
+@pytest.mark.dp
+class TestLabelChannelAtServer:
+    """The server consumes the label channel without composing it away."""
+
+    def test_get_embeddings_captures_label_primitives(self, server_module) -> None:
+        def responder(messages, call_index):
+            return [
+                emb_reply(pos=SILO_A_POS, src_node_id=11, label_privacy=_LABEL_PRIMS),
+                emb_reply(pos=SILO_B_POS, src_node_id=22),
+            ]
+
+        grid = FakeGrid(node_ids=[11, 22], responder=responder)
+        rd = server_module._get_embeddings(
+            grid=grid, node_ids=[11, 22], round_num=1, batch_seed=1, sample_rate=1.0
+        )
+        assert rd.label_privacy, "label primitives not collected"
+        assert float(rd.label_privacy["epsilon"]) == pytest.approx(2.0)
+
+    def test_server_applies_the_reported_keep_prob(self, server_module,
+                                                   run_server, monkeypatch) -> None:
+        """THE correction seam. The holder randomized its labels; if the server
+        does not apply the matching keep_prob, it trains on noisy labels as if
+        they were clean and calibrates to the corrupted base rate."""
+        seen = {}
+        real = server_module.TopModel.set_label_noise
+
+        def spy(self, keep_prob):
+            seen["keep_prob"] = keep_prob
+            return real(self, keep_prob)
+
+        monkeypatch.setattr(server_module.TopModel, "set_label_noise", spy)
+
+        grid = FakeGrid(node_ids=[11, 22])
+        grid.labels = balanced_labels(n_rows=8, n_pos=3)
+        grid.label_privacy_prims = _LABEL_PRIMS
+        run_server(grid=grid, **{"num-server-rounds": 2})
+
+        assert seen.get("keep_prob") == pytest.approx(_LABEL_PRIMS["keep_prob"])
+
+    def test_no_correction_when_label_dp_is_off(self, server_module, run_server,
+                                                monkeypatch) -> None:
+        calls = []
+        monkeypatch.setattr(
+            server_module.TopModel, "set_label_noise",
+            lambda self, keep_prob: calls.append(keep_prob),
+        )
+        run_server(**{"num-server-rounds": 2})
+        assert calls == [], "applied a label correction with label DP off"
+
+    def test_label_epsilon_reported_separately(self, server_module) -> None:
+        """Label epsilon appears as its own metric and is NOT folded into the
+        combined Gaussian number — different mechanism, different relation."""
+        metrics = server_module._epsilon_metrics(
+            _tracker(steps=5),
+            {SILO_A_POS: _tracker(steps=5)},
+            delta=1e-5,
+            label_primitives=_LABEL_PRIMS,
+        )
+        assert metrics["privacy/label_epsilon"] == pytest.approx(2.0)
+
+        without = server_module._epsilon_metrics(
+            _tracker(steps=5), {SILO_A_POS: _tracker(steps=5)}, delta=1e-5
+        )
+        assert metrics["privacy/combined_epsilon"] == pytest.approx(
+            without["privacy/combined_epsilon"]
+        ), "label epsilon leaked into the composed Gaussian epsilon"
+
+    def test_meta_records_the_label_channel(self, run_server) -> None:
+        import json
+
+        grid = FakeGrid(node_ids=[11, 22])
+        grid.labels = balanced_labels(n_rows=8, n_pos=3)
+        grid.label_privacy_prims = _LABEL_PRIMS
+        _, tmp_path = run_server(grid=grid, **{"num-server-rounds": 2,
+                                               "run-tag": "lbl"})
+
+        meta = json.loads(
+            (tmp_path / "experiments" / "checkpoints" / "lbl" / "meta.json").read_text()
+        )
+        assert "label_privacy" in meta, "label channel missing from meta.json"
+        assert float(meta["label_privacy"]["epsilon"]) == pytest.approx(2.0)
+        assert float(meta["label_privacy"]["delta"]) == 0.0
+        assert "label" in str(meta["label_privacy"]["neighboring_relation"]).lower()

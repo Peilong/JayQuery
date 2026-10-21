@@ -30,6 +30,8 @@ def emb_reply(
     budget_exhausted: bool = False,
     seed: int = 0,
     error: object | None = None,
+    include_labels: bool = True,
+    label_privacy: dict | None = None,
 ) -> Message:
     """Build one silo's reply to a `query.generate_embeddings` message.
 
@@ -55,7 +57,7 @@ def emb_reply(
     if n_total is not None:
         cfg["n-total"] = n_total
 
-    if pos == SILO_A_POS:
+    if pos == SILO_A_POS and include_labels:
         if labels is None:
             labels = (
                 torch.rand(n_rows, generator=gen) < 0.3
@@ -71,6 +73,8 @@ def emb_reply(
             cfg["n-neg"] = int(n_neg if n_neg is not None else (1 - labels).sum())
 
     content["config"] = ConfigRecord(cfg)
+    if label_privacy is not None and pos == SILO_A_POS:
+        content["label_privacy"] = ConfigRecord(dict(label_privacy))
     if privacy is not None:
         content["privacy"] = ConfigRecord(dict(privacy))
 
@@ -96,6 +100,7 @@ class FakeGrid:
         self.responder = responder or self.default_responder
         self.pushed: list[Message] = []
         self.sent: list[list[Message]] = []
+        self.received: list[list[Message]] = []
         self.send_and_receive_calls = 0
         self.push_calls = 0
         # Per-node bottom-model stand-ins, so repeated rounds can return
@@ -109,6 +114,8 @@ class FakeGrid:
         # Embeddings vary per call by default (each round is a different
         # Poisson batch). Pin this to get byte-identical replies every call.
         self.emb_seed: int | None = None
+        #: Label-DP primitives the holder reports, or None when label DP is off.
+        self.label_privacy_prims: dict | None = None
 
     # ── Grid surface ────────────────────────────────────────────────────────
 
@@ -119,7 +126,9 @@ class FakeGrid:
         self.send_and_receive_calls += 1
         msgs = list(messages)
         self.sent.append(msgs)
-        return self.responder(msgs, self.send_and_receive_calls)
+        replies = self.responder(msgs, self.send_and_receive_calls)
+        self.received.append(list(replies))
+        return replies
 
     def push_messages(self, messages):
         self.push_calls += 1
@@ -127,8 +136,55 @@ class FakeGrid:
 
     # ── default behavior ────────────────────────────────────────────────────
 
+    def score_reply(self, msg):
+        """Stand in for the label holder's score_split handler.
+
+        Computes REAL metrics with baselines.eval_utils against the grid's
+        true labels, so tests that assert on AUC/base_rate exercise the same
+        code the silo runs rather than canned numbers.
+        """
+        from baselines.eval_utils import (
+            compute_metrics,
+            recall_at_precision,
+            tune_threshold,
+        )
+
+        probs = msg.content["scores"]["probs"].numpy()
+        labels = self.labels if self.labels is not None else balanced_labels(len(probs))
+        y_true = labels.numpy()[: len(probs)]
+
+        cfg = msg.content["config"]
+        threshold = float(cfg.get("threshold", 0.5))
+        out_cfg = {"pos": SILO_A_POS, "split": str(cfg.get("split", "val"))}
+        if bool(cfg.get("tune", False)):
+            threshold = tune_threshold(
+                y_true, probs, objective=str(cfg.get("objective", "f1"))
+            )
+            out_cfg["tuned-threshold"] = float(threshold)
+
+        metrics = compute_metrics(y_true, probs, threshold=threshold)
+        for target in (0.6, 0.7, 0.8):
+            metrics[f"recall_at_precision_{int(target * 100)}"] = recall_at_precision(
+                y_true, probs, target
+            )
+        out_cfg["threshold"] = float(threshold)
+
+        return Message(
+            content=RecordDict({
+                "metrics": ConfigRecord({k: float(v) for k, v in metrics.items()}),
+                "config": ConfigRecord(out_cfg),
+            }),
+            src_node_id=msg.dst_node_id,
+        )
+
     def default_responder(self, messages, call_index):
         """Answer every outgoing query with a valid per-silo reply."""
+        msgs = list(messages)
+        if msgs and msgs[0].message_type == "query.score_split":
+            return [self.score_reply(m) for m in msgs]
+        # Eval replies carry NO labels: the real client stopped sending them
+        # when scoring moved into the label holder.
+        is_eval = bool(msgs) and msgs[0].message_type == "query.generate_eval_embeddings"
         exhausted = (
             self.exhaust_after is not None and call_index > self.exhaust_after
         )
@@ -151,6 +207,8 @@ class FakeGrid:
                     privacy=self.privacy_by_pos.get(pos),
                     budget_exhausted=exhausted,
                     seed=seed,
+                    include_labels=not is_eval,
+                    label_privacy=None if is_eval else self.label_privacy_prims,
                 )
             )
         return replies

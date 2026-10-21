@@ -36,5 +36,8 @@ def get_emb(msg: Message, context: Context) -> Message:
 def get_eval_emb(msg: Message, context: Context) -> Message:
     return common.generate_eval_embeddings(SPEC, msg, context)
 
+def score(msg: Message, context: Context) -> Message:
+    return common.score_split(SPEC, msg, context)
+
 def apply_grad(msg: Message, context: Context) -> Message:
     return common.apply_gradients(SPEC, msg, context)

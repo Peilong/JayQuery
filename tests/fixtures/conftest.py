@@ -196,15 +196,28 @@ class _FakeLoader:
         yield self.X, self.y
 
 
-def make_fake_load_fn(n_rows=20, input_dim=5, seed=0):
-    """Returns a load_fn(batch_size=...) -> (train_loader, None, None)
-    closure with fixed, seeded synthetic data."""
+def make_fake_load_fn(n_rows=20, input_dim=5, seed=0, n_val=12, n_test=10):
+    """Returns a load_fn(batch_size=...) -> (train, val, test) loader triple
+    with fixed, seeded synthetic data.
+
+    The val/test labels are exactly balanced rather than random so AUC is
+    always well defined — a split that drew one class would make
+    roc_auc_score undefined and the eval tests flaky.
+    """
     g = torch.Generator().manual_seed(seed)
     X = torch.randn(n_rows, input_dim, generator=g)
     y = (torch.rand(n_rows, generator=g) > 0.5).float()
+    X_val = torch.randn(n_val, input_dim, generator=g)
+    y_val = (torch.arange(n_val) % 2).float()
+    X_test = torch.randn(n_test, input_dim, generator=g)
+    y_test = (torch.arange(n_test) % 2).float()
 
     def load_fn(batch_size=64, **_kwargs):
-        return _FakeLoader(X, y), None, None
+        return (
+            _FakeLoader(X, y),
+            _FakeLoader(X_val, y_val),
+            _FakeLoader(X_test, y_test),
+        )
 
     return load_fn
 

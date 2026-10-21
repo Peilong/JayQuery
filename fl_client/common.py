@@ -24,6 +24,7 @@ from pathlib import Path
 import torch
 from flwr.app import Array, ArrayRecord, ConfigRecord, Context, Message, RecordDict
 
+from baselines.eval_utils import compute_metrics, recall_at_precision, tune_threshold
 from fl_client.silo_spec import SiloSpec
 from privacy.label_dp import LabelRRAccountant
 from privacy.noise_injection import add_gaussian_noise, clip_embedding_rows
@@ -380,6 +381,78 @@ def generate_embeddings(spec: SiloSpec, msg: Message, context: Context) -> Messa
         content["label_privacy"] = ConfigRecord(label_acct.to_dict())
     return Message(content=content, reply_to=msg)
 
+def score_split(spec: SiloSpec, msg: Message, context: Context) -> Message:
+    """Score the coordinator's predictions against TRUE labels, inside the silo.
+
+    Under the neutral-coordinator design the server holds no ground truth: it
+    forwards each split's predicted probabilities here, and the label holder
+    returns metrics. Threshold tuning happens here too, since it also needs
+    true labels.
+
+    This is unconditional, not gated on the label-DP flag. The coordinator
+    never seeing labels is a property of the architecture; gating it would
+    make the no-DP arm architecturally different from the DP arms and confound
+    the placement comparison.
+
+    Args:
+        spec: This silo's SiloSpec. Must be the label holder.
+        msg: Carries ``scores.probs`` plus a config with ``split`` and
+            optionally ``threshold``, ``tune`` and ``objective``.
+        context: Flower context.
+
+    Returns:
+        A reply carrying the metric suite, plus ``tuned-threshold`` in config
+        when tuning was requested.
+
+    Raises:
+        RuntimeError: If this silo holds no labels.
+        ValueError: If the prediction vector length does not match the split.
+    """
+    if not spec.sends_labels:
+        raise RuntimeError(
+            f"score_split called on silo '{spec.wandb_tag}', which holds no labels. "
+            "Only the label-holding silo can compute metrics."
+        )
+
+    cfg = msg.content.get("config")
+    split = str(cfg["split"]) if cfg is not None and "split" in cfg else "val"
+    _, y = _eval_set(spec, context, split)
+
+    probs = torch.from_numpy(msg.content["scores"]["probs"].numpy()).flatten()
+    if probs.numel() != y.numel():
+        raise ValueError(
+            f"prediction length {probs.numel()} != {split} label length {y.numel()} "
+            "— the coordinator and the label holder disagree on the split."
+        )
+
+    y_true, y_prob = y.numpy(), probs.numpy()
+    threshold = float(cfg.get("threshold", 0.5)) if cfg is not None else 0.5
+    out_cfg: dict = {"pos": spec.partition_id, "split": split}
+
+    if cfg is not None and bool(cfg.get("tune", False)):
+        threshold = tune_threshold(
+            y_true, y_prob, objective=str(cfg.get("objective", "f1"))
+        )
+        out_cfg["tuned-threshold"] = float(threshold)
+
+    metrics = compute_metrics(y_true, y_prob, threshold=threshold)
+    # Threshold-free operating points also need ground truth, so they are
+    # computed here rather than at the coordinator.
+    for p_target in (0.6, 0.7, 0.8):
+        metrics[f"recall_at_precision_{int(p_target * 100)}"] = recall_at_precision(
+            y_true, y_prob, p_target
+        )
+    out_cfg["threshold"] = float(threshold)
+
+    return Message(
+        content=RecordDict({
+            "metrics": ConfigRecord({k: float(v) for k, v in metrics.items()}),
+            "config": ConfigRecord(out_cfg),
+        }),
+        reply_to=msg,
+    )
+
+
 def generate_eval_embeddings(spec: SiloSpec, msg: Message, context: Context) -> Message:
     cfg = msg.content.get("config")
     restore_best = bool(cfg.get("restore-best", False)) if cfg is not None else False
@@ -404,9 +477,10 @@ def generate_eval_embeddings(spec: SiloSpec, msg: Message, context: Context) -> 
         # Match the training distribution the top model sees (clip, no noise).
         emb = clip_embedding_rows(emb, noise["max_norm"])
 
+    # NOTE: eval labels deliberately do NOT leave the silo. The coordinator
+    # scores nothing itself; it sends probabilities back via score_split and
+    # the label holder computes metrics against ground truth.
     arrays = {"embedding": Array(emb.numpy())}
-    if spec.sends_labels:
-        arrays["labels"] = Array(y.numpy())
 
     content = RecordDict(
         {"arrays": ArrayRecord(arrays), "config": ConfigRecord({"pos": spec.partition_id})}

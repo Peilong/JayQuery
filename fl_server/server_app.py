@@ -37,12 +37,11 @@ from logging import INFO, WARNING
 from pathlib import Path
 
 import torch
+import wandb
 from flwr.app import Array, ArrayRecord, ConfigRecord, Context, Message, RecordDict
 from flwr.common import log
 from flwr.serverapp import Grid, ServerApp
 
-import wandb
-from baselines.eval_utils import compute_metrics, recall_at_precision, tune_threshold
 from fl_server.top_model import TopModel
 from privacy.dp_wrapper import make_private_with_noise
 from privacy.privacy_accountant import (
@@ -124,6 +123,8 @@ def main(grid: Grid, context: Context) -> None:
     seed = int(context.run_config.get("seed", 42))
     combined_target = float(context.run_config.get("combined-target-epsilon", 3.0))
     server_tracker: PrivacyBudgetTracker | None = None
+    label_primitives: dict = {}
+    label_correction_applied = False
     client_trackers: dict[int, PrivacyBudgetTracker] = {}
     stopped_early = False
 
@@ -165,6 +166,17 @@ def main(grid: Grid, context: Context) -> None:
         )
         for pos, prims in rd.client_privacy.items():
             client_trackers[pos] = PrivacyBudgetTracker.from_dict(prims)
+        if rd.label_privacy:
+            label_primitives = rd.label_privacy
+            # The holder randomized its labels; match its flip rate so the loss
+            # describes what is actually observed.
+            if not label_correction_applied:
+                top_model.set_label_noise(float(label_primitives["keep_prob"]))
+                log(INFO, "label DP: eps=%.4f (delta=0, %s), keep_prob=%.4f",
+                    float(label_primitives["epsilon"]),
+                    label_primitives.get("neighboring_relation", "label-adjacent"),
+                    float(label_primitives["keep_prob"]))
+                label_correction_applied = True
 
         if rd.exhausted:
             log(WARNING, "Silo(s) %s out of privacy budget — stopping run at round %d",
@@ -270,7 +282,9 @@ def main(grid: Grid, context: Context) -> None:
 
         if server_tracker is not None:
             server_tracker.step()
-        eps_metrics = _epsilon_metrics(server_tracker, client_trackers, dp["delta"])
+        eps_metrics = _epsilon_metrics(
+            server_tracker, client_trackers, dp["delta"], label_primitives
+        )
         for k, v in eps_metrics.items():
             log(INFO, "Round %d — %s: %.4f", round_num, k, v)
 
@@ -367,28 +381,35 @@ def main(grid: Grid, context: Context) -> None:
     # below 0.5 and flag nobody; the tuned threshold recovers a usable operating
     # point. The 0.5 result is kept alongside for an honest before/after.
     thr_objective = str(context.run_config.get("threshold-objective", "f1"))
-    val_labels, val_probs = _collect_eval_predictions(grid, node_ids, final_eval, split="val")
-    tuned_threshold = tune_threshold(
-        val_labels.numpy(), val_probs.numpy(), objective=thr_objective
+    val_probs, val_pos_map = _collect_eval_predictions(
+        grid, node_ids, final_eval, split="val"
+    )
+    # The holder tunes on its own true labels and tells us which threshold it chose.
+    _, tuned_threshold = _score_at_label_holder(
+        grid, val_pos_map, val_probs, "val", tune=True, objective=thr_objective
     )
     log(INFO, "Tuned decision threshold on val (%s): %.4f (default 0.5)",
         thr_objective, tuned_threshold)
 
     # restore-best rides on this final query so clients checkpoint their best bottoms.
-    test_labels, test_probs = _collect_eval_predictions(
+    test_probs, test_pos_map = _collect_eval_predictions(
         grid, node_ids, final_eval, split="test",
         extra_cfg={"restore-best": True, "eps-tag": eps_tag},
     )
-    y_true, y_prob = test_labels.numpy(), test_probs.numpy()
-    test_metrics = compute_metrics(y_true, y_prob, threshold=tuned_threshold)
-    test_metrics_at_half = compute_metrics(y_true, y_prob, threshold=0.5)
-    # Threshold-free operating points — the deployment view (does it catch dropouts?).
+    # Two scorings of the SAME predictions: at the tuned operating point and at
+    # the naive 0.5, so the tuned-vs-default gain stays visible. Operating
+    # points (recall@precision) come back inside these metrics, since they
+    # need ground truth too.
+    test_metrics, _ = _score_at_label_holder(
+        grid, test_pos_map, test_probs, "test", threshold=tuned_threshold
+    )
+    test_metrics_at_half, _ = _score_at_label_holder(
+        grid, test_pos_map, test_probs, "test", threshold=0.5
+    )
     op_points = {
-        f"recall_at_precision_{int(p * 100)}": recall_at_precision(y_true, y_prob, p)
-        for p in (0.6, 0.7, 0.8)
+        k: v for k, v in test_metrics.items() if k.startswith("recall_at_precision_")
     }
     test_metrics["tuned_threshold"] = tuned_threshold
-    test_metrics.update(op_points)
     log(INFO, "Test @tuned=%.3f: recall=%.3f prec=%.3f f1=%.3f | @0.5: recall=%.3f | "
         "AP=%.3f recall@prec0.7=%.3f",
         tuned_threshold, test_metrics["recall"], test_metrics["precision"],
@@ -408,7 +429,10 @@ def main(grid: Grid, context: Context) -> None:
         "best_round": best_round,
         "tuned_threshold": tuned_threshold,
         "threshold_objective": thr_objective,
-        "epsilon_spent": _epsilon_metrics(server_tracker, client_trackers, dp["delta"]),
+        "epsilon_spent": _epsilon_metrics(
+            server_tracker, client_trackers, dp["delta"], label_primitives
+        ),
+        "label_privacy": label_primitives or None,
         "metrics": test_metrics,
         "metrics_at_0.5": test_metrics_at_half,
     }
@@ -464,9 +488,19 @@ def _epsilon_metrics(
     server_tracker: PrivacyBudgetTracker | None,
     client_trackers: dict[int, PrivacyBudgetTracker],
     delta: float,
+    label_primitives: dict | None = None,
 ) -> dict[str, float]:
-    """Per-source cumulative epsilons plus the composed system total."""
+    """Per-source cumulative epsilons plus the composed system total.
+
+    ``label_primitives`` is reported as its own key and deliberately excluded
+    from ``combined_epsilon``: randomized response is pure epsilon-DP over a
+    label-adjacent neighboring relation, while the composition covers
+    subsampled-Gaussian mechanisms over an example-adjacent one. A single
+    number spanning both would bound neither.
+    """
     metrics: dict[str, float] = {}
+    if label_primitives:
+        metrics["privacy/label_epsilon"] = float(label_primitives["epsilon"])
     if server_tracker is not None:
         metrics["privacy/server_epsilon"] = server_tracker.get_epsilon()
     for pos, tracker in sorted(client_trackers.items()):
@@ -525,6 +559,9 @@ class _RoundData:
     n_neg: int = 0
     n_pos: int = 0
     client_privacy: dict[int, dict] = field(default_factory=dict)
+    #: Label-DP primitives from the label holder (pure eps-DP, label-adjacent).
+    #: Kept apart from client_privacy so it is never Gaussian-composed.
+    label_privacy: dict = field(default_factory=dict)
     exhausted: list[int] = field(default_factory=list)
 
 
@@ -570,6 +607,8 @@ def _get_embeddings(
         rd.node_pos_map[reply.metadata.src_node_id] = pos
         if "privacy" in reply.content:
             rd.client_privacy[pos] = dict(reply.content["privacy"])
+        if "label_privacy" in reply.content:
+            rd.label_privacy = dict(reply.content["label_privacy"])
         if bool(cfg.get("budget-exhausted", False)):
             rd.exhausted.append(pos)
             continue
@@ -647,12 +686,13 @@ def _collect_eval_predictions(
     top_model: TopModel,
     split: str,
     extra_cfg: dict | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Run one distributed eval round and return (labels, probs) as 1-D tensors.
+) -> tuple[torch.Tensor, dict[int, int]]:
+    """Run one distributed eval round and return (probs, node_pos_map).
 
     Both silos forward their `split` embeddings; the server scores them with
-    `top_model`. Separated from metric computation so a caller can, e.g., tune a
-    decision threshold on the returned probabilities before scoring another split.
+    `top_model` into probabilities. It does NOT compute metrics: it holds no
+    ground truth. The probabilities go back to the label holder via
+    :func:`_score_at_label_holder`, which owns the true labels.
 
     Args:
         extra_cfg: Optional extra config merged into the query (e.g.
@@ -675,7 +715,7 @@ def _collect_eval_predictions(
     replies = grid.send_and_receive(messages)
     log(INFO, "\tReceived %d/%d results", len(replies), len(messages))
 
-    emb_a = emb_b = labels = None
+    emb_a = emb_b = None
     node_pos_map: dict[int, int] = {}
 
     for reply in replies:
@@ -687,11 +727,10 @@ def _collect_eval_predictions(
 
         if pos == _SILO_A_POS:
             emb_a = emb
-            labels = torch.from_numpy(reply.content["arrays"]["labels"].numpy())
         elif pos == _SILO_B_POS:
             emb_b = emb
 
-    if emb_a is None or emb_b is None or labels is None:
+    if emb_a is None or emb_b is None:
         raise RuntimeError(
             "Failed to collect embeddings from both silos. "
             f"Got positions: {list(node_pos_map.values())}"
@@ -701,9 +740,9 @@ def _collect_eval_predictions(
     with torch.no_grad():
         logits = top_model(emb_a, emb_b).squeeze(1)
     probs = torch.sigmoid(logits)
-    log(INFO, "probs: min=%.4f max=%.4f mean=%.4f | frac>0.5=%.4f | labels mean=%.4f",
-        probs.min(), probs.max(), probs.mean(), (probs > 0.5).float().mean(), labels.float().mean())
-    return labels, probs
+    log(INFO, "probs: min=%.4f max=%.4f mean=%.4f | frac>0.5=%.4f",
+        probs.min(), probs.max(), probs.mean(), (probs > 0.5).float().mean())
+    return probs, node_pos_map
 
 
 def _run_eval(
@@ -715,5 +754,77 @@ def _run_eval(
     threshold: float = 0.5,
 ) -> dict:
     """Distributed eval round → metrics dict at the given decision `threshold`."""
-    labels, probs = _collect_eval_predictions(grid, node_ids, top_model, split, extra_cfg)
-    return compute_metrics(labels.numpy(), probs.numpy(), threshold=threshold)
+    probs, node_pos_map = _collect_eval_predictions(
+        grid, node_ids, top_model, split, extra_cfg
+    )
+    metrics, _ = _score_at_label_holder(
+        grid, node_pos_map, probs, split, threshold=threshold
+    )
+    return metrics
+
+
+def _score_at_label_holder(
+    grid: Grid,
+    node_pos_map: dict[int, int],
+    probs: torch.Tensor,
+    split: str,
+    threshold: float = 0.5,
+    tune: bool = False,
+    objective: str = "f1",
+) -> tuple[dict, float]:
+    """Ship predictions to the label-holding silo and get metrics back.
+
+    The coordinator is neutral: it never receives true labels, so every metric
+    -- and the tuned decision threshold, which also needs ground truth -- is
+    computed inside the label holder. This holds whether or not the label-DP
+    channel is on; gating it would make the no-DP arm architecturally
+    different from the DP arms and confound the placement comparison.
+
+    Args:
+        grid: Flower Grid.
+        node_pos_map: node_id -> partition-id, from the eval round.
+        probs: Predicted positive probabilities for this split.
+        split: "val" or "test".
+        threshold: Decision threshold to score at (ignored when tuning).
+        tune: Ask the holder to pick the threshold on this split first.
+        objective: Tuning objective passed through to tune_threshold.
+
+    Returns:
+        (metrics, threshold_used).
+
+    Raises:
+        RuntimeError: If the label holder is absent or returns no metrics.
+    """
+    holder = [nid for nid, pos in node_pos_map.items() if pos == _SILO_A_POS]
+    if not holder:
+        raise RuntimeError(
+            f"No label-holding silo (pos {_SILO_A_POS}) among {node_pos_map} — "
+            "cannot score without ground truth."
+        )
+
+    cfg = {"split": split, "threshold": float(threshold), "objective": objective}
+    if tune:
+        cfg["tune"] = True
+
+    replies = grid.send_and_receive([
+        Message(
+            content=RecordDict({
+                "scores": ArrayRecord({"probs": Array(probs.detach().cpu().numpy())}),
+                "config": ConfigRecord(cfg),
+            }),
+            message_type="query.score_split",
+            dst_node_id=holder[0],
+        )
+    ])
+
+    for reply in replies:
+        if not reply.has_content() or "metrics" not in reply.content:
+            continue
+        metrics = {k: float(v) for k, v in reply.content["metrics"].items()}
+        used = float(reply.content["config"].get("tuned-threshold", threshold))
+        return metrics, used
+
+    raise RuntimeError(
+        f"Label holder returned no metrics for split={split!r}; "
+        "evaluation cannot proceed without ground truth."
+    )

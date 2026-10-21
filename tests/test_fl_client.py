@@ -647,3 +647,122 @@ class TestLabelDPChannel:
             "n-pos equals the TRUE positive count — counts were taken from the "
             "clean labels, leaking the true base rate to the coordinator"
         )
+
+
+@pytest.mark.dp
+class TestScoreSplitAtLabelHolder:
+    """Evaluation moves into the silo: the coordinator scores nothing itself.
+
+    The coordinator holds no true labels under the neutral-coordinator design,
+    so it ships probabilities to the label holder and gets metrics back. This
+    is unconditional, not gated on label DP: if the no-DP arm leaked eval
+    labels while the RR arm did not, the arms would differ architecturally and
+    the placement comparison would be confounded.
+    """
+
+    def _msg(self, probs, split="val", **cfg):
+        from flwr.app import Array, ArrayRecord, ConfigRecord, Message, RecordDict
+
+        return Message(
+            content=RecordDict({
+                "scores": ArrayRecord({"probs": Array(probs.numpy())}),
+                "config": ConfigRecord({"split": split, **cfg}),
+            })
+        )
+
+    def _ctx(self, fresh_context):
+        return fresh_context(run_config={"track-wandb": False})
+
+    def test_returns_metric_suite(self, common_module, fake_spec_factory,
+                                  fresh_context):
+        spec = fake_spec_factory(sends_labels=True)
+        ctx = self._ctx(fresh_context)
+        X, y = common_module._eval_set(spec, ctx, "val")
+
+        probs = torch.rand(len(y))
+        reply = common_module.score_split(spec, self._msg(probs), ctx)
+        metrics = reply.content["metrics"]
+
+        for key in ("auc_roc", "recall", "precision", "base_rate"):
+            assert key in metrics, f"missing {key}"
+        assert float(metrics["base_rate"]) == pytest.approx(float(y.mean()))
+
+    def test_scores_against_TRUE_labels_not_noisy_ones(
+        self, common_module, fake_spec_factory, fresh_context
+    ):
+        """THE point of the refactor. Even with label DP on, the reported AUC
+        must be measured against ground truth held in the silo — scoring
+        against the randomized labels would understate utility and make every
+        DP arm look worse than it is."""
+        spec = fake_spec_factory(sends_labels=True)
+        ctx = fresh_context(run_config={
+            "track-wandb": False, "label-dp-enabled": True,
+            "label-dp-epsilon": 0.05, "label-dp-seed": 3,
+        })
+        X, y = common_module._eval_set(spec, ctx, "val")
+
+        # A perfect ranker w.r.t. the TRUE labels.
+        probs = y.clone()
+        reply = common_module.score_split(spec, self._msg(probs), ctx)
+        assert float(reply.content["metrics"]["auc_roc"]) == pytest.approx(1.0), (
+            "perfect predictions of the true labels did not score AUC 1.0 — "
+            "metrics are being computed against the noisy labels"
+        )
+
+    def test_honors_the_requested_threshold(self, common_module,
+                                            fake_spec_factory, fresh_context):
+        spec = fake_spec_factory(sends_labels=True)
+        ctx = self._ctx(fresh_context)
+        X, y = common_module._eval_set(spec, ctx, "val")
+        probs = torch.full((len(y),), 0.4)
+
+        strict = common_module.score_split(spec, self._msg(probs, threshold=0.9), ctx)
+        loose = common_module.score_split(spec, self._msg(probs, threshold=0.1), ctx)
+        assert float(strict.content["metrics"]["pred_pos_rate"]) == 0.0
+        assert float(loose.content["metrics"]["pred_pos_rate"]) == 1.0
+
+    def test_can_tune_the_threshold_in_the_silo(self, common_module,
+                                                fake_spec_factory, fresh_context):
+        """Threshold tuning needs true labels, so it must happen here too --
+        not at the coordinator."""
+        spec = fake_spec_factory(sends_labels=True)
+        ctx = self._ctx(fresh_context)
+        X, y = common_module._eval_set(spec, ctx, "val")
+        probs = (y * 0.3 + 0.1).clamp(0, 1)
+
+        reply = common_module.score_split(
+            spec, self._msg(probs, tune=True, objective="f1"), ctx
+        )
+        cfg = reply.content["config"]
+        assert "tuned-threshold" in cfg
+        thr = float(cfg["tuned-threshold"])
+        assert 0.0 <= thr <= 1.0
+
+    def test_split_selects_val_or_test(self, common_module, fake_spec_factory,
+                                       fresh_context):
+        spec = fake_spec_factory(sends_labels=True)
+        ctx = self._ctx(fresh_context)
+        _, y_test = common_module._eval_set(spec, ctx, "test")
+        probs = torch.rand(len(y_test))
+
+        reply = common_module.score_split(spec, self._msg(probs, split="test"), ctx)
+        assert float(reply.content["metrics"]["base_rate"]) == pytest.approx(
+            float(y_test.mean())
+        )
+
+    def test_non_label_silo_refuses(self, common_module, fake_spec_factory,
+                                   fresh_context):
+        """Only the label holder can score. A silent empty reply here would
+        strand the server waiting for metrics that never come."""
+        spec = fake_spec_factory(sends_labels=False)
+        ctx = self._ctx(fresh_context)
+        with pytest.raises(RuntimeError, match="label"):
+            common_module.score_split(spec, self._msg(torch.rand(4)), ctx)
+
+    def test_length_mismatch_is_rejected(self, common_module, fake_spec_factory,
+                                         fresh_context):
+        """Misaligned probs vs labels would silently score the wrong students."""
+        spec = fake_spec_factory(sends_labels=True)
+        ctx = self._ctx(fresh_context)
+        with pytest.raises(ValueError, match="length"):
+            common_module.score_split(spec, self._msg(torch.rand(3)), ctx)
