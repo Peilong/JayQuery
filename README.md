@@ -83,8 +83,21 @@ python scripts/prepare_silos.py     # default module CCC_2014J
 # --dedup-rule {first,best,worst} and --withdrawal-cutoff-day are documented in
 # CLAUDE.md step 5 / docs/action_plan.md §E-a and §F.
 
-# 6. Train VFL (SuperLink + 2 SuperNodes, submits the run)
-python run_deployment.py --rounds 50
+# 6. Train VFL — two modes (identical code, ~10x speed difference)
+
+#   6a. SIMULATION — fast (~0.75 s/round). Use for sweeps and iteration.
+#       num-supernodes=2 is REQUIRED (default is 10; the ServerApp needs exactly 2).
+flwr run . local --federation-config "num-supernodes=2" \
+    --run-config "processed-dir='data/processed/dedup_first' num-server-rounds=50"
+
+#   6b. DEPLOYMENT — real SuperLink + 2 SuperNodes (~8 s/round).
+#       Use for results reported in the paper.
+python scripts/run_deployment.py --rounds 50 \
+    --run-config "processed-dir='data/processed/dedup_first'"
+
+# Iterate in simulation, report from deployment; never mix the two in one
+# comparison table (different RNG streams = different draw, same distribution).
+# Full explanation + gotchas: CLAUDE.md step 6.
 
 # 7. Run all experiments (reproduces paper results)
 bash scripts/reproduce_all.sh

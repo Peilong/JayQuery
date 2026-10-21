@@ -119,20 +119,50 @@ def _report(name: str, norms: torch.Tensor, *, epsilon: float, delta: float) -> 
     return median
 
 
+def _dims_from_ckpt(path: str | None, first_key: str, embed_key: str | None) -> dict | None:
+    """Read (input_dim, hidden_dim, embedding_dim) off a checkpoint's Linear weights.
+
+    CLI defaults cannot be trusted here: a checkpoint trained with a non-default
+    `hidden-dim-a/b` will not load into a default-constructed model, and the failure is a
+    wall of shape-mismatch errors rather than anything actionable. Returns None when no
+    checkpoint is given (fresh-weights mode).
+    """
+    if not path:
+        return None
+    state = torch.load(Path(path), map_location="cpu", weights_only=False)
+    if isinstance(state, dict) and "state_dict" in state:
+        state = state["state_dict"]
+    linears = [(k, v) for k, v in state.items()
+               if k.endswith(".weight") and getattr(v, "ndim", 0) == 2]
+    if not linears:
+        raise ValueError(f"no Linear weights in {path}")
+    first = dict(linears)[first_key] if first_key in dict(linears) else linears[0][1]
+    emb = dict(linears)[embed_key] if (embed_key and embed_key in dict(linears)) \
+        else linears[-1][1]
+    return {
+        "input_dim": int(first.shape[1]),
+        "hidden_dim": int(first.shape[0]),
+        "embedding_dim": int(emb.shape[0]),
+    }
+
+
 def _build_models(args: argparse.Namespace) -> tuple[torch.nn.Module, torch.nn.Module]:
-    """Construct BottomModelA / BottomModelB with the same kwargs the handlers use."""
+    """Construct BottomModelA / BottomModelB, sized from the checkpoints when given."""
     from silo_a.bottom_model_a import BottomModelA
     from silo_b.bottom_model_b import BottomModelB
 
-    model_a = BottomModelA(
-        input_dim=args.input_dim_a,
-        embedding_dim=args.embedding_dim,
-        dropout_rate=args.dropout_rate,
-    )
-    model_b = BottomModelB(
-        input_dim=args.input_dim_b,
-        embedding_dim=args.embedding_dim,
-    )
+    dims_a = _dims_from_ckpt(args.checkpoint_a, "encoder.0.weight", None)
+    dims_b = _dims_from_ckpt(args.checkpoint_b, "layer1.0.weight", "embed.weight")
+
+    model_a = BottomModelA(**(dims_a or {
+        "input_dim": args.input_dim_a,
+        "embedding_dim": args.embedding_dim,
+        "dropout_rate": args.dropout_rate,
+    }))
+    model_b = BottomModelB(**(dims_b or {
+        "input_dim": args.input_dim_b,
+        "embedding_dim": args.embedding_dim,
+    }))
     return model_a, model_b
 
 
@@ -147,6 +177,11 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--checkpoint-a", default=None, help="Optional trained Bottom Model A weights.")
     parser.add_argument("--checkpoint-b", default=None, help="Optional trained Bottom Model B weights.")
+    parser.add_argument(
+        "--processed-dir",
+        default="data/processed",
+        help="Silo data directory — point at a variant, e.g. data/processed/dedup_first.",
+    )
     parser.add_argument("--epsilon", type=float, default=1.0, help="Epsilon for the illustrative sigma column.")
     parser.add_argument("--delta", type=float, default=1e-5, help="Delta for the illustrative sigma column.")
     args = parser.parse_args()
@@ -167,8 +202,8 @@ def main() -> None:
     status_a = _maybe_load_weights(model_a, args.checkpoint_a, "bottom_model_a")
     status_b = _maybe_load_weights(model_b, args.checkpoint_b, "bottom_model_b")
 
-    train_a, _, _ = load_silo_a(batch_size=args.batch_size)
-    train_b, _, _ = load_silo_b(batch_size=args.batch_size)
+    train_a, _, _ = load_silo_a(processed_dir=args.processed_dir, batch_size=args.batch_size)
+    train_b, _, _ = load_silo_b(processed_dir=args.processed_dir, batch_size=args.batch_size)
     X_a = _collect_X(train_a)
     X_b = _collect_X(train_b)
 
@@ -189,11 +224,23 @@ def main() -> None:
         _report(f"{silo} [eval mode / dropout OFF — baseline]", norms_eval, epsilon=args.epsilon, delta=args.delta)
 
     print(
-        "\nHow to choose S:\n"
-        "  - Start S near the median (or p75) of the TRAIN-mode norms for each silo.\n"
-        "  - Lower S = less noise but more clipping; treat S as a hyperparameter to sweep\n"
-        "    alongside epsilon and confirm against AUC.\n"
-        "  - Set per-silo S via SiloSpec.cut_noise_config_fn — the two silos differ.\n"
+        "\nHow to choose S  ** MEASURED 2026-07-30 — read this before using the numbers above **\n"
+        "  - SMALL S WINS for the cut layer. Measured at eps=1.0, T=200, 3 seeds:\n"
+        "        S=1.0 (all rows clipped)  -> AUC 0.8453  (sd 0.004)\n"
+        "        S=median (5.6/4.0)        -> AUC 0.6022  (sd 0.066)\n"
+        "        S=p75    (6.7/6.3)        -> AUC 0.5995  (sd 0.058)\n"
+        "    Moving to the median costs -0.243 AUC and inflates variance ~16x.\n"
+        "  - WHY the median heuristic FAILS here (it is gradient-clipping intuition applied\n"
+        "    where it does not hold): the embedding magnitude SATURATES at its natural row\n"
+        "    norm (~4.3) while noise keeps scaling linearly with S. So SNR = min(S, norm)/(sigma*S):\n"
+        "        S <= min row norm -> SNR = 1/sigma           (flat, best)\n"
+        "        S >  row norm     -> SNR = norm/(sigma*S)    (falls as S grows)\n"
+        "    An oversized S is pure waste — the same failure mode as an oversized gradient\n"
+        "    clip, in the opposite direction from what the percentiles suggest.\n"
+        "  - The percentile table above is still useful for KNOWING where the norms sit;\n"
+        "    just do not read it as 'set S here'.\n"
+        "  - Set per-silo S via SiloSpec.cut_noise_config_fn (run-config keys\n"
+        "    cut-noise-max-norm-a / -b) — the two silos differ.\n"
         "  - These are UNTRAINED norms unless you passed checkpoints; re-measure after a\n"
         "    no-DP run for the values you actually ship."
     )

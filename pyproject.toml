@@ -77,7 +77,7 @@ clientapp = "fl_client.client_app:app"
 
 [tool.flwr.app.config]
 pos-weight = 0 # -1 = auto (n_neg/n_pos), 0 = disabled, >0 = explicit override
-num-server-rounds = 150
+num-server-rounds = 200   # section K3 settled horizon — every arm is within its noise bar here
 learning-rate = 0.0005
 embedding-dim = 32
 input-dim-a = 18
@@ -88,7 +88,11 @@ hidden-dim-top = 32
 dropout-a = 0.2
 dropout-b = 0.2
 dropout-top = 0.237
-processed-dir = "data/processed"
+# The three reported cohorts live in data/processed/dedup_{first,best,worst}. The bare
+# data/processed/ directory still holds LEGACY single-module pickles (1,843 train rows vs
+# 20,411), so defaulting there silently trained every un-overridden run on 11x less data.
+# dedup_first is the primary variant (docs/action_plan.md section E-a).
+processed-dir = "data/processed/dedup_first"
 run-tag = ""
 seed = 42
 batch-sample-rate = 0.05
@@ -100,13 +104,22 @@ cut-noise-enabled = true
 cut-noise-target-epsilon = 1.0
 cut-noise-delta = 1e-5
 cut-noise-max-norm = 1.0
-combined-target-epsilon = 3.0
+# See scripts/measure_embedding_norms.py and docs/action_plan.md.
+cut-noise-max-norm-a = 1.0
+cut-noise-max-norm-b = 1.0
+# Backstop on the COMPOSED epsilon across all sources. This is a guardrail, not a
+# scientific parameter — but at 3.0 it bound during the epsilon sweep: the eps=4 arm hit
+# composed 2.981 and all 5 seeds stopped at round ~50 of 200, making that point measure
+# under-training rather than noise (FINDINGS.md §2h). Raised so it does not bind across
+# the swept range (two silos at eps=4 compose to at most ~8); the composed epsilon each
+# run ACTUALLY spent is recorded in meta.json and reported, so nothing is hidden by this.
+combined-target-epsilon = 10.0
 track-wandb = true
 wandb-log-interval = 25
 wandb-entity = "jayquery"
 wandb-project = "jayquery-vfl"
 wandb-run-name = ""
-wandb-group = "test-v1-data"
+wandb-group = "test-post-privacy"
 wandb-sweep-tag = ""
 wandb-mode = "online"
 loss-ema-alpha = 0.1

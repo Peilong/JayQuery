@@ -6,6 +6,15 @@ Generalized from the original client_a_new.py. Behavior is unchanged from
 that file for Silo A; Silo B (and any future silo) gets the same logic via
 its own SiloSpec.
 
+Deterministic forward replay:
+    apply_gradients must reproduce the exact embedding generate_embeddings sent, or the
+    injected upstream gradient lands on a different graph. Both wrap their forward in
+    torch.random.fork_rng() re-seeded from a per-round integer (_forward_seed), which is
+    process- and scheduler-independent. This replaced snapshotting the process-global RNG
+    state, which held under deployment (persistent SuperNode process) but broke under
+    simulation's Ray actor pool — every apply_gradients tripped the replay guard, so the
+    bottom models silently never trained while the top model kept learning.
+
 Best-state checkpointing (added):
     The server drives it. On a round whose val/auc set a new best it flags the
     gradient message with `save-best`; apply_gradients then snapshots THIS
@@ -18,6 +27,7 @@ Best-state checkpointing (added):
 
 import io
 import json
+import logging
 import time
 from pathlib import Path
 
@@ -33,8 +43,22 @@ from contextlib import contextmanager
 
 
 def _build_model(spec: SiloSpec, context: Context) -> torch.nn.Module:
-    """Construct the silo's model, restoring weights from context.state if present."""
-    model = spec.model_cls(**spec.model_kwargs_fn(context))
+    """Construct the silo's model, restoring weights from context.state if present.
+
+    Initialization is seeded from the run-config ``seed`` (offset per silo) so that a
+    given seed reproduces a given run — CLAUDE.md coding standard 4. Weight init was
+    previously left to whatever the process RNG happened to be, which made identical
+    configs differ by ~0.005 AUC and put an irreducible floor under every variance
+    measurement.
+
+    The seeding is scoped with ``fork_rng`` deliberately: seeding *globally* here would
+    reset the RNG on every message, so the cut-layer noise would draw the same values
+    every round. Only construction is made deterministic; the noise stream is untouched.
+    """
+    seed = int(context.run_config.get("seed", 42))
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(seed * 7919 + int(spec.partition_id))
+        model = spec.model_cls(**spec.model_kwargs_fn(context))
     if (rec := context.state.get("model")) is not None:
         model.load_state_dict(rec.to_torch_state_dict())
     return model
@@ -65,30 +89,68 @@ def _loaders(spec: SiloSpec, context: Context) -> tuple:
     )
 
 
-def _full_trainset(spec: SiloSpec, context: Context) -> tuple[torch.Tensor, torch.Tensor]:
-    """Materialize the silo's entire training set as one (X, y) pair.
+# Materialized splits, keyed by the run-config values that determine them. The silo
+# data is read-only and every handler re-materializes the same tensors (twice per round
+# for the train split: generate_embeddings + apply_gradients), so this is a pure win.
+# Process-local, so a regenerated dataset is picked up on the next run.
+#
+# INVARIANT: callers must treat the returned tensors as READ-ONLY — they are shared
+# across rounds, so an in-place edit would silently corrupt every later round. Current
+# callers only index (`X[idx]`) or rebind, both of which copy.
+_SPLIT_CACHE: dict[tuple, tuple[torch.Tensor, torch.Tensor]] = {}
 
-    Requires load_fn's train_loader to be deterministic (shuffle=False or a
-    fixed sampler) — row order must match across rounds for apply_gradients
-    to reproduce the embedding sent in generate_embeddings.
+
+def _split_cache_key(spec: SiloSpec, context: Context, split: str) -> tuple:
+    """Identity of a materialized split: the loader, its inputs, and which split.
+
+    ``load_fn`` is part of the key because it — not ``wandb_tag`` — is what actually
+    determines the rows. Two specs can share a tag while loading different data (every
+    test that builds a fake loader does exactly this), and keying on the tag alone
+    silently served one silo's cached tensors to another.
     """
-    train_loader, _, _ = _loaders(spec, context)
-    xs, ys = [], []
-    for x, y in train_loader:
-        xs.append(x)
-        ys.append(y)
-    return torch.cat(xs).float(), torch.cat(ys).float()
+    rc = context.run_config
+    return (
+        spec.load_fn,
+        spec.wandb_tag,
+        str(rc.get("processed-dir", "data/processed")),
+        int(rc.get("batch-size", 64)),
+        int(rc.get("seed", 42)),
+        split,
+    )
 
-def _eval_set(
-    spec: SiloSpec, context: Context, split: str = "val"
-) -> tuple[torch.Tensor, torch.Tensor]:
-    _, val_loader, test_loader = _loaders(spec, context)
-    loader = test_loader if split == "test" else val_loader
+
+def _materialize(loader) -> tuple[torch.Tensor, torch.Tensor]:  # noqa: ANN001
+    """Concatenate a DataLoader into one (X, y) float pair."""
     xs, ys = [], []
     for x, y in loader:
         xs.append(x)
         ys.append(y)
     return torch.cat(xs).float(), torch.cat(ys).float()
+
+
+def _full_trainset(spec: SiloSpec, context: Context) -> tuple[torch.Tensor, torch.Tensor]:
+    """Materialize the silo's entire training set as one (X, y) pair.
+
+    Requires load_fn's train_loader to be deterministic (shuffle=False or a
+    fixed sampler) — row order must match across rounds for apply_gradients
+    to reproduce the embedding sent in generate_embeddings. That same determinism
+    is what makes caching safe here.
+    """
+    key = _split_cache_key(spec, context, "train")
+    if key not in _SPLIT_CACHE:
+        train_loader, _, _ = _loaders(spec, context)
+        _SPLIT_CACHE[key] = _materialize(train_loader)
+    return _SPLIT_CACHE[key]
+
+
+def _eval_set(
+    spec: SiloSpec, context: Context, split: str = "val"
+) -> tuple[torch.Tensor, torch.Tensor]:
+    key = _split_cache_key(spec, context, split)
+    if key not in _SPLIT_CACHE:
+        _, val_loader, test_loader = _loaders(spec, context)
+        _SPLIT_CACHE[key] = _materialize(test_loader if split == "test" else val_loader)
+    return _SPLIT_CACHE[key]
 
 # ── Configs ───────────────────────────────────────────────────
 
@@ -121,6 +183,29 @@ def _batch_indices(n: int, cfg: ConfigRecord | None) -> tuple[torch.Tensor, floa
     if idx.numel() == 0:
         raise RuntimeError(f"Empty Poisson batch (q={q}, n={n}) — raise batch-sample-rate")
     return idx, q
+
+
+def _forward_seed(cfg: ConfigRecord | None, context: Context) -> int:
+    """Deterministic seed for this round's client forward pass.
+
+    ``apply_gradients`` must reproduce the exact dropout mask ``generate_embeddings``
+    used, or the injected upstream gradient is applied to a different computation
+    graph. Deriving that from an integer seed (re-applied inside ``torch.random.fork_rng``)
+    is process- and scheduler-independent, unlike snapshotting the global RNG state:
+    the global-state approach held in deployment, where each SuperNode is a persistent
+    process, but broke under simulation's Ray actor pool — every ``apply_gradients``
+    tripped the replay guard, so the bottom models silently never trained.
+
+    Args:
+        cfg: Round config from the server (supplies ``server-round``).
+        context: Flower context (supplies the run-level ``seed``).
+
+    Returns:
+        A non-negative seed under 2**31, unique per (run seed, round).
+    """
+    base = int(context.run_config.get("seed", 42))
+    rnd = int(cfg["server-round"]) if cfg is not None and "server-round" in cfg else 0
+    return (base * 1_000_003 + rnd) % (2**31 - 1)
 
 
 def _load_tracker(context: Context) -> PrivacyBudgetTracker | None:
@@ -282,16 +367,17 @@ def generate_embeddings(spec: SiloSpec, msg: Message, context: Context) -> Messa
             })
             return Message(content=content, reply_to=msg)
 
-    # Snapshot RNG immediately before the forward so apply_gradients can
-    # reproduce the same dropout mask.
-    rng = torch.get_rng_state()
+    # Seed the forward inside a forked RNG so apply_gradients can reproduce the same
+    # dropout mask from a plain integer (see _forward_seed). fork_rng leaves the
+    # surrounding global RNG untouched.
+    fwd_seed = _forward_seed(cfg, context)
     t0 = time.perf_counter()
-    embedding = model(X[idx])
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(fwd_seed)
+        embedding = model(X[idx])
     fwd_time = time.perf_counter() - t0
 
-    buf = io.BytesIO()
-    torch.save(rng, buf)
-    context.state["rng"] = ConfigRecord({"serialized": buf.getvalue()})
+    context.state["fwd_seed"] = ConfigRecord({"v": fwd_seed})
     context.state["model"] = ArrayRecord(model.state_dict())
     context.state["batch_idx"] = ArrayRecord({"v": Array(idx.numpy())})
 
@@ -300,11 +386,22 @@ def generate_embeddings(spec: SiloSpec, msg: Message, context: Context) -> Messa
     context.state["sent_embedding"] = ArrayRecord({"v": Array(emb.numpy())})
 
     sent_emb = emb
+    audit: dict[str, float] = {}
     if tracker is not None:
-        sent_emb = add_gaussian_noise(
-            clip_embedding_rows(emb, noise["max_norm"]),
-            noise_std=tracker.sigma * noise["max_norm"],
-        )
+        clipped = clip_embedding_rows(emb, noise["max_norm"])
+        noise_std = tracker.sigma * noise["max_norm"]
+        sent_emb = add_gaussian_noise(clipped, noise_std=noise_std)
+        # Mechanism audit (docs/privacy_presentation_plan.md V2/V3): the DP proof assumes
+        # per-row sensitivity <= max_norm and noise std == sigma * max_norm. Both are
+        # measured here on the tensor actually sent, so a run carries its own evidence
+        # rather than asserting the mechanism ran as specified.
+        audit = {
+            "max_norm": noise["max_norm"],
+            "noise_std_target": noise_std,
+            "noise_std_realized": float((sent_emb - clipped).std().item()),
+            "row_norm_max_pre_clip": float(emb.norm(p=2, dim=1).max().item()),
+            "row_norm_max_sent": float(clipped.norm(p=2, dim=1).max().item()),
+        }
         tracker.step()
         _save_tracker(context, tracker)
 
@@ -320,6 +417,7 @@ def generate_embeddings(spec: SiloSpec, msg: Message, context: Context) -> Messa
         }
         if tracker is not None:
             metrics[f"{spec.wandb_tag}/epsilon"] = tracker.get_epsilon()
+            metrics.update({f"{spec.wandb_tag}/{k}": v for k, v in audit.items()})
         _log(spec, context, metrics, step=rnd)
 
     arrays = {"embedding": Array(sent_emb.numpy())}
@@ -336,10 +434,18 @@ def generate_embeddings(spec: SiloSpec, msg: Message, context: Context) -> Messa
             "n-total": int(len(X)),
             "n-neg":n_neg,
             "n-pos":n_pos,
+            # Running count of rounds whose bottom-model update was skipped due to a
+            # replay mismatch. Reported so the SERVER can record it in meta.json —
+            # otherwise the skip is invisible (docs/action_plan.md section Q).
+            "replay-skips": int(context.state["replay_skips"]["v"])
+            if "replay_skips" in context.state else 0,
         }),
     })
     if tracker is not None:
-        content["privacy"] = ConfigRecord(tracker.to_dict())
+        # Accountant primitives + the mechanism audit, so meta.json can record what the
+        # cut layer actually did. from_dict() reads only the keys it knows, so the extra
+        # audit fields ride along harmlessly.
+        content["privacy"] = ConfigRecord({**tracker.to_dict(), **audit})
     return Message(content=content, reply_to=msg)
 
 def generate_eval_embeddings(spec: SiloSpec, msg: Message, context: Context) -> Message:
@@ -402,29 +508,46 @@ def apply_gradients(spec: SiloSpec, msg: Message, context: Context) -> Message:
     for g in optimizer.param_groups:
         g["lr"] = lr
 
-    # Must remain before RNG restore
     X, _ = _full_trainset(spec, context)
     if (rec := context.state.get("batch_idx")) is not None:
         X = X[torch.from_numpy(rec["v"].numpy()).long()]
 
-    if (rec := context.state.get("rng")) is not None:
-        torch.set_rng_state(
-            torch.load(io.BytesIO(rec["serialized"]), weights_only=False)
-        )
-
     grad = torch.from_numpy(msg.content["gradients"]["local-gradients"].numpy())
 
+    # Replay generate_embeddings' forward exactly: same seed -> same dropout mask.
+    # Falls back to the locally-derived seed if state is missing (fresh node).
+    rec = context.state.get("fwd_seed")
+    fwd_seed = int(rec["v"]) if rec is not None else _forward_seed(cfg, context)
+
     optimizer.zero_grad()
-    with _frozen_bn_stats(model):
+    with torch.random.fork_rng(devices=[]), _frozen_bn_stats(model):
+        torch.manual_seed(fwd_seed)
         embedding = model(X)
 
     if (rec := context.state.get("sent_embedding")) is not None:
         sent = torch.from_numpy(rec["v"].numpy())
         if not torch.allclose(embedding.detach(), sent):
-            raise RuntimeError(
-                f"[{spec.wandb_tag}] Recomputed embedding != sent embedding — "
-                "RNG/data-order replay is broken."
+            # The two forwards genuinely disagree (measured ~1.7e-2, not float noise), so
+            # applying this gradient would target a different computation graph. Skipping
+            # is correct — but it MUST be counted, not silent: gradients are pushed
+            # fire-and-forget, so the server never learns the update was dropped and the
+            # run still writes a normal meta.json (docs/action_plan.md §Q).
+            #
+            # Root cause is SIMULATION-ONLY: Ray spawns new actors mid-run and the first
+            # round on a fresh actor rebuilds from a model state one step out of sync.
+            # Deployment (persistent SuperNode per silo) shows zero occurrences across
+            # ~614 rounds. Run headline results in deployment mode.
+            n_skips = int(context.state["replay_skips"]["v"]) + 1 \
+                if "replay_skips" in context.state else 1
+            context.state["replay_skips"] = ConfigRecord({"v": n_skips})
+            max_abs = float((embedding.detach() - sent).abs().max())
+            logging.getLogger(__name__).warning(
+                "[%s] replay mismatch (max_abs=%.3e) — SKIPPING this round's bottom-model "
+                "update. Total skips this run: %d. Simulation-only; use deployment for "
+                "reported results (docs/action_plan.md section Q).",
+                spec.wandb_tag, max_abs, n_skips,
             )
+            return Message(content=RecordDict(), reply_to=msg)
 
     noise = _cut_noise_config(spec, context)
     t0 = time.perf_counter()

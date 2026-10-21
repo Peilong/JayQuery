@@ -45,6 +45,36 @@ per run at 5–10 s each ≈ **1–2 min**.
 Combined, A1+A2 plausibly take a 20-min run to **under a minute** — which is what makes a
 5-seed × 5-epsilon grid (25 runs) feasible.
 
+### Outcomes (2026-07-28)
+
+| # | Status | Notes |
+|---|---|---|
+| A1 | ✅ **done** | ~10× achieved, but not via `pyproject.toml` — see §L. Exposed a real bug (§L2). |
+| A2 | ⏸️ **deferred** | The round count is exactly what §K is reviewing; left at the current default rather than baking in a value already flagged as stale. |
+| A3 | ✅ **done** | Also fixed a gap: `wandb-mode` was read **only by the client** (`fl_client/common.py`), so setting it offline left the SERVER logging online — a half-offline run. `fl_server/server_app.py` now passes `mode=` too. Default left at `"online"`; flip it per-run via `--run-config "wandb-mode='offline'"`, then `wandb sync`. |
+| A4 | ❌ **not applied — recommend skipping** | See below. |
+| A5 | ✅ **done** | Split cache in `fl_client/common.py`, keyed on `(load_fn, tag, processed-dir, batch-size, seed, split)`. Cold 71.5 ms → warm 0.0004 ms. **~13.6 s saved per 50-round run** (2 train materializations/round × 2 silos), ~27% of a simulation run's wall clock — far more than the ~6 s originally estimated, because that estimate was measured on the old 1,843-row dataset and the cohort is now 20,411 rows. |
+
+**Why A4 (`eval-every` 5 → 10) should NOT be applied:**
+
+1. **Its rationale has evaporated.** A4 was justified by deployment round-trip cost (~27 → 14
+   round-trips). With A1 done, a simulation round is ~0.75 s, so eval round-trips are no
+   longer a meaningful share of runtime.
+2. **It actively harms §K.** Every §J run peaked at the final round; §K has to locate where
+   the model *actually* converges. Halving eval frequency halves the resolution of
+   `best_round` — 5 sample points across 50 rounds instead of 10.
+3. **It silently changes early stopping.** Patience is counted in **eval events**, not rounds
+   (`early-stop-patience = 20`). At `eval-every = 5` that is 100 rounds of patience; at 10 it
+   becomes **200** — so early stopping would effectively never fire inside a 50–150 round run.
+
+Net: a small speed gain in the mode we no longer use, paid for with worse convergence data and
+altered early-stopping semantics, right when §K needs that data. **Left at 5.**
+
+**A5 cache-key bug caught by the suite:** the first version keyed on `wandb_tag`, which two
+specs can share while loading different data. `tests/test_fl_client.py` builds exactly that
+situation, and the full suite caught it (passed in isolation, failed together). `load_fn` is
+now part of the key.
+
 ### A1 caveats — simulation vs deployment equivalence
 
 **Statistically equivalent, NOT bit-identical.** Same ClientApp code, handlers, messages, and
@@ -130,8 +160,8 @@ touched. The AUC history is uncontaminated.
 
 | # | Action |
 |---|---|
-| C1 | Change the default threshold objective off `f1` → **Youden's J** (cannot degenerate to all-positive), plus a non-degeneracy guard |
-| C2 | Add **balanced_accuracy** and **MCC** to `compute_metrics` so degeneracy can never again masquerade as improvement |
+| C1 | ✅ **DONE** — default is now `youden`; plus a structural non-degeneracy guard applied to **every** objective (`_non_degenerate`), so the protection does not depend on which objective is chosen |
+| C2 | ✅ **DONE** — `balanced_accuracy` and `mcc` added; both are exactly 0.5 / 0.0 for all-positive AND all-negative |
 | C3 | Keep **AUC + AP as the headline** (threshold-free; unaffected by this bug) |
 | C4 | Use **`recall_at_precision`** as the deployment view — immune to degeneracy. Current: precision ≥0.70 → recall **0.651** |
 | C5 | Prefer tuning the threshold by **intervention capacity** ("advisors can contact 30%" → 70th percentile) over any metric-maximizing objective |
@@ -145,7 +175,7 @@ rows) and **(b) training stochasticity** (init, Poisson batching, DP noise draws
 
 | # | Action | Cost | Fixes |
 |---|---|---|---|
-| D1 | **Bootstrap CIs** on test predictions (resample 231 rows 10k×, percentile CI) | ~free, 1 run | (a) |
+| D1 | ✅ **DONE** — `bootstrap_ci()`; wired into the server's final test eval, emitting `auc_roc_ci_low/high/se` + same for AP | ~free, 1 run | (a) |
 | D2 | **Paired comparison** across conditions on the *same* test rows — far more powerful than the unpaired ±0.092 bar currently quoted | free | (a) |
 | D3 | **3–5 seeds** per config, report mean ± CI | 3–5× runtime | (b) |
 
@@ -421,7 +451,957 @@ small dataset and needs revisiting before §D3 fixes a round count.
 
 ---
 
-## 📋 TRACKED — G. PSI verification against the generated variants
+## ✅ DONE — L. Simulation mode (§A1) — enabled, with an open equivalence question
+
+### L1. The planned approach did not exist in this flwr version
+
+`[tool.flwr.federations]` in `pyproject.toml` is **not parsed by flwr 1.28** (verified: the
+config parser contains no reference to it). That flow was removed. In 1.28 simulation is
+launched through a `~/.flwr/config.toml` SuperLink entry whose `address = ":local:"` magic
+value makes the CLI lazily start `flower-superlink --insecure --simulation`. **No
+`pyproject.toml` change was needed.** Working invocation:
+
+```bash
+flwr run . local --federation-config "num-supernodes=2" --run-config "..."
+```
+
+`num-supernodes=2` is required (default 10; the ServerApp asserts exactly 2). The field is
+bare `num-supernodes` — `options.num-supernodes` is rejected.
+
+### L2. Simulation exposed a real bug: bottom models silently never trained
+
+Simulation initially failed the replay guard in `fl_client/common.py` **every round**:
+
+```
+RuntimeError: [silo_a] Recomputed embedding != sent embedding — RNG/data-order replay is broken.
+```
+
+The guard raises *before* `optimizer.step()`, and gradients are pushed fire-and-forget, so
+the server never saw the failure: **only the top model learned** while both bottom models sat
+frozen. Deployment was unaffected (0 occurrences across all four §J runs).
+
+**Root cause.** `generate_embeddings` snapshotted *process-global* torch RNG state and
+`apply_gradients` restored it to reproduce the dropout mask. That assumption holds for a
+persistent SuperNode process but not under Ray's actor pool.
+
+**Fix.** Both forwards now run inside `torch.random.fork_rng()` re-seeded from a per-round
+integer (`_forward_seed`, derived from run seed + `server-round`, persisted in
+`context.state`). Process- and scheduler-independent, and it removes the fragile
+serialize/restore of RNG blobs. **Do not reintroduce global-RNG snapshotting.**
+
+### L3. Speed — the §A1 payoff is real
+
+| mode | per round | 20 rounds |
+|---|---|---|
+| deployment | ~8 s | 3m26s |
+| **simulation** | **~0.75 s** | **~15 s** |
+
+**~10×**, at the top of the estimated 5–20× range. This is what makes a 36–60 run matrix
+practical (hours → minutes).
+
+### L5. ✅ RESOLVED (2026-07-28) — the runtimes ARE equivalent
+
+Paired on seed, `no_dp`, T=200, `dedup_first`, run via `scripts/run_matrix.py --jobs l5`:
+
+| seed | sim AUC | deployment AUC | diff |
+|---|---|---|---|
+| 42 | 0.904543 | 0.904760 | −0.000218 |
+| 43 | 0.901381 | 0.901621 | −0.000240 |
+| 44 | 0.905149 | 0.905458 | −0.000309 |
+| **mean** | **0.903691** | **0.903946** | **−0.000255** |
+| sd | 0.002023 | 0.002044 | |
+
+**Paired difference: −0.000255** (sd 0.000048, n=3), 95% CI [−0.000332, −0.000179].
+Average precision agrees too: −0.000181.
+
+**Scale check — this is the whole point:**
+
+| quantity | value | vs the diff |
+|---|---|---|
+| significance bar (n=2552) | 0.025000 | **98× larger** |
+| same-mode reproducibility floor (§N) | 0.000576 | **2.3× larger** |
+| DP seed variance (all_dp σ, §K) | 0.014 | **55× larger** |
+
+The cross-mode difference is **smaller than the floor of same-mode repeatability**. Simulation
+and deployment are computing the same thing.
+
+**Statistical honesty:** the paired t is −9.3, i.e. the tiny offset is *consistent in sign*
+across all three seeds and would be "significant" in a null-hypothesis sense. That is expected
+and irrelevant — with n=3 and sd 5e-5 the test is detecting a systematic 2.6e-4 bias (almost
+certainly FP/threading differences between the runtimes). **Statistical significance is not
+practical significance here**: the effect is 98× below the smallest difference the test set
+can resolve. Reporting it as "a real difference" would be a misuse of the test.
+
+### Consequences
+
+- **§D3 may run in simulation.** ~3 h for 60 runs instead of ~25 h+ in deployment. This is what
+  L5 existed to decide.
+- The §L4 rule ("never report a simulation number as a deployment number") is **lifted** for
+  `no_dp`-style comparisons at this scale. Keep reporting the *headline* paper numbers from
+  deployment for the honest "real federation" story, but sweeps, seed studies and the matrix
+  can use simulation without a utility caveat.
+- Not re-tested per DP mode. The DP configs share the identical code path and differ only by
+  noise draws — already characterised in §K — so the runtime-equivalence result carries.
+
+---
+
+### L4. ⚠️ SUPERSEDED — the original (underpowered) equivalence attempt
+
+One paired run (same config, same seed, 20 rounds, `dedup_first`):
+
+| mode | AUC | AP | best_val |
+|---|---|---|---|
+| simulation | 0.7064 | 0.6691 | 0.7335 |
+| deployment | 0.7378 | 0.7109 | 0.7541 |
+| **\|diff\|** | **0.0314** | 0.0418 | 0.0206 |
+
+ΔAUC **0.0314 exceeds** the n=2552 significance bar of **0.0250**, so equivalence is *not*
+demonstrated. Equally, a systematic difference is *not* demonstrated: that bar quantifies
+**test-set sampling** uncertainty, while two runs differing only in RNG stream differ by
+**training stochasticity** — a separate, typically larger source (the §D (a)/(b) distinction).
+Both runs were also truncated at 20 rounds, training's noisiest phase.
+
+| # | Action |
+|---|---|
+| L5 | ✅ DONE — 3 seeds/mode at T=200; paired diff −0.000255, below the same-mode floor |
+| L6 | ✅ N/A — no practically meaningful gap survived |
+| L7 | ✅ RESOLVED — see §L5. Simulation is cleared for sweeps/matrix; headline paper numbers still come from deployment |
+
+Verified alongside: partition mapping is correct in simulation (`silo_a.pt` first layer is
+18-dim, `silo_b.pt` 26-dim — a swap would fail loudly on shape mismatch), and relative paths
+like `processed-dir` resolve correctly under Ray. Both were flagged as risks; both are clear.
+
+---
+
+## 🔬 K PROBE RESULTS (2026-07-28) — nothing has converged
+
+Nine simulation runs, `dedup_first`, early stopping disabled (`patience=99999`) so curves are
+unbiased. **K1** = no-DP long run. **K2** = DP horizon sweep — for DP the curve is
+horizon-*dependent* (σ is calibrated over `num-server-rounds`, so changing T changes the noise
+on every step), so each T is its own run at the same ε budget.
+
+### Test AUC by horizon
+
+| T | no_dp | server_only | all_dp |
+|---|---|---|---|
+| 50 | — | 0.7858 | 0.7464 |
+| 100 | — | 0.8708 | 0.8197 |
+| 150 | — | 0.8878 | **0.7440** ← outlier |
+| 200 | **0.9064** | 0.8997 | 0.8445 |
+
+### Findings
+
+1. **Every one of the 9 runs is truncated** — `best_round == num_rounds`, `early_stop=False`
+   in all cases. **Nothing has converged, even at 200 rounds.**
+2. **§J was severely under-trained, not slightly.** no_dp at 50 rounds = 0.8224; at 200 =
+   **0.9064**. Every §J number understates its config by a wide margin.
+3. **§A2's premise is inverted at this data size.** σ ∝ √T made long horizons look expensive,
+   but that reasoning assumes a converged model. Here extra steps buy far more than the extra
+   noise costs: `server_only` rises monotonically 0.7858 → 0.8997 across 50 → 200.
+   **No turnover is visible in either sweep.**
+4. **Server DP is ~free at an adequate horizon.** At matched T=200, `server_only` trails
+   `no_dp` by only **0.0066** — well inside the 0.025 bar. At T=50 that gap was 0.037. The
+   measured cost of DP *shrinks as the horizon grows*.
+5. **Cut-layer noise remains the expensive mechanism.** `all_dp` at T=200 trails by
+   **0.0619 — significant**. Consistent with §J.
+6. **DP runs have large run-to-run variance.** The `all_dp` T=150 point (0.7440) sits ~0.075
+   *below* both its neighbours and is an **outlier, not a turnover** — T=200 recovers to the
+   sweep's highest value. With n=1 per point, single-seed horizon selection is unreliable for
+   the DP configs. (This corrects an in-flight reading that treated T=150 as a genuine
+   turnover; T=200 refuted it.)
+
+### Consequences for K3 — superseded by the K2 probe below
+
+The first reading ("a shared horizon is fine *because* nothing turned over") was **wrong**.
+The K2 probe found a genuine turnover for `all_dp`. The shared-horizon conclusion survives,
+but for a different reason — see below.
+
+---
+
+## ✅ K2 PROBE + K3 DECISION (2026-07-28)
+
+Extended horizons with seeds. `no_dp` bounds the ceiling; `all_dp` is the config most likely
+to turn over first. Seeds concentrated on the DP arms where the variance is.
+
+### Complete horizon data (test AUC)
+
+| T | no_dp | server_only | all_dp |
+|---|---|---|---|
+| 50 | 0.8224 | 0.7858 | 0.7464 |
+| 100 | — | 0.8708 | 0.8197 |
+| 150 | — | 0.8878 | 0.7440 *(5σ outlier)* |
+| 200 | 0.9064 | 0.8997 | **0.8445 / 0.8442 / 0.8197** (μ 0.836, σ 0.014) |
+| 400 | 0.9119 / 0.9131 | — | **0.7800** ← peaked internally @ r220 |
+| 600 | 0.9164 | — | — |
+
+### Findings
+
+1. **`all_dp` genuinely turns over.** At T=400 it scores 0.7800 and **peaks internally at
+   round 220** — the first DP run to peak before its own horizon. That is ~4σ below the T=200
+   mean of 0.836. Mechanistically coherent: σ is calibrated over the full horizon, so a longer
+   T raises the noise on *every* step — the model peaks both **earlier and lower**.
+2. **`no_dp` plateaus around T≈400.** `nodp_T400_s43` peaked internally at r370 and
+   `nodp_T600_s42` at r590. Going 200 → 600 buys only **+0.010 total**, entirely inside the
+   0.025 bar.
+3. **Variance is heavily config-dependent and heavy-tailed.**
+   - `no_dp`: σ ≈ **0.001** (0.9119 vs 0.9131 at T=400).
+   - `all_dp`: σ ≈ **0.014** at T=200 (n=3), i.e. **~14×** no-DP — and the T=150 point sits
+     ~5σ out, so the distribution has a heavy tail rather than a wide body. Two close seeds do
+     **not** certify stability.
+4. **§D3 seed count follows from this.** At σ≈0.014 the SE of a mean over *n* seeds is
+   0.014/√n: n=3 → ±0.016, n=5 → ±0.012 at 95%. The effects being resolved are ~0.02, so
+   **3 seeds is marginal and 5 is the safer floor for the DP arms**; `no_dp` needs far fewer.
+
+### K3 DECISION: shared horizon **T = 200**
+
+Defensible for all three configs, but *not* for the reason first given:
+
+- **`all_dp`**: T=200 is at/near its optimum — T=400 is clearly worse.
+- **`no_dp`**: T=200 gives 0.9064 vs a best of 0.9164 at T=600 — a loss of 0.010, **inside the
+  noise bar**, for one third the compute.
+- **`server_only`**: 0.8997 at T=200, already within 0.017 of the no-DP ceiling's best — also
+  inside the bar.
+
+So the optima *do* diverge (contradicting the first reading), but they diverge into a region
+where a single T=200 costs every config less than the noise floor. **Per-config horizons are
+not justified** — they would complicate the comparison for sub-noise gains.
+
+**Outstanding:** `server_only` was never probed beyond T=200, so its own turnover point is
+unmeasured. It is bracketed by the other two (server DP is strictly less noisy than all_dp,
+strictly more than no_dp), so T=200 is safe — but one confirmatory run at T=400 would close it.
+
+---
+
+## ✅ DONE — N. Model init was never seeded (reproducibility bug)
+
+**Found while designing §L5.** `seed_everything` was **never called anywhere in `fl_client/`
+or `fl_server/`** — the only `manual_seed` calls were DataLoader generators, the batch sampler,
+and the §L2 forward seed, all *after* construction. Bottom and top model weights initialized
+from whatever the ambient process RNG happened to be.
+
+This violated the project's own standard, **CLAUDE.md coding standard 4**: *"Seed everything —
+use `utils/reproducibility.py:seed_everything(42)` at the top of every training script."* The
+utility existed and was simply never wired in.
+
+**Measured:** identical config, identical `seed=42`, 20 rounds, no DP, run twice →
+test AUC **0.721735** vs **0.726311**, a spread of **0.004576**.
+
+### Fix — deliberately different on server vs client
+
+| | Approach | Why |
+|---|---|---|
+| **Server** (`fl_server/server_app.py`) | `seed_everything(seed)` once, before `TopModel(...)` | Runs once per run, so a single global seed makes the whole run reproducible while the DP noise sequence still *varies across rounds*. |
+| **Client** (`fl_client/common.py:_build_model`) | `fork_rng` + `manual_seed(seed*7919 + partition_id)` scoped to construction only | Seeding globally here would reset the RNG **on every message**, so cut-layer noise would draw the *same values every round*. Scoping makes init deterministic without touching the noise stream. |
+
+### Result: 8× variance reduction, not bit-exact
+
+Three runs, same config, same seed, after the fix: 0.7371907350 / 0.7370123473 / 0.7375879119
+→ **spread 0.000576** (was 0.004576).
+
+Residual ~6e-4 is most likely floating-point non-determinism from multithreaded CPU reductions,
+not a remaining seeding gap. Acceptable: it is **~40× below the 0.025 significance bar** and
+**~23× below the DP seed variance (σ≈0.014)**, so it is now a negligible noise floor rather
+than a confound.
+
+**Note for §K/§J:** the σ figures measured there (no_dp ≈0.001, all_dp ≈0.014) were taken with
+unseeded init, so they conflate init variance with seed variance. The DP figure is dominated by
+noise draws and stands; the no_dp figure was largely *this bug*.
+
+---
+
+## ⚠️ OPERATIONAL — the real cause of every "intermittent" simulation failure
+
+Runs kept "completing" with **no `meta.json`** — the K2 probe (2 lost runs), and repeated
+reproducibility attempts. **Root-caused 2026-07-28.** The earlier "SuperLink state
+accumulation" hypothesis was **wrong**. There are three separate causes:
+
+### O-A. `flwr-simulation` workers leak, one per run (~800 MB each)
+
+The real killer. Each `flwr run . local` spawns a `flwr-simulation` worker that is **never
+reaped**. After ~25 runs in one session:
+
+```
+30 flwr/ray processes · 25 live flwr-simulation @ ~800 MB · 11 GB / 15 GB RAM used · swap 4.0/4.0 GB FULL
+ray.exceptions.OutOfMemoryError: Task was killed due to the node running low on memory.
+ServerApp thread raised an exception: Failed to collect embeddings from both silos. Got positions: [1]
+```
+
+Killing them recovered **11 GB → 1.5 GB used**. On a 15 GB machine this OOMs at roughly
+**15–18 consecutive simulation runs** — a 36–60 run matrix cannot complete without reaping.
+(Reaped workers leave zombies with `rss=0KB`; those are harmless.)
+
+### O-B. `flwr run --stream` returns BEFORE `meta.json` is written
+
+Cleaning up immediately after the command returns kills the worker **mid-write**, destroying
+the run's output. Must wait for the artifact, then reap.
+
+### O-C. `pkill -f "flwr-simulation"` kills the calling shell
+
+`-f` matches the *full command line*, and a batch script that mentions the process name matches
+itself. This silently killed my own runner mid-loop (exit 144) and produced several of the
+"missing meta.json" results I was chasing. **Use `pkill -x flwr-simulation`** (exact process
+name) — never `-f`.
+
+### Implemented: `scripts/run_matrix.py`
+
+**§L5, §D3 and §M share one runner** — the machinery (run → wait → verify → reap → retry →
+collect) is identical and only the job list differs, so maintaining three copies of this
+fragile process handling would be the bug source, not the fix.
+
+```bash
+python scripts/run_matrix.py --jobs l5                    # sim-vs-deployment equivalence
+python scripts/run_matrix.py --jobs d3 --seeds 42 43 44 45 46 --variants dedup_first dedup_best dedup_worst
+python scripts/run_matrix.py --jobs d3 --dry-run          # print the plan, run nothing
+python scripts/run_matrix.py --jobs l5 --resume           # skip jobs that already succeeded
+```
+
+Encodes every §O fix: reaps with `pkill -x` after each run (O-A/O-C), waits for `meta.json`
+before reaping (O-B), writes a per-run log under `experiments/matrix_logs/` instead of
+`/dev/null` (O-D), retries failed jobs, logs available memory per run, checkpoints results
+after every job so a crash loses nothing, and `--resume` skips completed work.
+
+The summary automatically flags the three failure modes that matter: **failed** jobs, jobs
+**truncated at the horizon** (§K5: `best_round == num_rounds` with no early stop), and any
+run tripping **`pred_collapsed`**.
+
+### Required runner pattern (what the script implements)
+
+```bash
+run_sim () {
+  tag=$1
+  flwr run . local --federation-config "num-supernodes=2" --run-config "... run-tag='$tag'" --stream
+  for i in $(seq 1 30); do [ -f experiments/checkpoints/$tag/meta.json ] && break; sleep 2; done  # O-B
+  pkill -x flwr-simulation || true                                                               # O-A, O-C
+  sleep 2
+}
+```
+
+| # | Action |
+|---|---|
+| O1 | Runner **must reap `flwr-simulation` with `pkill -x`** after every run, or OOM by run ~15 |
+| O2 | Runner must **wait for `meta.json`, then verify it exists, and retry on failure** — never record a silent hole |
+| O3 | **Never redirect run output to `/dev/null`** in batch scripts — doing so in the K2 probe destroyed the evidence and forced a reproduction run |
+| O4 | Log free memory per run so an approaching OOM is visible before it bites |
+
+---
+
+## ⚠️ Q. Replay-guard desync in SIMULATION only (found 2026-07-30)
+
+**Deployment mode is clean. Simulation intermittently skips bottom-model updates.**
+
+### What happens
+
+`apply_gradients` must reproduce the exact embedding `generate_embeddings` sent, or the
+injected upstream gradient lands on a different computation graph. A guard checks this. In
+simulation it **fails intermittently**; when it does, that silo **silently skips its weight
+update** for that round — gradients are pushed fire-and-forget, so the server never learns of
+it, `meta.json` is still written, and `run_matrix.py` scores the run as clean.
+
+### Measured — this is NOT a tolerance issue
+
+| | max abs difference |
+|---|---|
+| when the guard passes | **0.000e+00** (bit-identical) |
+| when it fails | **1.658e-02** (Silo A) / 4.841e-02 (Silo B) |
+
+~1000x too large for floating point. Loosening the tolerance would be **wrong** — the two
+computations genuinely disagree, and tolerating that means applying a gradient to a different
+graph than the one that produced the embedding.
+
+### Mechanism
+
+- **Deterministic magnitude**, identical across independent runs (always `1.658e-02`) — rules
+  out a race condition.
+- **Coincides with new Ray actor PIDs.** Passing rounds run on the original workers; the
+  failure appears on **freshly-spawned** workers, which then handle all later rounds. The
+  *first round handled by a new worker* is the one that fails.
+- **Batch is correct, weights are not.** Row counts match exactly (1012 sent / 1012 recomputed),
+  so the right students are loaded — but a ~0.017 embedding difference is about the size of
+  **one gradient update**, consistent with the new worker rebuilding from a model state one
+  step out of sync.
+
+### Deployment vs simulation — controlled comparison
+
+| mode | runs | rounds | failures |
+|---|---|---|---|
+| **deployment** | 4 | ~614 | **0** |
+| simulation | 5 | ~442 | 8, 8, 8, 4, 0 |
+
+The decisive pair is §L5: **identical config, identical seeds, identical code** — simulation 8
+failures/run, deployment 0 across three 200-round runs. Deployment gives each silo a persistent
+SuperNode process, so there is no actor pool and no mid-run worker spawning.
+
+### Impact on existing results
+
+~8 skips per 400 gradient applications (**~2%**), concentrated early. Models still train fully
+(val/auc 0.575 -> 0.913) and all 60 §D3 runs were internally consistent with 0 collapses.
+
+**But the arms were not equally affected** — cut-noise-OFF runs (`no_dp`, `server_only`) had
+skips; cut-noise-ON runs (`cut_only`, `all_dp`) had none. That biases slightly **against the
+no-DP ceiling**, i.e. it would make the measured DP cost an **under**estimate. Since
+`server_only` measured -0.0022 with a CI containing zero, this is the direction that matters
+for the headline claim.
+
+| # | Action | Status |
+|---|---|---|
+| Q1 | Deployment mode eliminates the issue | ✅ **verified** — 0 skips in ~614 rounds vs 8/run in the paired sim arm |
+| Q2 | Count + log skipped updates; surface in `meta.json` | ✅ **DONE** — hard failure replaced by a counted, logged skip; `replay_skips` + `replay_skips_total` in every `meta.json`. Verified live. Tolerance deliberately NOT loosened: the mismatch is ~1.7e-2 vs 0.0 when healthy, so tolerating it would apply a gradient to a different graph |
+| Q3 | Re-run §D3 | 📋 **DEFERRED (Alex, 2026-07-30) — re-run in SIMULATION, not deployment.** Skips are now reported, so a sim re-run declares its own bound; 60 deployment runs would cost ~34 h vs ~3 h. **See `docs/HANDOFF.md` §5 — do not forget this** |
+| Q4 | §L5 equivalence still holds | ✅ measured with this present in the sim arm; modes still agreed to 0.000255 |
+
+**Bias direction (why Q3 matters):** the arms were **not equally affected** — cut-noise-OFF
+runs (`no_dp`, `server_only`) skipped updates while cut-noise-ON runs did not. That handicaps
+the **no-DP ceiling**, so the true DP cost may be marginally **larger** than §D3 reports. With
+`server_only` at −0.0022 and a CI containing zero, this is the direction that could matter for
+the headline claim.
+
+---
+
+## ⚠️ R. Privacy-verification findings (2026-07-30)
+
+Found while building the audit pipeline (`scripts/verify_privacy.py`,
+`docs/privacy_presentation_plan.md`). Three are holes in the guarantee, one is tooling.
+
+### R1. The per-silo accountant nondeterministically UNDER-counts by one step
+
+Two runs, identical config, 6 rounds, simulation:
+
+| run | server ε (steps) | silo ε (steps) |
+|---|---|---|
+| `audit_smoke` | 0.9988 (6) | **0.9684 (5)** |
+| `audit_smoke3` | 0.9988 (6) | 0.9988 (6) |
+
+The silo trackers reported 5 steps for a 6-round run. **Under-reporting ε is the one
+direction a privacy claim cannot tolerate.** Simulation-only in signature (like §Q) but
+`replay_skips_total` was 0, so it is *not* the replay-skip mechanism. Root cause not yet
+found. **Mitigated, not fixed:** `verify_privacy.py` V5 now FAILs any run whose accountants
+did not charge the rounds actually run, so it can never pass silently again. Re-check
+whether it reproduces in deployment mode before the write-up.
+
+### R2. Validation/test embeddings are released with NO formal protection
+
+`fl_client/common.py:generate_eval_embeddings` clips but does **not** noise, and takes no
+accountant step. At `eval-every = 5`, T = 200 that is ~40 unnoised releases of 2,552
+validation students, plus the final test release. Not covered by the reported ε and not
+previously written down anywhere.
+
+Two defensible positions (pick one and state it): **(a) scope it** — "ε is a guarantee over
+the *training* set; val/test embeddings are released clipped but unnoised" — or **(b) close
+it** by noising eval too, which composes in *parallel* (val/test rows are disjoint from
+train) and so yields a **second, separate** ε over the eval population rather than raising
+the training ε. (a) is the call for this timeline; (b) is future work. Leaving it unstated
+is not an option.
+
+### R3. The attacks were not attacking the defense
+
+`attack/` and `scripts/run_attack.py` contained **zero** references to noise, clipping,
+sigma or max_norm. `run_inversion` attacked `model_a(row)` — the clean embedding — while
+the wire carries `add_gaussian_noise(clip_embedding_rows(emb, S), sigma*S)`. Any ASR-vs-ε
+curve built that way measures only how DP changed the *weights*, would read as near-flat,
+and would **understate the defense**.
+
+✅ **Fixed** in `scripts/run_attack.py` (no change to `attack/` — `run_inversion_attack`
+already takes the target embedding as an argument, so the wire reconstruction lives in
+`scripts/`). Defense parameters are read from the attacked run's own `meta.json`, never
+from config defaults. Added: Wilson CIs, n=200 default (n=20 gives SE 0.112), a measured
+always-guess-modal **floor**, ASR **lift** over that floor, and reconstruction RMSE.
+
+First wire-faithful numbers (toy 3/6-round checkpoints, ε≈1):
+
+| run | inversion ASR | floor | lift | label inference | floor |
+|---|---|---|---|---|---|
+| `audit_smoke2` | 0.100 | 0.150 | −0.050 | 0.998 | 0.554 |
+| `audit_smoke3` | 0.050 | 0.150 | −0.100 | 0.998 | 0.554 |
+
+Inversion against the noised wire does **worse than an uninformed attacker**; label
+inference — an undefended channel by construction — leaks almost perfectly. The anchors are
+what make this readable: without the floor, "ASR = 0.10" looks like 10% of students
+compromised.
+
+### R4. 176 existing checkpoints are unauditable
+
+`meta.json` recorded no mechanism primitives (no sigma, no S, no cut-noise target, no
+server `noise_multiplier`), so no existing run's ε can be recomputed from its artifact.
+✅ **Fixed** — `meta.json` now carries a `mechanism` block plus a measured audit
+(`row_norm_max_sent`, `noise_std_realized`) proving the mechanism ran as specified. Runs
+predating it are reported as SKIP by the audit. **This is the argument for `--fresh`.**
+
+### R6. ⚠️ Baselines were computed on the WRONG dataset — and now question the architecture
+
+**The bug.** `baselines/run_baselines.py:main` parsed `data.processed_dir` from the YAML and
+then called `load_silo_a()` / `load_silo_b()` **with no argument**, so both fell back to the
+default `data/processed` — the legacy single-module pickles (1,843 train rows vs 20,411).
+Every baseline number was computed on 11× less data than the VFL runs it exists to be
+compared against. The config key that would have fixed it was silently ignored.
+
+✅ **Fixed** — `processed_dir` is honoured, `--processed-dir` overrides it, the YAML default
+is now `data/processed/dedup_first`, and results are written to `experiments/baselines.json`
+(they previously went to wandb only, so `make_report.py` could never publish them).
+
+**What the corrected baselines show** (`dedup_first`, single seed):
+
+| model | data | AUC |
+|---|---|---|
+| xgboost | merged | **0.9382** |
+| isolated_silo_b | silo B only | **0.9219** |
+| mlp | merged | 0.9158 |
+| logistic_regression | merged | 0.8704 |
+| isolated_silo_a | silo A only | 0.6210 |
+| *(VFL no_dp, T=200)* | *federated* | *0.9023* |
+
+### ✅ FRAMING DECISION (Alex, 2026-07-30)
+
+**This is a feasibility paper, not an accuracy-gain paper.** The claim is *"an architecture
+of this shape is implementable in practice, and you lose little utility by doing so"* — not
+*"VFL improves prediction on OULAD"*. Under that framing, silo B outperforming the federated
+model is a **property of this dataset**, stated plainly, not a threat to the contribution.
+OULAD is a FERPA proxy; a deployment with a genuine vertical split would have different
+per-silo value.
+
+**What the decision changes:** the *cost of federation* stops being incidental and becomes
+the **headline utility claim**. It therefore has to be measured properly — see R6a/R6b,
+which are promoted rather than dropped.
+
+**Two consequences to handle:**
+
+1. **Silo B alone (0.9219) beats the federated model (0.9023).** If one institution can do
+   better on its own data than by federating, the architecture's premise is undercut.
+   Silo A contributes 0.6210 alone and appears to *subtract* value: merged MLP (0.9158) is
+   also below silo B alone.
+2. **Cost of federation vs the architecture-matched centralized control:** 0.9158 − 0.9023
+   = **0.0135**, which is a legitimate and reportable number.
+
+**Before concluding anything, note the confound:** the VFL runs are horizon-truncated (4/5
+`no_dp` runs still improving at T=200) and use Poisson batches at q=0.05, while the
+baselines train to convergence. **This is not a like-for-like training budget**, so the
+comparison is suggestive, not conclusive.
+
+| # | Action |
+|---|---|
+| R6a | Re-run baselines at multiple seeds — currently n=1, so no CI |
+| R6b | Establish a like-for-like budget before quoting the federation cost |
+| R6c | Investigate why Silo A's 18 features do not help the merged model — feature quality, scaling, or a genuine finding about demographic vs behavioural predictors |
+| R6d | Decide the paper's framing if silo B alone wins: this may become a *finding* ("behavioural data dominates; demographics add little") rather than a problem |
+
+Auto-detected by `scripts/make_report.py:known_issues` on every report build.
+
+### R7. Attack evaluation rebuilt (2026-07-30)
+
+Four changes, prompted by Alex's review of what the three attacks actually measured.
+
+**1. Inversion reported 1/18 of what it recovers.** `run_inversion_attack` optimizes a full
+feature row and then read out only column 0 (`imd_band`), discarding the rest. The full
+`reconstruction` is now returned and scored, giving per-attribute recovery for
+**gender, disability, age band, highest education, IMD band and region** — the attributes
+that actually matter for a FERPA proxy. Every rate is paired with its always-guess-majority
+floor; an accuracy without its floor is unreadable (disability scores 0.425 against a
+**0.900** floor, i.e. far worse than guessing).
+
+**2. Silo B was structurally un-attackable.** `run_inversion_attack` read
+`model.encoder[0].in_features`, hard-coding Silo A's attribute name, so it raised
+`AttributeError` on `BottomModelB` (whose stack is `layer1`). Now walks the module tree for
+the first `Linear`. Silo B's 26 behavioural VLE features are attacked for the first time.
+
+**3. The attacker was artificially single-shot.** A real MITM watches every round; at
+`batch-sample-rate` q over T rounds a student is transmitted ~q·T times (≈10 at q=0.05,
+T=200), and averaging k noisy views shrinks the noise by √k. `wire_embedding` now takes
+`n_observations`, exposed as `--observations`. **This is the honest version of the attack**:
+composition over steps is exactly why ε grows with T, so the accounting already assumes this
+adversary while the attack ignored it. Documented as an upper bound — it treats the
+embedding as stationary, which holds late in training and is optimistic for the attacker
+early on.
+
+**4. Gradient monitor removed from attack results; label inference reframed.**
+The monitor is a defense-side anomaly detector that measures no leakage — listing it beside
+two real attacks implied otherwise. It remains available as `run_gradient_monitoring()` for
+a "defenses considered" note. Label inference is kept but explicitly marked **not a defense
+evaluation**: the returned activation gradient is noised by neither mechanism (server DP-SGD
+perturbs *parameter* gradients), so its ~0.998 accuracy against a 0.554 floor quantifies a
+known scope limit rather than testing a defense.
+
+**Also fixed:** unconstrained L-BFGS diverges on noised targets, producing nRMSE ~1e16. The
+reconstruction is now clamped to the public feature ranges — which makes the attacker
+*stronger*, since a real adversary knows gender is binary — and near-constant features are
+excluded from the error average instead of dividing by ~0.
+
+### R8. `stopped_early` conflated FOUR unrelated causes (2026-07-31)
+
+**The bug.** `stopped_early` in `meta.json` is set by four different code paths — silo
+budget exhausted, server budget exceeded, combined-epsilon cap, **and ordinary validation
+early stopping** — and every downstream report read it as "ran out of privacy budget".
+
+**How it was caught.** The clip-calibration arms `Smed`/`Sp75` were flagged as 3/3
+budget-truncated. They stopped at rounds 10–35 with composed epsilon **1.046–1.165 against
+a 3.0 cap** — nowhere near any budget. They stopped because validation AUC stopped
+improving, which is ordinary convergence behaviour, not a privacy effect. The published
+caveat on those arms was therefore wrong.
+
+✅ **Fixed** — `meta.json` now records `stop_reason` (`silo_budget` / `server_budget` /
+`combined_cap` / `val_early_stop` / `null`). `results_lib.Group` exposes
+`n_budget_stopped`, `n_val_stopped` and `n_stop_unknown` separately, and runs predating the
+field are reported as **unknown** rather than silently assumed to be budget stops.
+
+**Consequence for §2g:** the clip-calibration result (S=1.0 beats S=median by 0.243 AUC)
+still holds directionally — but the mechanism is *"large S makes the model stop learning
+early"*, not *"large S exhausts the privacy budget"*. Restate it that way.
+
+### R9. Other pre-fresh-run fixes (2026-07-31)
+
+| fix | why |
+|---|---|
+| `combined-target-epsilon` 3.0 → **10.0** | At 3.0 it bound during the epsilon sweep: eps=4 hit composed 2.981 and all 5 seeds stopped at round ~50, so that point measured under-training, not noise. It is a guardrail, not a scientific parameter; the composed epsilon actually spent is still recorded and reported |
+| `results/tables/` wiped before each build | Table names carry a positional prefix, so adding an experiment renumbers them (`t3_x` → `t4_x`) and the old file survived beside the new one — two tables, same content, one stale |
+| **Cost of federation generated, not hand-typed** | The feasibility framing's headline claim was computed in a throwaway one-liner outside the repo. `analyze.py:_compare_federation_cost` now emits it into `claims.csv` with a Welch CI, carrying the budget-mismatch caveat on every row |
+| `reproduce_all.sh --attack-obs` (default 10) | The attack stage was running the artificially weak single-shot attacker; 10 ≈ `batch-sample-rate x rounds` (§R7) |
+
+**Generated federation cost** (centralized minus VFL; positive = what federating costs):
+
+| baseline | ΔAUC | 95% CI |
+|---|---|---|
+| xgboost | +0.0359 | [+0.0333, +0.0385] |
+| isolated_silo_b | +0.0207 | [+0.0179, +0.0236] |
+| **mlp (architecture-matched)** | **+0.0128** | **[+0.0102, +0.0154]** |
+| logistic_regression | −0.0319 | [−0.0345, −0.0293] |
+| isolated_silo_a | −0.2821 | [−0.2847, −0.2795] |
+
+All are **upper bounds** until §R6b matches the training budgets.
+
+### R10. ✅ ATTACK RESULTS — the privacy side is now measured (2026-07-31)
+
+First wire-faithful attack numbers against real trained checkpoints (`dedup_first`, seed 42,
+n=200 students, 10 averaged observations, L-BFGS 200 steps).
+
+| config | inv ASR | floor | **lift** | Silo A nRMSE | Silo B nRMSE | label acc |
+|---|---|---|---|---|---|---|
+| no_dp | 0.355 | 0.135 | **+0.220** | 1.90 | 4.55 | 1.000 |
+| server_only | 0.355 | 0.135 | **+0.220** | 1.97 | 4.80 | 1.000 |
+| cut_only | 0.080 | 0.135 | **−0.055** | 2.80 | 6.07 | 1.000 |
+| all_dp | 0.055 | 0.135 | **−0.080** | 2.75 | 6.06 | 1.000 |
+
+Per-attribute lift on Silo A (`region` floor 0.125, `gender` floor 0.505):
+
+| attribute | no_dp | server_only | cut_only | all_dp |
+|---|---|---|---|---|
+| region | **+0.300** | **+0.215** | −0.060 | −0.070 |
+| gender | **+0.195** | **+0.145** | −0.040 | +0.020 |
+
+#### What this establishes
+
+1. **The attack genuinely works when the wire is unprotected.** `no_dp` reaches 2.6x its
+   floor and recovers region and gender well above chance. **This is what makes the null
+   results meaningful** — without a measured ceiling, "the attack recovered nothing" could
+   simply mean the attack never worked.
+2. **Server DP-SGD provides ~no wire protection.** ASR is identical to `no_dp` (0.355).
+   Mechanically expected — it perturbs the top model's *parameter* gradients, not the
+   transmitted embedding — but now measured rather than argued.
+3. **Cut-layer noise defeats the attack.** ASR falls to the floor or below; every attribute
+   lands at or under chance.
+4. **Labels leak perfectly (1.000) in every configuration**, confirming §R2/§7's scope
+   statement empirically: DP protects features, not labels.
+
+#### This answers `paper_topics.md` §10's open question
+
+*"If cut-layer noise costs 25x more utility, does it buy proportionally more attack
+resistance? If not, the architecture should drop it."*
+
+**It buys the entire wire defense.** The two mechanisms are not substitutes at different
+price points — they defend **different adversaries**, and the utility and privacy results
+are complements:
+
+| mechanism | utility cost | wire protection |
+|---|---|---|
+| server DP-SGD (ε=1) | ~0 (−0.0022) | **none** |
+| cut-layer noise (ε=1) | −0.0562 | **complete** |
+
+#### How to read `lift` (and why negative is expected)
+
+`floor` = accuracy of an attacker who ignores the embedding and always guesses the modal
+value, measured on the attacked sample. It is deliberately a harder bar than uniform
+guessing (0.135 vs 0.10 for a 10-level attribute). `lift = ASR − floor` answers the only
+question that matters: *does seeing the wire help beyond knowing the population
+distribution?*
+
+**Negative lift means no usable signal, not "negative information".** When the
+reconstruction is noise, decoded guesses scatter instead of concentrating on the mode, so a
+noise-driven attack lands at or below the floor essentially by construction. Two rules:
+
+- **Magnitude of a negative lift is not meaningful.** At n=200 with floor 0.135 the SE on
+  ASR is ~0.024 (±0.048 at 95%), so `cut_only`'s −0.055 is indistinguishable from zero.
+  Report "no measurable leakage", never "below chance". `no_dp`'s +0.220 is ~9 SE out.
+- **It is an upper bound on demonstrated leakage**, not proof that nothing is recoverable.
+  The honest claim is "this attack, given the wire representation and 10 averaged
+  observations, recovers nothing."
+
+#### Caveats
+
+- Single seed so far. **Fixed:** the attack stage now sweeps `--attack-seeds` (default
+  42 43 44), `make_report` pools by arm as mean ± sd, and `analyze.py` emits
+  `family=attack` rows in `claims.csv` with Welch CIs vs the `no_dp` ceiling.
+- `disability` lift is negative even at `no_dp` because its floor is 0.920 (92% of students
+  report none) — a floor artifact, not a defense success.
+- `all_dp` gender at +0.020 is inside single-seed noise.
+
+### R12. The privacy trade-off is a STEP, not a curve (2026-07-31, 3 seeds)
+
+27-checkpoint attack sweep: 4 DP modes x 3 seeds, plus an epsilon grid at 3 seeds.
+
+| group | ASR | vs no_dp ceiling |
+|---|---|---|
+| no_dp | 0.357 ± 0.008 | — |
+| server_only | 0.357 ± 0.047 | +0.0000 [−0.1134, +0.1134] |
+| cut_only | 0.077 ± 0.018 | **−0.2800 [−0.3172, −0.2428]** |
+| all_dp | 0.085 ± 0.005 | **−0.2717 [−0.2873, −0.2561]** |
+| eps=0.5 | 0.085 ± 0.010 | **−0.2717 [−0.2924, −0.2509]** |
+| eps=1.0 | 0.093 ± 0.020 | **−0.2633 [−0.3072, −0.2195]** |
+| eps=2.0 | 0.102 ± 0.008 | **−0.2550 [−0.2723, −0.2377]** |
+| eps=4.0 | 0.075 ± 0.017 | **−0.2817 [−0.3183, −0.2450]** |
+| eps=inf | 0.388 ± 0.045 | +0.0317 [−0.0755, +0.1389] |
+
+Floor (always-guess-modal) = 0.135 throughout.
+
+**There is no gradient across the budget grid.** Spearman rho across eps 0.5→4.0 is
+**−0.076 (p = 0.813)**; eps=4 vs eps=2 is p = 0.100. Every noised point sits at 0.075–0.102,
+below the floor and statistically indistinguishable from the others. Noise-off vs any-noise
+is +0.2996 (p = 0.006). **Do not read the small eps=4 dip as a trend — it is ~1 SE.**
+
+#### Why it is a step — the SNR argument
+
+`S = 1.0` caps the WHOLE embedding at L2 norm 1.0 across 32 dimensions, so each component
+carries only ~1/sqrt(32) ≈ 0.177 of magnitude. Injected noise std is sigma (since
+noise_std = sigma·S):
+
+| eps | sigma = noise std | per-component SNR |
+|---|---|---|
+| 0.5 | 5.597 | 0.032 |
+| 1.0 | 3.075 | 0.058 |
+| 2.0 | 1.796 | 0.098 |
+| 4.0 | 1.164 | **0.152** |
+
+**Even at eps=4 the noise is ~6.6x the per-component signal.** The whole tested grid sits in
+the noise-dominated regime, so the attack sees nothing anywhere. Extrapolating sigma(eps),
+the attack would not begin recovering signal until sigma ≈ 0.18, around **eps ≈ 30–40** —
+far outside any defensible budget.
+
+**Paper claim:** *within every usable privacy budget, cut-layer noise fully blocks inversion;
+the privacy trade-off has no interior.* This is stronger than a graded curve — it means the
+utility cost of cut-layer noise buys a complete defense rather than a proportional one, and
+it pairs with §R10's finding that server DP-SGD buys none.
+
+⚠️ Note this is a property of the CLIP, not of epsilon alone: it holds because S=1.0 makes
+the signal small relative to sigma·S. A larger S would not change epsilon (§2.2 isocline)
+but would change where the step sits.
+
+#### Two reporting bugs fixed alongside
+
+- `group_attack_rows` matched only `d3_*` tags, so every `eps_*` checkpoint became its own
+  group of one — no pooling, no error bars. Now groups by epsilon point.
+- **There was no ASR-vs-epsilon figure at all.** `fig3` is a categorical arm comparison.
+  Added `fig5_attack_vs_epsilon` as the privacy companion to `fig1`, annotated so a reader
+  seeing a flat line does not assume a broken axis.
+
+### R11. `_print_sweep` KeyError destroyed a completed sweep — twice averted (2026-07-31)
+
+`_print_sweep` still referenced `inv_recon_rmse`, a key removed when the inversion driver
+was rewritten to score whole rows (§R7). `_print_report` was updated; `_print_sweep` was
+not, and only the single-checkpoint path was tested.
+
+**Consequence:** the overnight sweep completed all four checkpoints (~73 min) and then died
+in the *formatter*. With no incremental write, every result was lost, and `set -euo
+pipefail` killed `reproduce_all.sh` before `publish` — which is why that run produced no
+`results/`.
+
+✅ **Fixed twice over:** `run_sweep(out_path=...)` rewrites the CSV after every checkpoint
+(this saved all 4 rows on the very next run), and every cell in `_print_sweep` now tolerates
+a missing or non-numeric value, with a regression test on a row containing only a tag.
+**A report function must never be able to destroy the data it reports on.**
+
+### R5. Two of the five headline `all_dp` runs stopped early
+
+Surfaced by the generated report's `early` column: `dedup_first / all_dp` shows **2/5** runs
+stopped by the budget gate, i.e. truncated at ~round 50 rather than 200. The §2h ε-sweep
+truncation confound is therefore **also present inside the headline §D3 matrix** and is not
+currently stated in `FINDINGS.md` §2e. Check before quoting the all_dp figure.
+
+---
+
+## 📋 TRACKED — K. Round-count revisit ⏳ REVIEW AT END
+
+**Owner: Alex. Deferred by decision (2026-07-27): revisit once the §D3 matrix is configured,
+then review again before the write-up.** Not blocking Step 2.
+
+**The problem.** All four §J re-baseline runs hit `best_val` at **round 50 — the final round —
+with `early_stop = False`**. They were still improving at the cap, so every §J number is a
+**floor, not a converged result**.
+
+**Why the current value is stale.** §A2 set 150 → 50 rounds based on the old runs peaking
+around round 35. That was measured on **1,843 training rows**. The cohort is now **20,411 rows**
+(11×), with Poisson batches of ~1,020 instead of ~92, so convergence behaviour is entirely
+different and the old peak-at-35 observation no longer applies.
+
+**The tension to resolve.** Two forces pull opposite ways and must be balanced *per config*:
+- **More rounds → better utility** for the no-DP ceiling (still climbing at 50).
+- **More rounds → worse utility under DP**, since σ scales ~√T: `solve_noise_multiplier` sizes
+  noise over the full `num-server-rounds` horizon, so a longer horizon buys more noise for
+  every step. The DP configs may genuinely want a *shorter* horizon than the ceiling.
+
+A single round count for all configs may therefore be the wrong shape — but using different
+horizons per config makes the comparison harder to defend. **This is the open question.**
+
+| # | Action |
+|---|---|
+| K1 | Convergence probe: one `no_dp` run at 150 rounds with early stopping active — find where it actually peaks on 20,411 rows (~15 min) |
+| K2 | Same probe for `server_only`, to see whether the DP optimum sits earlier than the ceiling's |
+| K3 | Decide: single shared horizon (simpler to defend) vs per-config horizon (better utility), and record the rationale |
+| K4 | Re-check the §6a issue in `docs/dp_explained_for_alex.md` — reported ε must match the horizon actually run, not the one σ was calibrated for |
+| K5 | **REVIEW AT END:** confirm the final matrix ran at the chosen horizon and that no config was silently truncated (`best_round == num_rounds` and `early_stop == False` is the tell) |
+
+---
+
+## 🎯 ATTACK-HANDOFF CHECKLIST (2026-07-28) ⏳ DO LAST
+
+*What must be true before the build is handed to attack evaluation. **None of these gate any
+other work** — corrected 2026-07-28 (Alex): the attacks sit on top of the pipeline and inject
+into what is already built, so this whole section is the LAST thing to do, not a prerequisite.*
+
+**Dependency direction (why these are genuinely last, not merely deferrable):**
+- **P3 is an OUTPUT of §D3**, not an input to it — §D3 produces the checkpoint set.
+- **P2 can only follow tuning** — you freeze the config that tuning selected (§B2:
+  tune → freeze → attack), so it sits after §D3 by definition.
+- **P1 is isolated tooling** — it touches no training, metric, or data code. Fixing it *now*,
+  against checkpoints whose architecture could still shift, risks re-breaking it; fixing it
+  once against frozen checkpoints is more robust.
+
+### 🔧 HANDOFF ITEMS — 3, all deferred to the end
+
+#### P1. `scripts/run_attack.py` cannot load ANY current checkpoint
+
+Verified by running it against a real post-fix checkpoint. **Two independent breaks:**
+
+```
+KeyError: 'encoder.6.weight'          # run_attack.py:137
+```
+
+1. **Hard-coded layer index.** It reads `sd_a["encoder.6.weight"]` for the embedding dim, but
+   the current `BottomModelA` emits from **`encoder.7`**. Note the module docstring already
+   claims *"dimensions are inferred from the checkpoint tensors, not hard-coded"* — that
+   claim is false for this line.
+2. **`hidden_dim` is never inferred.** `BottomModelB(input_dim=…, embedding_dim=…)` takes the
+   **default `hidden_dim=128`**, but our runs use **96** (`layer1.0.weight` is `(96, 26)`), so
+   `load_state_dict` fails on shape mismatch even after break 1 is fixed.
+
+**Fix:** infer embedding dim from the *last* Linear in the encoder (not a fixed index) and
+infer `hidden_dim` from the first Linear's output dim — i.e. actually do what the docstring
+says. Small, self-contained.
+
+**Good news:** everything *else* in the attack path works. The data assembly loaded our
+multi-module variant correctly (`assembled 2552 students, 44 features` = 18 + 26), `--processed-dir`
+already accepts variant directories, and all **15 attack tests pass**.
+
+#### P2. The defense config is not frozen (§B2)
+
+§B2 requires **tune → freeze → attack** so that defense tuning cannot become a feedback channel
+from the data into the released model. Settled so far: horizon **T=200** (§K3), primary variant
+**`dedup_first`** (§E-a). **Not deliberately chosen:** `server-dp-epsilon`, `cut-noise-target-epsilon`,
+`cut-noise-max-norm`, `server-dp-max-grad-norm` — these are still at defaults nobody selected on
+evidence. Freezing means writing them down and not touching them again.
+
+#### P3. No canonical checkpoint set at the frozen config
+
+Attacks need a trained bundle **per DP mode** at the frozen config. Existing checkpoints are
+probe artifacts at assorted horizons and seeds — not a coherent set. §D3 produces this.
+
+### 🟢 NOT BLOCKING — needed for the paper, not for attacks
+
+These affect *reported utility*, not model weights, and attacks read weights/embeddings/gradients:
+
+| # | Item | Status | Why not blocking |
+|---|---|---|---|
+| C1 | Threshold objective still defaults to `f1` | ❌ not done | Threshold affects reported metrics only. **Note:** at the new base rate (~0.46, minority-positive) the all-positive F1 baseline is 0.616 and current runs score 0.69–0.71, so it is not *currently* degenerating — but it is still the wrong objective |
+| C2 | `balanced_accuracy` / MCC not added | ❌ not done | Degeneracy-proof diagnostics; reporting only |
+| D1 | Bootstrap CIs | ❌ not done | Reporting only |
+| G | PSI verification | 📋 tracked | Validates an architecture claim |
+| M | Full-check sweep | 📋 tracked | Final combined-correctness pass |
+
+**C1/C2/D1 were in the step-3 slot of the execution order and were skipped** when work pivoted
+to §K and §L. They are still owed for the write-up.
+
+### Handoff sequence (after all other work completes)
+
+1. **Freeze the config (P2)** — record the DP parameters §D3 selected; commit them, then stop
+   touching them. This is what breaks the tuning→attack feedback loop (§B2).
+2. **Fix P1** (~30 min) — infer both dims from the checkpoint; re-run the attack smoke test
+   against the frozen bundles.
+3. **Hand over**: frozen config + checkpoint bundles (P3, produced by §D3) +
+   `run_attack.py --eps-tag <tag>`.
+
+**No discovery risk remains here.** The smoke test already exercised the whole attack path:
+data assembly loads the multi-module variants correctly (44 features = 18 + 26),
+`--processed-dir` accepts variant directories, and all 15 attack tests pass. Only the loader's
+hard-coded layer indices are stale — a contained fix, not an integration unknown.
+
+---
+
+## ⛔ DISSOLVED — M. Full-check sweep (superseded, 2026-07-28)
+
+**Decision (Alex): dissolve §M and defer its remaining value to a future full parameter sweep
+tracked in wandb.**
+
+**Why it is no longer needed as specified.** §M was written to verify that the accumulated
+refactors work *in combination*, not just in isolation. **§D3 already did that**: 60 runs over
+the complete `variant × DP-mode × seed` cross-product, **0 failures, 0 `pred_collapsed`**, MCC
+0.436–0.706, dimensions stable, ε within budget on every run. That is the combined-correctness
+sweep §M existed to perform.
+
+**What §D3 did NOT cover, and where it now lives:**
+
+| Original | Status |
+|---|---|
+| M1 every run writes `meta.json` | ✅ done — §D3, 60/60 |
+| M2 no `pred_collapsed`; `one_class_at_threshold` explainable | ✅ done — §D3, 0 collapses |
+| M3 dimensions + ε within budget | ✅ done — §D3 |
+| M4 no silent truncation | ✅ measured — 12/20 flagged at T=200, quantified as ~+0.010–0.014 AUC forgone (§K5); applies to all arms equally so between-arm comparisons are unaffected |
+| M5 diff the three dedup variants | ✅ done — §D3 sensitivity analysis passes (DP effect moves <0.001 across rules) |
+| M6 reproducibility record | ✅ done — `docs/FINDINGS.md` §2e |
+| **deployment-mode spot check** | 📋 → deferred to the wandb parameter sweep |
+| **broader parameter cross-product** (ε grid, clip norms, model size, horizon) | 📋 → **this is the real remaining work**, see below |
+
+### ✅ DONE — clip calibration + ε sweep (2026-07-30)
+
+**Clip calibration** (`experiments/clip_calibration.json`, 9 runs): **S=1.0 wins** —
+0.8453 vs 0.6022 (median) vs 0.5995 (p75). Moving to the median costs **−0.243 AUC** and
+inflates variance ~16×. The percentile heuristic is gradient-clipping intuition that does not
+transfer to input-side noise: the embedding magnitude saturates at its natural row norm (~4.3)
+while noise scales linearly with S, so SNR = min(S, norm)/(σ·S). `measure_embedding_norms.py`
+guidance corrected; `run_matrix.py` defaults set to 1.0. Full write-up: `FINDINGS.md` §2g.
+
+**ε sweep** (`experiments/eps_sweep.json`, 35 runs, wandb group `eps-sweep`, synced): the
+privacy–utility curve. Usable knee at **ε≈1**. Two truncation confounds documented in
+`FINDINGS.md` §2h — **ε=4 is invalid** (capped by `combined-target-epsilon = 3.0`, stopped at
+round ~50) and low-ε points are budget-exhausted. `recall@precision-70` collapses far faster
+than AUC (0.887 → 0.465 at ε=0.5 → 0.047 at ε=0.1).
+
+**→ Outstanding: re-run ε > 2 with `combined-target-epsilon` raised.** The curve above ε=2 is
+currently unusable.
+
+### 📋 DEFERRED — remaining parameter sweep, tracked in wandb
+
+Not a correctness sweep — a **parameter study**. §D3 fixed ε=1.0 per mechanism, T=200, and the
+current clip norms; none of those were swept. Candidate axes:
+
+- ~~`cut-noise-target-epsilon` grid~~ ✅ **DONE** — see above. **Still open:** the
+  `server-dp-epsilon` grid (this sweep covered the cut layer only), and ε > 2 with a raised
+  `combined-target-epsilon`
+- ~~`cut-noise-max-norm`~~ ✅ **DONE** — calibrated 2026-07-30; S=1.0 confirmed optimal
+- `hidden-dim-top` — the √d argument says model size is a strong DP lever
+- horizon, now that §K has mapped its shape
+- deployment-mode spot check folded in as one arm
+
+Run through `scripts/run_matrix.py` (add a job list) with `track-wandb=true`, so the sweep is
+browsable rather than living in JSON files.
+
+---
+
+## ✅ DONE — G. PSI verification against the generated variants (2026-07-28)
 
 **Owner: Alex** (2026-07-27 — Wyatt is focused on the attack work, so all remaining
 refinements move to Alex's list; this is a deliberate departure from the CLAUDE.md
@@ -433,12 +1413,49 @@ regeneration stays a single command. The PSI protocol is therefore **no longer o
 critical path** — but the architecture still claims PSI is what aligns the silos, so that claim
 needs to be demonstrated at least once.
 
-| # | Action |
-|---|---|
-| G1 | Run the PSI protocol (`scripts/extract_ids_for_psi.py` → `psi.psi_server` / `psi.psi_client`) against **one** variant's student set |
-| G2 | Assert the protocol's `ordered_id_list.json` matches the directly-computed one **exactly** (same IDs, same order) |
-| G3 | Record the result in the paper as the evidence that PSI alignment is real, not assumed |
-| G4 | Consider a CI check pinning G2 for a small fixture cohort, so the two paths cannot silently diverge |
+| # | Action | Status |
+|---|---|---|
+| G1 | Run the real ECDH protocol against a variant's student set | ✅ **all three variants** via `scripts/verify_psi.py --all` |
+| G2 | Assert the protocol reproduces the directly-computed intersection | ✅ **set-identical on all three**; ordering differs by convention — see below |
+| G3 | Record as evidence PSI alignment is real, not assumed | ✅ this section + `docs/FINDINGS.md` |
+| G4 | CI check pinning G2 | 📋 still open — would need a small fixture cohort |
+
+### Result
+
+| variant | Silo A ids | Silo B ids | pipeline ∩ | PSI ∩ | same set | time |
+|---|---|---|---|---|---|---|
+| dedup_first | 26,365 | 25,515 | 25,515 | 25,515 | ✅ | 4.6 s |
+| dedup_best | 26,365 | 25,520 | 25,520 | 25,520 | ✅ | 4.5 s |
+| dedup_worst | 26,365 | 25,512 | 25,512 | 25,512 | ✅ | 4.5 s |
+
+**The architecture's alignment claim is verified against the data actually used.**
+
+### ⚠️ Ordering convention differs (known, documented, NOT a bug)
+
+`prepare_silos.py` sorts the intersection **numerically** (ints); `psi_client.run_psi` sorts
+**lexicographically** (strings). Same students, different row order.
+
+Both are internally consistent — **both** silos read the same file — but the two lists are
+**NOT interchangeable**: the row order determines which students land in train/val/test, so
+substituting one for the other silently changes the dataset. **The pipeline's numeric ordering
+is canonical**; if PSI output is ever adopted directly, regenerate both silos from it.
+
+Aligning them was considered and rejected: it would change every variant's split and invalidate
+all 60 §D3 runs, for a cosmetic convention. The verification therefore asserts **set equality**
+— which is what PSI must actually prove (the correct intersection is computable without either
+party revealing its ID list) — and reports ordering as a documented difference.
+
+### ⚠️ `run_psi` writes to a hard-coded global path — third encounter
+
+`psi_client.run_psi()` returns the intersection **and** writes it to a module-level
+`OUTPUT_PATH` pointing at the real `data/processed/ordered_id_list.json`. This has now
+destroyed that file twice (once via `pytest` — §I; once via the first run of `verify_psi.py`).
+Both times the fix was to redirect `OUTPUT_PATH` at the call site.
+
+**A durable fix would be an `output_path` parameter on `run_psi`** so the write is opt-in rather
+than an invisible side effect of a function that already returns its result. Two workarounds for
+the same hazard is a signal the API is wrong, not the callers. `psi/` is Wyatt's module —
+flagging rather than changing.
 
 **Not blocking** the run matrix — it validates a claim rather than producing data. Schedule it
 before the write-up, not before §D3.
@@ -530,11 +1547,28 @@ and report the negative result as-is? (Note §F is worth doing either way.)
 |---|---|---|
 | 1 | **§E + §F data-prep refactor** — parameterized prep, 3 variants, pre-start exclusion, manifests | Defines what every later run trains on; verifiable without an FL run |
 | 2 | **§A1 + A2** (simulation federation, fewer rounds) | Blocking prerequisite: 36–60 runs is 12–20 h without it, ~1 h with it |
-| 3 | **§C1 + C2** (threshold objective, degeneracy-proof metrics) | Quick; stops bad numbers reaching the paper |
+| 3 | **§C1 + C2 + D1** (threshold objective, degeneracy-proof metrics, bootstrap CIs) | ✅ **DONE 2026-07-28** |
 | 4 | **§D1** (bootstrap CIs) | ~free, honest error bars immediately |
-| 5 | **§D3** run matrix (3 variants × 4 DP modes × seeds) | Needs 1–4 in place |
-| 6 | **§B2** freeze defense config → hand to Wyatt for attacks | Breaks the tuning feedback loop |
+| 5 | ✅ **§K1–K3 DONE** — horizon settled at **T=200** (shared) | See K2 probe + K3 decision |
+| 6 | **§D3** run matrix (3 variants × 4 DP modes × seeds) | Needs 1–5 in place |
+| 7 | **§B2** freeze defense config → hand to Wyatt for attacks | Breaks the tuning feedback loop |
+| 8 | ~~**§M** full-check sweep~~ | ⛔ **DISSOLVED** — subsumed by §D3; parameter-sweep remnant deferred to a wandb-tracked study |
+| 9 | **§P1–P3** attack handoff (freeze config, fix attack loader, hand over) | ⏳ **TRUE LAST** — attacks sit on top; nothing else depends on these. P1 ✅ done |
+
+**⚠️ Also outstanding — see `docs/HANDOFF.md`:**
+- **§Q3 §D3 re-run in simulation** (deferred 2026-07-30) — the current §D3 numbers predate the
+  replay-skip fix and are biased slightly against the no-DP ceiling.
+- **Attack ASR at n≈200** — n=20 gives SE 0.112, which cannot resolve DP differences.
 | — | **§G** PSI verification | Not blocking; validates a claim. Do before write-up |
+
+**⏳ END-OF-PROCESS REVIEW LIST** — check these before the write-up, not before the next step:
+- **§K5** — confirm no config was silently truncated (`best_round == num_rounds` with
+  `early_stop == False`).
+- **§L5–L7** — cross-mode equivalence settled, and no simulation number reported as a
+  deployment number.
+- **§G** — PSI protocol reproduces the directly-computed intersection.
+- **§H** — every pre-2026-07-27 number is void; make sure none survived into the paper.
+- **§B1/B4** — ε stated as a per-run guarantee, hyperparameter-tuning cost acknowledged.
 
 **Ownership note (2026-07-27):** Wyatt is focused on the attack work, so every remaining
 refinement in this document — including `psi/` verification (§G), normally his per CLAUDE.md —

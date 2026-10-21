@@ -6,9 +6,11 @@ experiment:
   owner: alex
 
 data:
-  processed_dir: data/processed
+  # MUST be a variant dir. Bare data/processed/ holds LEGACY single-module
+  # pickles (1,843 train rows vs 20,411) and is not comparable to the VFL runs.
+  processed_dir: data/processed/dedup_first
   seed: 42
-  assert_module: CCC_2014J    # set to whatever prepare_silos actually wrote; runner should verify
+  assert_module: null         # multi-module cohort; see the variant's manifest.json
   smote: false
 
 evaluation:

@@ -21,6 +21,7 @@ Layout:
 
 import io
 
+import numpy as np
 import pytest
 import torch
 
@@ -211,10 +212,14 @@ class TestRoundTrip:
         common_module.apply_gradients(spec, grad_msg, ctx)  # must not raise
 
     def test_detects_embedding_desync(self, common_module, fake_spec_factory, fresh_context):
-        """If the persisted model state is tampered with between
-        generate_embeddings and apply_gradients (simulating an RNG/data-order
-        regression), apply_gradients must raise rather than silently apply a
-        misattributed gradient."""
+        """A desynced replay must SKIP the update and COUNT it — never apply the gradient.
+
+        If the recomputed embedding differs from the one sent, the upstream gradient
+        belongs to a different computation graph, so applying it would be wrong. The skip
+        must also be counted in context.state: gradients are pushed fire-and-forget, so a
+        silent skip is invisible to the server and to the run's meta.json
+        (docs/action_plan.md section Q).
+        """
         from flwr.app import Array, ArrayRecord, Message, RecordDict
 
         spec = fake_spec_factory()
@@ -223,13 +228,38 @@ class TestRoundTrip:
         reply = common_module.generate_embeddings(spec, Message(), ctx)
         emb_sent = reply.content["arrays"]["embedding"].numpy()
 
-        tampered = {k: v.numpy() + 5.0 for k, v in ctx.state["model"].items()}
+        before = {k: v.numpy().copy() for k, v in ctx.state["model"].items()}
+        tampered = {k: v + 5.0 for k, v in before.items()}
         ctx.state["model"] = ArrayRecord({k: Array(v) for k, v in tampered.items()})
 
         grad = Array(emb_sent.copy() * 0.1)
         grad_msg = Message(content=RecordDict({"gradients": ArrayRecord({"local-gradients": grad})}))
-        with pytest.raises(RuntimeError, match="Recomputed embedding"):
-            common_module.apply_gradients(spec, grad_msg, ctx)
+        common_module.apply_gradients(spec, grad_msg, ctx)
+
+        assert "replay_skips" in ctx.state, "desync was not counted"
+        assert int(ctx.state["replay_skips"]["v"]) == 1
+
+        # The tampered weights must be left exactly as-is: no optimizer step ran.
+        after = {k: v.numpy() for k, v in ctx.state["model"].items()}
+        for k, v in tampered.items():
+            assert np.allclose(after[k], v), f"{k} was updated despite the desync"
+
+    def test_replay_skips_accumulate(self, common_module, fake_spec_factory, fresh_context):
+        """The skip counter accumulates across rounds so a run can report its own bound."""
+        from flwr.app import Array, ArrayRecord, Message, RecordDict
+
+        spec = fake_spec_factory()
+        ctx = fresh_context()
+        for expected in (1, 2):
+            reply = common_module.generate_embeddings(spec, Message(), ctx)
+            emb = reply.content["arrays"]["embedding"].numpy()
+            tampered = {k: v.numpy() + 5.0 for k, v in ctx.state["model"].items()}
+            ctx.state["model"] = ArrayRecord({k: Array(v) for k, v in tampered.items()})
+            msg = Message(content=RecordDict(
+                {"gradients": ArrayRecord({"local-gradients": Array(emb * 0.1)})}
+            ))
+            common_module.apply_gradients(spec, msg, ctx)
+            assert int(ctx.state["replay_skips"]["v"]) == expected
 
     def test_round_trip_logs_expected_metric_keys(self, common_module, fake_spec_factory, fresh_context, wandb_calls):
         from flwr.app import Array, ArrayRecord, Message, RecordDict
