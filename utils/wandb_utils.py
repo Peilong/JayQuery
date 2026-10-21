@@ -680,6 +680,13 @@ def build_flwr_sweep_fn(
             if meta.get("best_val_auc") is not None:
                 summary["val/auc_best"] = meta["best_val_auc"]
             summary.update(meta.get("epsilon_spent") or {})
+            # C3: without this the communication cost never leaves meta.json
+            # and the bytes-vs-utility result is missing from the sweep.
+            summary.update({
+                f"comm/{k}": v
+                for k, v in (meta.get("communication") or {}).items()
+                if isinstance(v, int | float)
+            })
             run.log(summary)
             log_params(cfg, run=run)
         finally:
