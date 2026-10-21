@@ -180,7 +180,7 @@ cohort rules, so their labels are not comparable).
 
 ### 6 — Run VFL training (deployment: SuperLink + 2 SuperNodes)
 ```bash
-python scripts/run_deployment.py --rounds 50
+python scripts/run_deployment.py --rounds 150
 # run_deployment.py starts flower-superlink + one flower-supernode per silo
 # (partition-id 0 = Silo A, 1 = Silo B), registers the connection in ~/.flwr/config.toml,
 # then submits `flwr run`. This is the supported run path — prefer it over a bare `flwr run .`,
@@ -204,27 +204,39 @@ pytest tests/ -v --cov=. --cov-report=term-missing
 
 ## Run-Config (pyproject.toml `[tool.flwr.app.config]`)
 
-Current keys (defaults):
+Current keys (defaults) — mirrors `pyproject.toml`, which is authoritative:
 ```
-num-server-rounds        = 50
-learning-rate            = 1e-2
-embedding-dim            = 32
+num-server-rounds        = 150    # THE horizon for every ICC run; noise is sized over it
+learning-rate            = 5e-4
+embedding-dim            = 32     # cut-layer width; the ICC width sweep varies this
 input-dim-a              = 18     # 6 encoded + 12 region one-hots (drop-first) — matches prepare_silos.py
 input-dim-b              = 26     # rate_v1: 6 stats + 20 vle rates; legacy v0 = 27 (docs/DATA_DICTIONARY.md)
+hidden-dim-a             = 64
+hidden-dim-b             = 96
+hidden-dim-top           = 32
+dropout-a / -b / -top    = 0.2 / 0.2 / 0.237
 processed-dir            = "data/processed"
 seed                     = 42     # also seeds the per-round batch selection
-batch-sample-rate        = 0.1    # Poisson sampling rate q; 1.0 = full-batch rounds
+batch-sample-rate        = 0.05   # Poisson sampling rate q; 1.0 = full-batch rounds
+pos-weight               = 0      # -1 = auto (n_neg/n_pos), 0 = off, >0 = explicit
 server-dp-enabled        = true   # server DP-SGD (Opacus mechanics, autodp accounting)
 server-dp-epsilon        = 1.0
 server-dp-delta          = 1e-5
-server-dp-max-grad-norm  = 1.0
+server-dp-max-grad-norm  = 4.0
 cut-noise-enabled        = true   # client cut-layer noise
 cut-noise-target-epsilon = 1.0
 cut-noise-delta          = 1e-5
 cut-noise-max-norm       = 1.0    # per-row embedding L2 clip = the mechanism's sensitivity
+label-dp-enabled         = false  # label randomized response (pure eps-DP, label-adjacent)
+label-dp-epsilon         = 1.0
+label-dp-seed            = 42     # one-time flip draw; falls back to `seed`
 combined-target-epsilon  = 3.0    # backstop on the composed (all-sources) epsilon
+eval-every               = 5
+early-stop-patience      = 20
+lr-warmup-rounds         = 10
+grad-clip-norm           = 2      # plain clipping; skipped when server DP is on (Opacus clips)
 track-wandb              = true
-wandb-log-interval       = 10     # client wandb flush cadence (rounds); <=1 = every round
+wandb-log-interval       = 25     # client wandb flush cadence (rounds); <=1 = every round
 ```
 
 Mini-batching: the server sends a per-round `batch-seed` + `batch-sample-rate`; both silos

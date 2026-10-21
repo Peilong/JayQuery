@@ -12,7 +12,7 @@ legacy-v0 sweep parameter (see docs/DATA_DICTIONARY.md) honored only with
 
 Usage:
     python scripts/run_sweep.py --count 20
-    python scripts/run_sweep.py --sweep-config experiments/configs/sweep_vfl.yaml --rounds 50
+    python scripts/run_sweep.py --sweep-config experiments/configs/sweep_vfl.yaml --rounds 150
     python scripts/run_sweep.py --sweep-id <id> --count 10     # resume an existing sweep
     python scripts/run_sweep.py --enable-cutoff-week           # legacy v0 cutoff sweep
 """
