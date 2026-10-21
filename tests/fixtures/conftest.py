@@ -60,12 +60,33 @@ def _install_flwr_stubs() -> None:
     class RecordDict(dict):
         pass
 
+    class _Metadata:
+        """message.metadata — only src_node_id is read (by fl_server)."""
+
+        def __init__(self, src_node_id=None):
+            self.src_node_id = src_node_id
+
     class Message:
-        def __init__(self, content=None, reply_to=None, message_type=None, dst_node_id=None):
+        def __init__(
+            self,
+            content=None,
+            reply_to=None,
+            message_type=None,
+            dst_node_id=None,
+            src_node_id=None,
+            error=None,
+        ):
             self.content = content if content is not None else RecordDict()
             self.reply_to = reply_to
             self.message_type = message_type
             self.dst_node_id = dst_node_id
+            self.metadata = _Metadata(src_node_id=src_node_id)
+            self._error = error
+
+        def has_content(self):
+            """Mirrors flwr's Message.has_content(): False when the message
+            carries an error instead of a payload."""
+            return self._error is None
 
     class _StateStore(dict):
         """context.state — get(key, default) plus dict-style assignment."""
@@ -106,9 +127,40 @@ def _install_flwr_stubs() -> None:
 
     flwr_clientapp.ClientApp = ClientApp
 
+    # ── flwr.common / flwr.serverapp (needed by fl_server/server_app.py) ────
+    # Additive: fl_client never imports these, so the client suite is unaffected.
+    flwr_common = types.ModuleType("flwr.common")
+
+    def log(level, msg, *args):
+        """No-op stand-in for flwr.common.log. Tests that need to assert on a
+        specific WARNING monkeypatch fl_server.server_app.log directly."""
+
+    flwr_common.log = log
+
+    flwr_serverapp = types.ModuleType("flwr.serverapp")
+
+    class Grid:
+        """Marker base class only — tests inject their own FakeGrid
+        (see tests/fixtures/server_fakes.py), which is duck-typed."""
+
+    class ServerApp:
+        """@app.main() — returns the function unchanged, so server_app.main
+        stays a plain callable the tests can invoke directly."""
+
+        def main(self):
+            def deco(fn):
+                return fn
+
+            return deco
+
+    flwr_serverapp.Grid = Grid
+    flwr_serverapp.ServerApp = ServerApp
+
     sys.modules["flwr"] = flwr_pkg
     sys.modules["flwr.app"] = flwr_app
     sys.modules["flwr.clientapp"] = flwr_clientapp
+    sys.modules["flwr.common"] = flwr_common
+    sys.modules["flwr.serverapp"] = flwr_serverapp
 
 
 _install_flwr_stubs()
