@@ -124,6 +124,9 @@ def main(grid: Grid, context: Context) -> None:
     combined_target = float(context.run_config.get("combined-target-epsilon", 3.0))
     server_tracker: PrivacyBudgetTracker | None = None
     label_primitives: dict = {}
+    bytes_up_total = 0
+    bytes_down_total = 0
+    rounds_counted = 0
     label_correction_applied = False
     client_trackers: dict[int, PrivacyBudgetTracker] = {}
     stopped_early = False
@@ -289,8 +292,22 @@ def main(grid: Grid, context: Context) -> None:
             log(INFO, "Round %d — %s: %.4f", round_num, k, v)
 
         if track:
+            # Logged per round, not just totalled: "bytes to a target AUC" is
+            # read off the cumulative series against the val/auc curve.
+            # The gradient push happens a few lines below, so its size is
+            # measured here from the tensors that will be sent — the same
+            # payload _send_gradients totals for meta.json.
+            bytes_down_now = int(grad_a.numpy().nbytes + grad_b.numpy().nbytes)
+            comm_metrics = {
+                "comm/bytes_round": float(rd.bytes_up + bytes_down_now),
+                "comm/bytes_up_round": float(rd.bytes_up),
+                "comm/bytes_cumulative": float(
+                    bytes_up_total + bytes_down_total + rd.bytes_up + bytes_down_now
+                ),
+            }
             wandb.log({"train/loss": float(loss), "train/loss_ema": loss_ema,
-                       "train/lr": current_lr, **train_health, **eps_metrics}, step=round_num)
+                       "train/lr": current_lr, **train_health, **eps_metrics,
+                       **comm_metrics}, step=round_num)
 
         save_best_now = False
         if round_num % eval_every == 0:
@@ -334,7 +351,7 @@ def main(grid: Grid, context: Context) -> None:
                     log(INFO, "LR plateau reduce: scale=%.4g (next lr ~ %.2e)",
                         plateau_scale, max(lr_min, base_lr * plateau_scale))
 
-        _send_gradients(
+        bytes_down = _send_gradients(
             grid=grid,
             node_pos_map=node_pos_map,
             grad_a=grad_a,
@@ -345,6 +362,9 @@ def main(grid: Grid, context: Context) -> None:
             save_best=save_best_now,
             lr=current_lr,
         )
+        bytes_up_total += rd.bytes_up
+        bytes_down_total += bytes_down
+        rounds_counted += 1
 
         if evals_since_improve >= patience:
             log(INFO,
@@ -433,6 +453,23 @@ def main(grid: Grid, context: Context) -> None:
             server_tracker, client_trackers, dp["delta"], label_primitives
         ),
         "label_privacy": label_primitives or None,
+        "communication": {
+            "bytes_up": bytes_up_total,
+            "bytes_down": bytes_down_total,
+            "bytes_total": bytes_up_total + bytes_down_total,
+            "rounds_counted": rounds_counted,
+            "bytes_per_round": (
+                (bytes_up_total + bytes_down_total) / rounds_counted
+                if rounds_counted else 0.0
+            ),
+        },
+        # The noise ACTUALLY used, not what was configured. Under early
+        # stopping the realized step count is below the horizon, and
+        # re-deriving sigma from the config afterwards would mis-calibrate
+        # both the epsilon audit and the post-hoc inversion attack.
+        "privacy_primitives": _privacy_primitives(
+            server_tracker, client_trackers, label_primitives
+        ),
         "metrics": test_metrics,
         "metrics_at_0.5": test_metrics_at_half,
     }
@@ -478,6 +515,37 @@ def _warmup_factor(round_num: int, warmup_rounds: int, start_factor: float) -> f
     if warmup_rounds <= 0 or round_num >= warmup_rounds:
         return 1.0
     return start_factor + (1.0 - start_factor) * (round_num / warmup_rounds)
+
+
+def _privacy_primitives(
+    server_tracker: PrivacyBudgetTracker | None,
+    client_trackers: dict[int, PrivacyBudgetTracker],
+    label_primitives: dict | None = None,
+) -> dict:
+    """Realized per-channel DP primitives for meta.json.
+
+    Records sigma / sample_rate / realized steps per channel so a later audit
+    recomputes the epsilon that was actually spent rather than the one the
+    config implies.
+    """
+    out: dict = {}
+    if server_tracker is not None:
+        out["server"] = server_tracker.to_dict()
+    for pos, tracker in sorted(client_trackers.items()):
+        out[_pos_name(pos)] = tracker.to_dict()
+    if label_primitives:
+        out["label"] = dict(label_primitives)
+    return out
+
+
+def _record_bytes(record: ArrayRecord) -> int:
+    """Payload size of an ArrayRecord, in bytes.
+
+    Measures the tensors actually serialized onto the wire. Framing overhead
+    is excluded: it is constant per message and would not change with the cut
+    layer width, which is the variable C3 is about.
+    """
+    return int(sum(arr.numpy().nbytes for arr in record.values()))
 
 
 def _pos_name(pos: int) -> str:
@@ -562,6 +630,8 @@ class _RoundData:
     #: Label-DP primitives from the label holder (pure eps-DP, label-adjacent).
     #: Kept apart from client_privacy so it is never Gaussian-composed.
     label_privacy: dict = field(default_factory=dict)
+    #: Bytes received from the silos this round (C3 communication cost).
+    bytes_up: int = 0
     exhausted: list[int] = field(default_factory=list)
 
 
@@ -616,6 +686,7 @@ def _get_embeddings(
             rd.n_total = int(cfg["n-total"])
         if pos == _SILO_A_POS and "n-pos" in cfg:
             rd.n_pos, rd.n_neg = int(cfg["n-pos"]), int(cfg["n-neg"])
+        rd.bytes_up += _record_bytes(reply.content["arrays"])
         emb = torch.from_numpy(reply.content["arrays"]["embedding"].numpy())
         if pos == _SILO_A_POS:
             rd.emb_a = emb
@@ -641,7 +712,7 @@ def _send_gradients(
     eps_tag: str,
     save_best: bool = False,
     lr: float | None = None,
-) -> None:
+) -> int:
     """Push per-silo embedding gradients back to each SuperNode.
 
     Uses push_messages (no reply expected); each SuperNode's apply_gradients
@@ -655,6 +726,9 @@ def _send_gradients(
         save_best: If True, the client should snapshot its CURRENT bottom model
             (the state this round's val/auc was measured on) as best-so-far,
             BEFORE applying the gradient in this message.
+
+    Returns:
+        Total gradient payload bytes pushed (C3 communication cost).
     """
     pos_to_grad = {_SILO_A_POS: grad_a, _SILO_B_POS: grad_b}
     messages = []
@@ -679,6 +753,7 @@ def _send_gradients(
 
     log(INFO, "Sending gradients to %d nodes...", len(messages))
     grid.push_messages(messages)
+    return sum(_record_bytes(m.content["gradients"]) for m in messages)
 
 def _collect_eval_predictions(
     grid: Grid,

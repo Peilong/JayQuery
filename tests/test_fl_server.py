@@ -1499,3 +1499,133 @@ class TestLabelChannelAtServer:
         assert float(meta["label_privacy"]["epsilon"]) == pytest.approx(2.0)
         assert float(meta["label_privacy"]["delta"]) == 0.0
         assert "label" in str(meta["label_privacy"]["neighboring_relation"]).lower()
+
+
+class TestCommunicationCost:
+    """C3: bytes on the wire per round. Only measurable DURING a run."""
+
+    def test_counts_bytes_in_both_directions(self, run_server) -> None:
+        import json
+
+        _, tmp_path = run_server(**{"num-server-rounds": 3, "run-tag": "comm"})
+        meta = json.loads(
+            (tmp_path / "experiments" / "checkpoints" / "comm" / "meta.json").read_text()
+        )
+
+        comm = meta["communication"]
+        assert comm["bytes_up"] > 0, "no client->server bytes counted"
+        assert comm["bytes_down"] > 0, "no server->client bytes counted"
+        assert comm["bytes_total"] == comm["bytes_up"] + comm["bytes_down"]
+        assert comm["rounds_counted"] == 3
+
+    def test_bytes_scale_with_cut_layer_width(self, run_server) -> None:
+        """THE C3 result: a narrower cut layer means fewer bytes. If traffic
+        did not track embedding width, the width sweep would measure nothing."""
+        import json
+
+        narrow_grid = FakeGrid(node_ids=[11, 22])
+        narrow_grid.labels = balanced_labels(n_rows=8, n_pos=3)
+        narrow_grid.embedding_dim = 4
+        _, p1 = run_server(grid=narrow_grid, **{"num-server-rounds": 2,
+                                                "embedding-dim": 4,
+                                                "run-tag": "w4"})
+        narrow = json.loads(
+            (p1 / "experiments" / "checkpoints" / "w4" / "meta.json").read_text()
+        )["communication"]["bytes_total"]
+
+        wide_grid = FakeGrid(node_ids=[11, 22])
+        wide_grid.labels = balanced_labels(n_rows=8, n_pos=3)
+        wide_grid.embedding_dim = 16
+        _, p2 = run_server(grid=wide_grid, **{"num-server-rounds": 2,
+                                              "embedding-dim": 16,
+                                              "run-tag": "w16"})
+        wide = json.loads(
+            (p2 / "experiments" / "checkpoints" / "w16" / "meta.json").read_text()
+        )["communication"]["bytes_total"]
+
+        assert wide > narrow * 2, (
+            f"4x the width produced only {wide / narrow:.2f}x the traffic"
+        )
+
+    def test_per_round_bytes_logged_to_wandb(self, server_module, run_server,
+                                             wandb_spy) -> None:
+        """Bytes-to-target-AUC is derived from the per-round cumulative series,
+        so it has to be logged alongside the metrics, not just totalled."""
+        run_server(**{"num-server-rounds": 3, "track-wandb": True})
+
+        per_round = [d for step, d in wandb_spy["logs"] if step is not None]
+        assert all("comm/bytes_round" in d for d in per_round)
+        cumulative = [d["comm/bytes_cumulative"] for d in per_round]
+        assert cumulative == sorted(cumulative), "cumulative bytes not monotonic"
+        assert cumulative[-1] > cumulative[0]
+
+
+@pytest.mark.dp
+class TestPrivacyProvenance:
+    """meta.json must record the noise ACTUALLY used, not what was configured."""
+
+    def test_records_realized_primitives_per_channel(self, run_server) -> None:
+        import json
+
+        _, tmp_path = run_server(
+            **{"num-server-rounds": 2, "server-dp-enabled": True,
+               "server-dp-epsilon": 5.0, "combined-target-epsilon": 1000.0,
+               "run-tag": "prov"}
+        )
+        meta = json.loads(
+            (tmp_path / "experiments" / "checkpoints" / "prov" / "meta.json").read_text()
+        )
+
+        prims = meta["privacy_primitives"]
+        assert "server" in prims, "server channel primitives missing"
+        for key in ("sigma", "sample_rate", "steps", "delta", "target_epsilon"):
+            assert key in prims["server"], f"server channel missing {key}"
+        assert prims["server"]["sigma"] > 0
+
+    def test_realized_steps_reflect_early_stopping(self, server_module,
+                                                   run_server, monkeypatch) -> None:
+        """THE provenance invariant. With early stopping the realized step
+        count is below the configured horizon. Recording only the horizon
+        makes the post-hoc epsilon audit and the attack's noise calibration
+        wrong for exactly the runs that stopped early."""
+        import json
+
+        monkeypatch.setattr(
+            server_module, "_run_eval", _fake_eval([0.9, 0.5, 0.4, 0.3, 0.2, 0.1]),
+        )
+        _, tmp_path = run_server(
+            **{"num-server-rounds": 20, "eval-every": 1, "early-stop-patience": 2,
+               "server-dp-enabled": True, "server-dp-epsilon": 5.0,
+               "combined-target-epsilon": 1000.0, "run-tag": "stop"}
+        )
+        meta = json.loads(
+            (tmp_path / "experiments" / "checkpoints" / "stop" / "meta.json").read_text()
+        )
+
+        assert meta["stopped_early"] is True
+        realized = meta["privacy_primitives"]["server"]["steps"]
+        assert realized < meta["num_rounds"], (
+            f"recorded {realized} steps against a {meta['num_rounds']}-round "
+            "horizon — the run stopped early, so the horizon is not what was spent"
+        )
+        assert realized > 0
+
+    def test_client_channels_recorded(self, run_server) -> None:
+        import json
+
+        prims = {
+            "target_epsilon": 10.0, "sigma": 3.0,
+            "sample_rate": 0.1, "delta": 1e-5, "steps": 2,
+        }
+        grid = FakeGrid(node_ids=[11, 22])
+        grid.labels = balanced_labels(n_rows=8, n_pos=3)
+        grid.privacy_by_pos = {SILO_A_POS: prims, SILO_B_POS: prims}
+
+        _, tmp_path = run_server(grid=grid, **{"num-server-rounds": 2,
+                                               "combined-target-epsilon": 1000.0,
+                                               "run-tag": "cli"})
+        meta = json.loads(
+            (tmp_path / "experiments" / "checkpoints" / "cli" / "meta.json").read_text()
+        )
+        assert "silo_a" in meta["privacy_primitives"]
+        assert meta["privacy_primitives"]["silo_a"]["sigma"] == pytest.approx(3.0)
