@@ -48,7 +48,10 @@ from pathlib import Path
 
 FLWR_CONFIG_PATH = Path.home() / ".flwr" / "config.toml"
 SUPERLINK_READY_TIMEOUT_S = 20
-SUPERNODE_STARTUP_GRACE_S = 3  # best-effort: see NOTE in wait_for_supernodes()
+# Both SuperNodes must REGISTER with the SuperLink before `flwr run` submits,
+# or the ServerApp sees 1 node and aborts. 3s was not enough on a cold start
+# (observed Oct 2026: both processes started, only one registered in time).
+SUPERNODE_STARTUP_GRACE_S = 10  # override with --supernode-grace
 
 
 def parse_args() -> argparse.Namespace:
@@ -79,6 +82,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument("--host", default="127.0.0.1", help="Bind/connect host for all components (default: 127.0.0.1).")
+    p.add_argument(
+        "--supernode-grace",
+        type=float,
+        default=SUPERNODE_STARTUP_GRACE_S,
+        help="Seconds to wait for both SuperNodes to register before submitting "
+        f"the run (default: {SUPERNODE_STARTUP_GRACE_S}). Raise this if the "
+        "ServerApp aborts with 'Expected exactly 2 SuperNodes'.",
+    )
     p.add_argument(
         "--skip-port-check",
         action="store_true",
@@ -228,7 +239,7 @@ def main() -> None:
         # poll the way the SuperLink's control API does. If `flwr run` below
         # fails with a "no SuperNodes connected" style error, increase
         # SUPERNODE_STARTUP_GRACE_S or check each SuperNode's own log output.
-        time.sleep(SUPERNODE_STARTUP_GRACE_S)
+        time.sleep(args.supernode_grace)
 
         # --run-config is merged into ONE flag: flwr accepts a single space-separated
         # "k=v k=v" string, and passing the flag twice would silently drop the first.
