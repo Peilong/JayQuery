@@ -71,15 +71,21 @@ def make_pre_trial_fn(enable_cutoff_week: bool) -> Callable[[dict[str, Any]], di
     """Build the pre-trial hook: pop cutoff-week and resolve the trial's dataset."""
 
     def pre_trial(params: dict[str, Any]) -> dict[str, Any]:
+        from utils.wandb_utils import expand_placement
+
+        # ICC grid: placement/epsilon are sweep axes, not run-config keys.
+        # Pop them first so they never reach --run-config.
+        cfg: dict[str, Any] = expand_placement(params)
+
         week = params.pop("cutoff-week", None)
         if week is None:
-            return {}
+            return cfg
         if not enable_cutoff_week:
             print(
                 f"[sweep] WARNING: dropping sampled cutoff-week={week} — pass "
                 "--enable-cutoff-week to honor it. Trial uses rate_v1 data/processed."
             )
-            return {}
+            return cfg
         out_dir = PROCESSED_DIR / f"week{int(week):02d}"
         if not (out_dir / "silo_b.pkl").exists():
             subprocess.run(
@@ -90,7 +96,8 @@ def make_pre_trial_fn(enable_cutoff_week: bool) -> Callable[[dict[str, Any]], di
         # Legacy v0 layout is wider than the rate_v1 default — read the true width
         with open(out_dir / "silo_b.pkl", "rb") as f:
             dim_b = pickle.load(f)["X_train"].shape[1]
-        return {"processed-dir": str(out_dir), "input-dim-b": int(dim_b)}
+        cfg.update({"processed-dir": str(out_dir), "input-dim-b": int(dim_b)})
+        return cfg
 
     return pre_trial
 
@@ -100,6 +107,7 @@ def main() -> None:
     require_flwr_cli()
 
     import wandb
+
     from utils.wandb_utils import build_flwr_sweep_fn
 
     fleet_port, control_port = args.base_port, args.base_port + 1

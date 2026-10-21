@@ -223,3 +223,84 @@ class TestSeedEverything:
         a = torch.randn(32)
         seed_everything(2)
         assert not torch.equal(a, torch.randn(32))
+
+
+# ── placement expansion for the ICC grid ────────────────────────────────────
+
+
+class TestPlacementExpansion:
+    """`placement` + `epsilon` become the three channel switches.
+
+    The sweep samples a readable placement name; the run-config needs three
+    booleans and the right per-channel epsilon. Getting this wrong mislabels
+    every cell of the grid, and the mistake would be invisible in the results.
+    """
+
+    def _expand(self, **params):
+        from utils.wandb_utils import expand_placement
+
+        return expand_placement(params)
+
+    def test_none_disables_every_channel(self) -> None:
+        cfg = self._expand(placement="none")
+        assert cfg["server-dp-enabled"] is False
+        assert cfg["cut-noise-enabled"] is False
+        assert cfg["label-dp-enabled"] is False
+
+    def test_server_placement_enables_only_dp_sgd(self) -> None:
+        cfg = self._expand(placement="server", epsilon=2)
+        assert cfg["server-dp-enabled"] is True
+        assert cfg["server-dp-epsilon"] == 2
+        assert cfg["cut-noise-enabled"] is False
+        assert cfg["label-dp-enabled"] is False
+
+    def test_cut_layer_placement_enables_only_embedding_noise(self) -> None:
+        cfg = self._expand(placement="cut-layer", epsilon=4)
+        assert cfg["cut-noise-enabled"] is True
+        assert cfg["cut-noise-target-epsilon"] == 4
+        assert cfg["server-dp-enabled"] is False
+        assert cfg["label-dp-enabled"] is False
+
+    def test_label_placement_enables_only_randomized_response(self) -> None:
+        cfg = self._expand(placement="label", epsilon=1)
+        assert cfg["label-dp-enabled"] is True
+        assert cfg["label-dp-epsilon"] == 1
+        assert cfg["server-dp-enabled"] is False
+        assert cfg["cut-noise-enabled"] is False
+
+    def test_all_enables_every_channel_at_the_same_epsilon(self) -> None:
+        """Each channel gets the per-channel budget; the composed total is
+        reported, not configured."""
+        cfg = self._expand(placement="all", epsilon=8)
+        assert cfg["server-dp-enabled"] is True
+        assert cfg["cut-noise-enabled"] is True
+        assert cfg["label-dp-enabled"] is True
+        assert cfg["server-dp-epsilon"] == 8
+        assert cfg["cut-noise-target-epsilon"] == 8
+        assert cfg["label-dp-epsilon"] == 8
+
+    def test_consumes_its_own_keys(self) -> None:
+        """`placement` and `epsilon` are sweep axes, not run-config keys.
+        Leaving them in would make flwr reject the run-config outright."""
+        from utils.wandb_utils import expand_placement
+
+        # passed by reference, not via **kwargs: the point is in-place removal
+        params = {"placement": "server", "epsilon": 2, "seed": 42}
+        expand_placement(params)
+        assert "placement" not in params
+        assert "epsilon" not in params
+        assert params["seed"] == 42, "unrelated params must survive"
+
+    def test_rejects_an_unknown_placement(self) -> None:
+        """A typo in the sweep yaml must fail loudly, not silently run a
+        no-DP configuration labelled as something else."""
+        with pytest.raises(ValueError, match="placement"):
+            self._expand(placement="cutlayer", epsilon=1)
+
+    def test_requires_epsilon_when_a_channel_is_on(self) -> None:
+        with pytest.raises(ValueError, match="epsilon"):
+            self._expand(placement="all")
+
+    def test_absent_placement_is_a_no_op(self) -> None:
+        """Other sweeps (sweep_vfl.yaml) have no placement axis."""
+        assert self._expand(**{"learning-rate": 0.001}) == {}

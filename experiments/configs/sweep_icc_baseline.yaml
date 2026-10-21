@@ -1,0 +1,21 @@
+# ICC 2027 no-DP baseline: 5 seeds, no epsilon axis.
+#
+# Split out of sweep_icc_placement.yaml because epsilon is meaningless with
+# every channel off -- crossing it with the epsilon grid would run the same
+# configuration 25 times instead of 5.
+name: icc-baseline
+method: grid
+metric:
+  name: val/auc_best
+  goal: maximize
+parameters:
+  placement:
+    value: none
+  seed:
+    values: [42, 43, 44, 45, 46]
+  num-server-rounds:
+    value: 150
+  embedding-dim:
+    value: 32
+  batch-sample-rate:
+    value: 0.05

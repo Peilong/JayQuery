@@ -1,0 +1,44 @@
+# ICC 2027 main grid: DP PLACEMENT x epsilon x seed.
+#
+# This is the C1/C2 result -- "where should the noise go?" -- so the sweep is a
+# GRID, not a Bayesian search: every cell is a reported data point, not a step
+# toward an optimum. method: grid with 5 seeds gives the paired comparison the
+# plan calls for.
+#
+# Four placements are expressed through the three channel switches:
+#   none        server-dp-enabled=false cut-noise-enabled=false label-dp-enabled=false
+#   server      server-dp-enabled=true  (others false)
+#   cut-layer   cut-noise-enabled=true  (others false)
+#   label       label-dp-enabled=true   (others false)
+#   all         all three true
+# run_sweep.py expands `placement` into those switches via pre_trial_fn;
+# epsilon is applied to whichever channels the placement turns on.
+#
+# Metric: val/auc_best, read from the server's meta.json after each trial.
+name: icc-placement-grid
+method: grid
+metric:
+  name: val/auc_best
+  goal: maximize
+parameters:
+  placement:
+    # 'none' is NOT here: epsilon does not apply to it, so including it would
+    # run the same baseline 5 times over at 5 epsilons -- 20 wasted runs, a
+    # fifth of the grid. It lives in sweep_icc_baseline.yaml instead.
+    values: [server, cut-layer, label, all]
+  epsilon:
+    values: [0.5, 1, 2, 4, 8]
+  seed:
+    values: [42, 43, 44, 45, 46]
+  # Held fixed across the grid so placement and epsilon are the only moving
+  # parts. These are the tuned values from the sweep_vfl search.
+  num-server-rounds:
+    value: 150
+  embedding-dim:
+    value: 32
+  batch-sample-rate:
+    value: 0.05
+  combined-target-epsilon:
+    value: 1000.0   # per-channel budgets gate; the composed total is REPORTED,
+                    # not enforced, or high-epsilon cells would halt early and
+                    # silently drop out of the grid.

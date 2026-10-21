@@ -1,0 +1,28 @@
+# ICC 2027 cut-layer width sweep (C3): bytes vs noise vs utility.
+#
+# At a FIXED epsilon, a narrower cut layer sends fewer bytes AND adds less
+# total noise, so this isolates the width trade-off the plan wants. Only the
+# cut-layer channel is on: the result is about what crosses the wire.
+#
+# Metric: val/auc_best; comm/bytes_total is logged per trial for the
+# bytes-vs-utility plot.
+name: icc-width-sweep
+method: grid
+metric:
+  name: val/auc_best
+  goal: maximize
+parameters:
+  embedding-dim:
+    values: [8, 16, 32, 64]
+  seed:
+    values: [42, 43, 44, 45, 46]
+  placement:
+    value: cut-layer
+  epsilon:
+    value: 1
+  num-server-rounds:
+    value: 150
+  batch-sample-rate:
+    value: 0.05
+  combined-target-epsilon:
+    value: 1000.0

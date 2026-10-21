@@ -613,6 +613,71 @@ def _fmt_run_config_value(v: Any) -> str:
     return "'" + str(v).replace("'", "\\'") + "'"
 
 
+_PLACEMENTS: dict[str, tuple[str, ...]] = {
+    "none": (),
+    "server": ("server",),
+    "cut-layer": ("cut",),
+    "label": ("label",),
+    "all": ("server", "cut", "label"),
+}
+
+#: channel -> (enable key, epsilon key)
+_CHANNEL_KEYS: dict[str, tuple[str, str]] = {
+    "server": ("server-dp-enabled", "server-dp-epsilon"),
+    "cut": ("cut-noise-enabled", "cut-noise-target-epsilon"),
+    "label": ("label-dp-enabled", "label-dp-epsilon"),
+}
+
+
+def expand_placement(params: dict[str, Any]) -> dict[str, Any]:
+    """Turn the ICC grid's `placement` + `epsilon` axes into run-config keys.
+
+    The sweep samples a readable placement name ("cut-layer"); the run-config
+    needs three channel switches and the matching per-channel epsilon. Both
+    axis keys are POPPED from ``params``: they are not run-config keys, and
+    passing them through would make `flwr run` reject the config.
+
+    Each enabled channel gets the sampled epsilon as its own per-channel
+    budget. The composed total across channels is reported from the run, not
+    configured here.
+
+    Args:
+        params: Sampled sweep parameters. Mutated in place.
+
+    Returns:
+        Run-config overrides. Empty when the sweep has no placement axis.
+
+    Raises:
+        ValueError: On an unknown placement, or a placement that enables a
+            channel without an epsilon to size it.
+    """
+    if "placement" not in params:
+        return {}
+
+    placement = str(params.pop("placement"))
+    if placement not in _PLACEMENTS:
+        raise ValueError(
+            f"unknown placement {placement!r}; expected one of {sorted(_PLACEMENTS)}"
+        )
+
+    channels = _PLACEMENTS[placement]
+    epsilon = params.pop("epsilon", None)
+    if channels and epsilon is None:
+        raise ValueError(
+            f"placement {placement!r} enables {list(channels)} but no epsilon was "
+            "sampled — the noise could not be sized."
+        )
+
+    cfg: dict[str, Any] = {
+        enable_key: False for enable_key, _ in _CHANNEL_KEYS.values()
+    }
+    for channel in channels:
+        enable_key, eps_key = _CHANNEL_KEYS[channel]
+        cfg[enable_key] = True
+        cfg[eps_key] = epsilon
+    return cfg
+
+
 def build_flwr_sweep_fn(
     *,
     app: str = ".",

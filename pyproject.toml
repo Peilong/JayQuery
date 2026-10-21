@@ -64,6 +64,9 @@ fab-include = [
     "fl_server/**/*.py",
     "privacy/**/*.py",
     "psi/**/*.py",
+    # fl_server AND fl_client both import baselines.eval_utils (metrics are
+    # computed in the label holder), so it must ship in the FAB.
+    "baselines/**/*.py",
     "silo_a/**/*.py",
     "silo_b/**/*.py",
     "utils/**/*.py",
@@ -100,6 +103,9 @@ cut-noise-enabled = true
 cut-noise-target-epsilon = 1.0
 cut-noise-delta = 1e-5
 cut-noise-max-norm = 1.0
+label-dp-enabled = false   # label randomized response (pure eps-DP, label-adjacent)
+label-dp-epsilon = 1.0
+label-dp-seed = 42         # one-time flip draw; defaults to `seed` when unset
 combined-target-epsilon = 3.0
 track-wandb = true
 wandb-log-interval = 25
