@@ -25,6 +25,7 @@ import torch
 from flwr.app import Array, ArrayRecord, ConfigRecord, Context, Message, RecordDict
 
 from fl_client.silo_spec import SiloSpec
+from privacy.label_dp import LabelRRAccountant
 from privacy.noise_injection import add_gaussian_noise, clip_embedding_rows
 from privacy.privacy_accountant import PrivacyBudgetTracker, solve_noise_multiplier
 from utils.wandb_utils import log_client_rounds, new_run_id
@@ -103,6 +104,23 @@ def _cut_noise_config(spec: SiloSpec, context: Context) -> dict:
     }
     cfg.update(spec.cut_noise_config_fn(context))  # silo-specific overrides
     return cfg
+
+
+def _label_dp_config(context: Context) -> dict:
+    """Label randomized-response params from run_config.
+
+    Unlike the cut-layer noise there is no per-silo override: only the
+    label-holding silo has labels, so a single run-config block describes the
+    whole channel.
+    """
+    rc = context.run_config
+    return {
+        "enabled": bool(rc.get("label-dp-enabled", False)),
+        "epsilon": float(rc.get("label-dp-epsilon", 1.0)),
+        # Defaults to the run seed so the one-time flip draw is reproducible
+        # from the run config alone.
+        "seed": int(rc.get("label-dp-seed", rc.get("seed", 42))),
+    }
 
 
 def _batch_indices(n: int, cfg: ConfigRecord | None) -> tuple[torch.Tensor, float]:
@@ -322,13 +340,29 @@ def generate_embeddings(spec: SiloSpec, msg: Message, context: Context) -> Messa
             metrics[f"{spec.wandb_tag}/epsilon"] = tracker.get_epsilon()
         _log(spec, context, metrics, step=rnd)
 
+    label_dp = _label_dp_config(context)
+    y_sent, label_acct = y, None
+    if spec.sends_labels and label_dp["enabled"]:
+        label_acct = LabelRRAccountant(
+            epsilon=label_dp["epsilon"], seed=label_dp["seed"]
+        )
+        # Randomize the FULL label vector, then index this round's batch.
+        # Randomizing the batch instead would redraw a student's label every
+        # time they are sampled, composing the label budget across rounds
+        # instead of spending it once. The draw is seeded, so every round
+        # reproduces the same noisy labels.
+        y_sent = label_acct.randomize(y)
+        label_acct.steps = rnd
+
     arrays = {"embedding": Array(sent_emb.numpy())}
     if spec.sends_labels:
-        arrays["labels"] = Array(y[idx].numpy())
+        arrays["labels"] = Array(y_sent[idx].numpy())
 
-    n_pos = int((y == 1).sum())
-    n_neg = int(len(y) - n_pos)
-    
+    # Counts describe what the SERVER trains on, so its pos_weight matches the
+    # data it actually sees — and the true base rate stays in the silo.
+    n_pos = int((y_sent == 1).sum())
+    n_neg = int(len(y_sent) - n_pos)
+
     content = RecordDict({
         "arrays": ArrayRecord(arrays),
         "config": ConfigRecord({
@@ -340,6 +374,10 @@ def generate_embeddings(spec: SiloSpec, msg: Message, context: Context) -> Messa
     })
     if tracker is not None:
         content["privacy"] = ConfigRecord(tracker.to_dict())
+    if label_acct is not None:
+        # Reported separately from "privacy": different mechanism, different
+        # neighboring relation, must not be composed into the Gaussian epsilon.
+        content["label_privacy"] = ConfigRecord(label_acct.to_dict())
     return Message(content=content, reply_to=msg)
 
 def generate_eval_embeddings(spec: SiloSpec, msg: Message, context: Context) -> Message:

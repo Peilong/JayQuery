@@ -126,15 +126,35 @@ def _per_step_mechanism(sigma: float, sample_rate: float) -> transformer_zoo.Mec
 def combine_epsilon(trackers: Sequence[PrivacyBudgetTracker], delta: float) -> float:
     """Composed epsilon across mechanisms (e.g. client cut-layer + server DP-SGD).
 
+    Every tracker must be a subsampled-Gaussian :class:`PrivacyBudgetTracker`
+    over the SAME (example-adjacent) neighboring relation. The label channel's
+    randomized response is pure epsilon-DP over a *label-adjacent* relation, so
+    it is rejected here and reported separately instead -- a single number
+    mixing the two would bound neither guarantee.
+
     Args:
         trackers: Accountants for each budget source; zero-step trackers contribute nothing.
         delta: DP delta at which the combined guarantee is stated.
 
     Returns:
         Epsilon of the composition of every tracker's spend, at ``delta``.
+
+    Raises:
+        ValueError: If ``delta`` is outside (0, 1).
+        TypeError: If any tracker is not a ``PrivacyBudgetTracker`` -- notably a
+            ``privacy.label_dp.LabelRRAccountant``.
     """
     if not 0.0 < delta < 1.0:
         raise ValueError(f"delta must be in (0, 1), got {delta}")
+    for t in trackers:
+        if not isinstance(t, PrivacyBudgetTracker):
+            raise TypeError(
+                f"combine_epsilon() composes subsampled-Gaussian PrivacyBudgetTrackers "
+                f"over an example-adjacent neighboring relation, but got "
+                f"{type(t).__name__}. The label randomized-response channel is pure "
+                f"epsilon-DP over a label-adjacent relation (see privacy/label_dp.py) "
+                f"and must be REPORTED SEPARATELY, not composed into this number."
+            )
     active = [t for t in trackers if t.steps > 0]
     if not active:
         return 0.0

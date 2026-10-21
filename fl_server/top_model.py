@@ -8,6 +8,8 @@ The loss gradient is sliced into (grad_emb_a, grad_emb_b) and returned to the si
 import torch
 import torch.nn as nn
 
+from privacy.label_dp import corrected_positive_prob
+
 
 class TopModel(nn.Module):
     """Central aggregation model that takes concatenated embeddings and predicts dropout risk.
@@ -38,6 +40,13 @@ class TopModel(nn.Module):
         # Class-imbalance weight (set externally before training)
         self.register_buffer("pos_weight", torch.tensor(1.0))
 
+        # Label randomized-response keep probability. 1.0 = labels are clean,
+        # so loss_fn stays plain BCE-with-logits. Set via set_label_noise()
+        # when the label-DP channel is on. Deliberately a plain attribute, not
+        # a buffer: it describes the TRAINING TARGETS, not the weights, and
+        # must not ride along in a checkpoint's state_dict.
+        self._keep_prob: float = 1.0
+
     def forward(self, emb_a: torch.Tensor, emb_b: torch.Tensor) -> torch.Tensor:
         """Forward pass through the aggregation network.
 
@@ -56,13 +65,53 @@ class TopModel(nn.Module):
         logits: torch.Tensor, 
         labels: torch.Tensor
     ) -> torch.Tensor:
-        """Compute BCE-with-logits loss using the current pos_weight.
+        """Compute the training loss using the current pos_weight.
 
         Exposed so the server loop can run the forward/backward itself (required
-        for Opacus DP-SGD, which must own the backward)
+        for Opacus DP-SGD, which must own the backward).
+
+        With the label-DP channel on, ``labels`` are randomized-response
+        outputs rather than ground truth, so the likelihood is corrected for
+        the known flip rate (see :func:`privacy.label_dp.corrected_positive_prob`).
+        Training on noisy labels as if they were clean would calibrate the
+        model to the corrupted base rate instead of the true one.
+
+        Args:
+            logits: Raw top-model outputs, shape (batch_size,).
+            labels: Targets — true labels when label DP is off, noisy ones when on.
+
+        Returns:
+            Scalar loss.
         """
-        loss_fn = nn.BCEWithLogitsLoss(pos_weight=self.pos_weight.to(logits.device))
-        return loss_fn(logits, labels.float())
+        if self._keep_prob >= 1.0:
+            loss_fn = nn.BCEWithLogitsLoss(pos_weight=self.pos_weight.to(logits.device))
+            return loss_fn(logits, labels.float())
+
+        # Weighted BCE against the noise-corrected probability. Written out
+        # because F.binary_cross_entropy takes no pos_weight. The correction
+        # also bounds prob into [1 - p, p], which keeps the logs finite at
+        # saturated logits.
+        prob = corrected_positive_prob(logits, self._keep_prob)
+        weight = self.pos_weight.to(logits.device)
+        target = labels.float()
+        per_example = -(
+            weight * target * torch.log(prob) + (1.0 - target) * torch.log1p(-prob)
+        )
+        return per_example.mean()
+
+    def set_label_noise(self, keep_prob: float) -> None:
+        """Tell the loss how often the training labels survived randomization.
+
+        Args:
+            keep_prob: The randomized-response keep probability p used by the
+                label holder, in [0.5, 1]. 1.0 disables the correction.
+
+        Raises:
+            ValueError: If keep_prob is outside [0.5, 1].
+        """
+        if not 0.5 <= keep_prob <= 1.0:
+            raise ValueError(f"keep_prob must be in [0.5, 1], got {keep_prob}")
+        self._keep_prob = float(keep_prob)
 
     def set_pos_weight(self, n_neg: int, n_pos: int) -> None:
         """Set class imbalance weight. Call before training.

@@ -532,3 +532,118 @@ class TestDispatcher:
                 )
             )
             client_app.apply_grad(grad_msg, ctx)  # must not raise for either silo
+
+@pytest.mark.dp
+class TestLabelDPChannel:
+    """The label holder must randomize labels ONCE before they leave the silo."""
+
+    def _cfg(self, **over):
+        # track-wandb off: these assert on the wire payload, and a real
+        # offline wandb run per test made the suite ~6x slower.
+        base = {"label-dp-enabled": True, "label-dp-epsilon": 1.0,
+                "label-dp-seed": 5, "track-wandb": False}
+        base.update(over)
+        return base
+
+    def test_disabled_by_default_sends_true_labels(
+        self, common_module, fake_spec_factory, fresh_context
+    ):
+        from flwr.app import Message
+
+        spec = fake_spec_factory(sends_labels=True)
+        ctx = fresh_context(run_config={"track-wandb": False})
+        reply = common_module.generate_embeddings(spec, Message(), ctx)
+        sent = reply.content["arrays"]["labels"].numpy()
+
+        X, y = common_module._full_trainset(spec, ctx)
+        assert (sent == y.numpy()).all(), "labels changed with label DP off"
+
+    def test_enabled_sends_flipped_labels(
+        self, common_module, fake_spec_factory, fresh_context
+    ):
+        """With a small epsilon some labels must actually differ from truth."""
+        from flwr.app import Message
+
+        spec = fake_spec_factory(sends_labels=True)
+        ctx = fresh_context(run_config=self._cfg(**{"label-dp-epsilon": 0.1}))
+        reply = common_module.generate_embeddings(spec, Message(), ctx)
+        sent = reply.content["arrays"]["labels"].numpy()
+
+        X, y = common_module._full_trainset(spec, ctx)
+        assert sent.shape == y.numpy().shape
+        assert set(sent.tolist()) <= {0.0, 1.0}
+        assert not (sent == y.numpy()).all(), "no labels were flipped at eps=0.1"
+
+    def test_same_student_gets_the_same_noisy_label_every_round(
+        self, common_module, fake_spec_factory, fresh_context
+    ):
+        """THE one-shot invariant, at the wire. Re-randomizing per round would
+        compose the label budget across 150 rounds instead of spending it once,
+        so the reported label epsilon would be off by orders of magnitude."""
+        from flwr.app import Message
+
+        spec = fake_spec_factory(sends_labels=True)
+        ctx = fresh_context(run_config=self._cfg())
+
+        seen = {}
+        for _ in range(5):
+            reply = common_module.generate_embeddings(spec, Message(), ctx)
+            labels = reply.content["arrays"]["labels"].numpy()
+            idx = ctx.state["batch_idx"]["v"].numpy()
+            for student, label in zip(idx.tolist(), labels.tolist()):
+                if student in seen:
+                    assert seen[student] == label, (
+                        f"student {student} label changed between rounds "
+                        f"({seen[student]} -> {label}) — labels are being "
+                        f"re-randomized, which multiplies the real epsilon"
+                    )
+                seen[student] = label
+        assert seen, "no students were observed"
+
+    def test_non_label_silo_is_unaffected(
+        self, common_module, fake_spec_factory, fresh_context
+    ):
+        from flwr.app import Message
+
+        spec = fake_spec_factory(sends_labels=False)
+        ctx = fresh_context(run_config=self._cfg())
+        reply = common_module.generate_embeddings(spec, Message(), ctx)
+        assert "labels" not in reply.content["arrays"]
+
+    def test_reports_label_epsilon_for_accounting(
+        self, common_module, fake_spec_factory, fresh_context
+    ):
+        """The server needs the label channel's epsilon to report it in Table I,
+        separately from the Gaussian channels."""
+        from flwr.app import Message
+
+        spec = fake_spec_factory(sends_labels=True)
+        ctx = fresh_context(run_config=self._cfg(**{"label-dp-epsilon": 2.0}))
+        reply = common_module.generate_embeddings(spec, Message(), ctx)
+
+        assert "label_privacy" in reply.content, "label epsilon not reported"
+        rec = reply.content["label_privacy"]
+        assert float(rec["epsilon"]) == pytest.approx(2.0)
+        assert float(rec["delta"]) == 0.0, "randomized response is pure eps-DP"
+        assert "label" in str(rec["neighboring_relation"]).lower()
+
+    def test_class_counts_come_from_the_noisy_labels(
+        self, common_module, fake_spec_factory, fresh_context
+    ):
+        """n-pos/n-neg set the server's pos_weight. They must describe what the
+        server actually trains on, or the imbalance correction is calibrated to
+        data the server never sees."""
+        from flwr.app import Message
+
+        spec = fake_spec_factory(sends_labels=True)
+        ctx = fresh_context(run_config=self._cfg(**{"label-dp-epsilon": 0.05}))
+        reply = common_module.generate_embeddings(spec, Message(), ctx)
+
+        cfg = reply.content["config"]
+        X, y = common_module._full_trainset(spec, ctx)
+        true_pos = int(y.sum())
+        assert int(cfg["n-pos"]) + int(cfg["n-neg"]) == len(y)
+        assert int(cfg["n-pos"]) != true_pos, (
+            "n-pos equals the TRUE positive count — counts were taken from the "
+            "clean labels, leaking the true base rate to the coordinator"
+        )
