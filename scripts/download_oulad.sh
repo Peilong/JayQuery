@@ -8,7 +8,15 @@ set -euo pipefail
 RAW_DIR="${OULAD_RAW_DIR:-data/raw}"
 mkdir -p "$RAW_DIR"
 
-ZIP_URL="${OULAD_ZIP_URL:-https://analyse.kmi.open.ac.uk/open-dataset/download}"
+# The OU's own links are dead as of Oct 2026: analyse.kmi.open.ac.uk answers
+# the old path with 200 + an HTML landing page, and the CDN link the current
+# OU Analyse page offers (schools.stem.open.ac.uk/.../anonymisedData.zip) is a
+# hard 404. figshare is the archival host behind the dataset's Scientific Data
+# paper (DOI 10.6084/m9.figshare.5081998), so it is the citable source, not a
+# third-party mirror. Override with OULAD_ZIP_URL if the OU restores theirs.
+ZIP_URL="${OULAD_ZIP_URL:-https://ndownloader.figshare.com/files/8606371}"
+# md5 published alongside the figshare record; skipped when OULAD_ZIP_URL is set.
+ZIP_MD5="7412686fd77cf0e0ee1e8c3e9b354308"
 ZIP_FILE="$RAW_DIR/oulad.zip"
 
 # One file we expect after extraction
@@ -34,6 +42,22 @@ if ! unzip -tq "$ZIP_FILE" >/dev/null 2>&1; then
   echo "[OULAD] and set OULAD_ZIP_URL, or place the CSVs in $RAW_DIR by hand." >&2
   rm -f "$ZIP_FILE"
   exit 1
+fi
+
+if [ -z "${OULAD_ZIP_URL:-}" ]; then
+  if command -v md5 >/dev/null 2>&1; then
+    GOT="$(md5 -q "$ZIP_FILE")"
+  else
+    GOT="$(md5sum "$ZIP_FILE" | cut -d' ' -f1)"
+  fi
+  if [ "$GOT" != "$ZIP_MD5" ]; then
+    echo "[OULAD] ERROR: checksum mismatch." >&2
+    echo "[OULAD]   expected $ZIP_MD5" >&2
+    echo "[OULAD]   got      $GOT" >&2
+    rm -f "$ZIP_FILE"
+    exit 1
+  fi
+  echo "[OULAD] Checksum OK ($ZIP_MD5)"
 fi
 
 echo "[OULAD] Extracting archive..."
