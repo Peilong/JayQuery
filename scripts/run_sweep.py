@@ -52,8 +52,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sweep-config", default="experiments/configs/sweep_vfl.yaml")
     p.add_argument("--sweep-id", default=None, help="Resume an existing sweep.")
     p.add_argument("--count", type=int, default=20, help="Number of trials for this agent.")
-    p.add_argument("--project", default="jayquery-vfl")
-    p.add_argument("--entity", default="jayquery")
+    p.add_argument("--project", default="JayQueryICC")
+    p.add_argument("--entity", default="lip-etown-research")
     p.add_argument("--app", default=".")
     p.add_argument("--rounds", type=int, default=None, help="Fixed num-server-rounds per trial.")
     p.add_argument(

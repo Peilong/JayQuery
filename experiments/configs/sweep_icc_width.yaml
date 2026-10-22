@@ -20,6 +20,10 @@ parameters:
     value: cut-layer
   epsilon:
     value: 1
+  # The prepared cohort these results are computed on. Named here so the
+  # sweep is self-describing: pyproject's bare data/processed has no silos.
+  processed-dir:
+    value: data/processed/dedup_first
   num-server-rounds:
     value: 50
   batch-sample-rate:
