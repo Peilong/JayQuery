@@ -6,9 +6,11 @@ experiment:
   owner: alex
 
 data:
-  processed_dir: data/processed
+  processed_dir: data/processed/dedup_first   # PRIMARY variant (see CLAUDE.md)
   seed: 42
-  assert_module: CCC_2014J    # set to whatever prepare_silos actually wrote; runner should verify
+  # Cohort is all 22 module-presentations with --dedup-rule first, not a
+  # single module: 25,515 students, 46.3% at risk.
+  cohort: all_modules_dedup_first
   smote: false
 
 evaluation:
@@ -22,7 +24,8 @@ architecture:                 # mirror the VFL run exactly
   embedding_dim: 32
   hidden_dim_a: 64
   hidden_dim_b: 96
-  hidden_dim_top: 128
+  hidden_dim_top: 32          # mirrors pyproject hidden-dim-top; was 128,
+                              # which broke the architecture-matched comparison
   dropout_a: 0.2
   dropout_b: 0.2
   dropout_top: 0.237

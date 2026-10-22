@@ -173,6 +173,49 @@ def tune_threshold(
     raise ValueError(f"unknown objective {objective!r} (use 'f1', 'youden', or 'recall')")
 
 
+def precision_at_k(
+    y_true: np.ndarray,
+    y_pred_prob: np.ndarray,
+    k_frac: float = 0.10,
+) -> float:
+    """Precision among the top ``k_frac`` of students by predicted risk.
+
+    The deployment view of an early-warning model: an advisor can only reach a
+    fixed number of students, so what matters is how many of the highest-risk
+    flagged are genuinely at risk.
+
+    This depends only on the RANKING, not on calibration, which is why it
+    survives DP. DP-SGD shrinks logits toward zero, so a model that still
+    ranks students correctly can put every probability below 0.5 and flag
+    nobody at the default cutoff while remaining perfectly usable as a list.
+
+    Args:
+        y_true: Binary ground-truth labels.
+        y_pred_prob: Predicted positive probabilities (or any monotone risk score).
+        k_frac: Fraction of the cohort to flag, in (0, 1]. Default 0.10.
+
+    Returns:
+        Precision within the flagged group. Compare against the base rate: a
+        model with no ranking signal scores roughly the prevalence.
+
+    Raises:
+        ValueError: If ``k_frac`` is outside (0, 1] or the inputs differ in length.
+    """
+    if not 0.0 < k_frac <= 1.0:
+        raise ValueError(f"k_frac must be in (0, 1], got {k_frac}")
+    y_true = np.asarray(y_true)
+    y_pred_prob = np.asarray(y_pred_prob)
+    if y_true.shape != y_pred_prob.shape:
+        raise ValueError(
+            f"length mismatch: y_true {y_true.shape} vs y_pred_prob {y_pred_prob.shape}"
+        )
+
+    # At least one student, so a small cohort cannot divide by zero.
+    k = max(1, int(round(k_frac * len(y_true))))
+    top = np.argsort(-y_pred_prob, kind="stable")[:k]
+    return float(np.mean(y_true[top]))
+
+
 def recall_at_precision(
     y_true: np.ndarray, y_pred_prob: np.ndarray, min_precision: float = 0.6
 ) -> float:

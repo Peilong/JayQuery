@@ -149,8 +149,20 @@ def main() -> None:
 
     # Data Prep ------------------------
     try:
-        a_train_loader, a_val_loader, a_test_loader = load_silo_a()
-        b_train_loader, b_val_loader, b_test_loader = load_silo_b()
+        # Honor the config's dataset variant. These used to call the loaders
+        # with no arguments, so they silently read whatever sat at the default
+        # data/processed -- which is NOT where the cohort variants live, and
+        # made the config's data.processed_dir a dead key. Baselines compared
+        # against VFL must come from the same prepared cohort.
+        data_cfg = exp.get("data", {})
+        processed_dir = data_cfg.get("processed_dir", "data/processed")
+        seed = int(data_cfg.get("seed", 42))
+        a_train_loader, a_val_loader, a_test_loader = load_silo_a(
+            processed_dir=processed_dir, seed=seed
+        )
+        b_train_loader, b_val_loader, b_test_loader = load_silo_b(
+            processed_dir=processed_dir, seed=seed
+        )
     except Exception as e:
         print(f"Exception: {e}")
         return

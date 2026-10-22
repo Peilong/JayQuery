@@ -438,6 +438,12 @@ def score_split(spec: SiloSpec, msg: Message, context: Context) -> Message:
     metrics = compute_metrics(y_true, y_prob, threshold=threshold)
     # Threshold-free operating points also need ground truth, so they are
     # computed here rather than at the coordinator.
+    #
+    # TODO(icc): add baselines.eval_utils.precision_at_k (top-10% precision,
+    # Row 11) here once the grid finishes. Deliberately NOT wired yet: each
+    # sweep trial runs `flwr run .` against current source, so adding a metric
+    # mid-grid gives later trials a field earlier ones lack. The function and
+    # its tests already exist (tests/test_early_warning_metric.py).
     for p_target in (0.6, 0.7, 0.8):
         metrics[f"recall_at_precision_{int(p_target * 100)}"] = recall_at_precision(
             y_true, y_prob, p_target
