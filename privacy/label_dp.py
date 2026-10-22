@@ -125,6 +125,73 @@ def corrected_positive_prob(logits: torch.Tensor, keep_prob: float) -> torch.Ten
     return prob.clamp(_PROB_EPS, 1.0 - _PROB_EPS)
 
 
+def rr_with_prior(
+    labels: torch.Tensor,
+    prior: torch.Tensor,
+    epsilon: float,
+    seed: int,
+) -> torch.Tensor:
+    """RRWithPrior (Ghazi et al. 2021), specialized to binary labels for VFL.
+
+    Plain randomized response spends its budget flipping labels blindly.
+    RRWithPrior spends it only where the prior is uncertain. The general
+    algorithm picks the subset size ``k`` maximizing
+
+        w_k = e^eps / (e^eps + k - 1) * (sum of the top-k prior masses)
+
+    and applies randomized response within that subset. For binary labels only
+    k in {1, 2} exist, and the rule collapses to a comparison against the RR
+    keep rate ``q = e^eps / (e^eps + 1)``:
+
+      * ``p_top1 > q``  -> k* = 1: emit the prior's argmax. The output does not
+        depend on the true label at all, so no budget is spent on this example
+        and the released label is more accurate than a flip would be.
+      * otherwise       -> k* = 2: plain randomized response.
+
+    **VFL adaptation.** The label holder sees only its own 18 features, so a
+    prior it computes alone is weak. The coordinator holds the joint model over
+    both silos and already returns predicted probabilities to the holder for
+    scoring, so those predictions serve as the prior at no extra communication.
+    The guarantee survives because a stage's prior is produced by a model
+    fitted on *other* students' already-randomized labels -- never on this
+    student's label -- so each label is privatized exactly once and the stages
+    compose in parallel rather than sequentially (LP-MST).
+
+    Caveat worth stating in any write-up: on the k*=1 branch the released label
+    is the model's own prediction, so a confidently wrong prior entrenches its
+    error. The mechanism trades label noise for prior bias.
+
+    Args:
+        labels: True binary labels, shape (n,).
+        prior: Per-example class probabilities, shape (n, 2), rows summing to 1.
+        epsilon: Label privacy budget.
+        seed: Seed for the one-time draw.
+
+    Returns:
+        A NEW tensor of released labels, same shape and dtype as ``labels``.
+
+    Raises:
+        ValueError: If ``prior`` is not (n, 2) matching ``labels``.
+    """
+    if prior.ndim != 2 or prior.shape[0] != labels.shape[0] or prior.shape[1] != 2:
+        raise ValueError(
+            f"prior must have shape ({labels.shape[0]}, 2) for binary labels, "
+            f"got {tuple(prior.shape)}"
+        )
+
+    q = keep_probability(epsilon)
+    top_prob, top_idx = prior.max(dim=1)
+
+    # k* = 1 where the prior already beats the RR keep rate.
+    use_argmax = top_prob > q
+
+    generator = torch.Generator(device=labels.device).manual_seed(seed)
+    keep = torch.rand(labels.shape, generator=generator, device=labels.device) < q
+    rr_out = torch.where(keep, labels, 1.0 - labels)
+
+    return torch.where(use_argmax, top_idx.to(labels.dtype), rr_out).to(labels.dtype)
+
+
 class LabelRRAccountant:
     """One-shot pure-epsilon accountant for the label channel.
 

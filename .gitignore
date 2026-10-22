@@ -74,3 +74,5 @@ logs/
 
 # ── Other ────────────────────────────────────────────────────────
 *.fab
+# Draft exhibit generator lives with the paper, not in the repo.
+make_exhibits.py
