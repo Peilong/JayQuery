@@ -107,7 +107,6 @@ def main() -> None:
     require_flwr_cli()
 
     import wandb
-
     from utils.wandb_utils import build_flwr_sweep_fn
 
     fleet_port, control_port = args.base_port, args.base_port + 1
