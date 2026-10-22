@@ -182,7 +182,7 @@ cohort rules, so their labels are not comparable).
 
 ### 6 — Run VFL training (deployment: SuperLink + 2 SuperNodes)
 ```bash
-python scripts/run_deployment.py --rounds 50
+python scripts/run_deployment.py --rounds 100
 # run_deployment.py starts flower-superlink + one flower-supernode per silo
 # (partition-id 0 = Silo A, 1 = Silo B), registers the connection in ~/.flwr/config.toml,
 # then submits `flwr run`. This is the supported run path — prefer it over a bare `flwr run .`,
@@ -208,9 +208,11 @@ pytest tests/ -v --cov=. --cov-report=term-missing
 
 Current keys (defaults) — mirrors `pyproject.toml`, which is authoritative:
 ```
-num-server-rounds        = 50     # THE horizon for every ICC run; noise is sized over it.
-                                  # 50, not 150: best val/auc lands ~round 35 (docs/action_plan.md A2),
-                                  # so the extra rounds cost compute AND epsilon (sigma grows ~sqrt(T)).
+num-server-rounds        = 100    # THE horizon for every ICC run; noise is sized over it.
+                                  # NOT 50: action_plan.md A2 claims val/auc converges by ~round 35,
+                                  # but a measured 50-round run was still climbing at the last round
+                                  # (0.784 -> 0.798 -> 0.814, best_round=50, no early stop), landing
+                                  # 0.10 AUC below the reported no-DP number. 50 under-trains.
 learning-rate            = 5e-4
 embedding-dim            = 32     # cut-layer width; the ICC width sweep varies this
 input-dim-a              = 18     # 6 encoded + 12 region one-hots (drop-first) — matches prepare_silos.py

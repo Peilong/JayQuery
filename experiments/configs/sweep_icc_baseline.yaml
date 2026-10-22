@@ -18,7 +18,7 @@ parameters:
   processed-dir:
     value: data/processed/dedup_first
   num-server-rounds:
-    value: 50
+    value: 100
   embedding-dim:
     value: 32
   batch-sample-rate:

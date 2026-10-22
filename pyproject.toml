@@ -80,7 +80,7 @@ clientapp = "fl_client.client_app:app"
 
 [tool.flwr.app.config]
 pos-weight = 0 # -1 = auto (n_neg/n_pos), 0 = disabled, >0 = explicit override
-num-server-rounds = 50
+num-server-rounds = 100
 learning-rate = 0.0005
 embedding-dim = 32
 input-dim-a = 18
