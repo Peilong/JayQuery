@@ -317,14 +317,18 @@ def compute_loss_and_gradients(
 
 ## wandb Convention
 
-Entity (team) is always **`jayquery`**. Project varies by what's tracked:
+Entity (team) is **`lip-etown-research`** — the account's only team, and its default.
+An earlier version of this file said `jayquery`; no such entity is reachable from the
+project's API key (it behaves exactly like a fabricated name), so runs configured that
+way are written nowhere. Project varies by what's tracked:
+- **`JayQueryICC`** — the ICC 2027 submission: VFL runs, the placement grid and the
+  width sweep. Pre-existing in the team workspace.
 - **`baselines`** — centralized/isolated-silo baseline models.
-- **`jayquery-vfl`** — the SplitNN VFL runs (the client handlers already default to this).
 
 ```python
 wandb.init(
-    entity="jayquery",
-    project="jayquery-vfl",   # or "baselines"
+    entity="lip-etown-research",
+    project="JayQueryICC",   # or "baselines"
     name=f"exp{EXP_ID:02d}_{description}_eps{epsilon}",
     tags=["week{N}", "alex" or "wyatt", f"eps_{epsilon}"],
     config={...all hyperparams...},
