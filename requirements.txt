@@ -18,6 +18,7 @@ flwr[simulation]==1.28.0
 # ── Differential Privacy ─────────────────────────────────────────
 opacus==1.5.2
 autodp==0.2.3.1
+dp-accounting==0.6.0   # PLD / Connect-the-Dots accountant (privacy/pld_accountant.py)
 
 # ── Data & ML ────────────────────────────────────────────────────
 numpy==1.26.4

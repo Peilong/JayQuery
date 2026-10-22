@@ -18,40 +18,52 @@ import argparse
 from pathlib import Path
 
 import matplotlib
-from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
+from matplotlib.patches import FancyArrowPatch, FancyBboxPatch, Rectangle
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-# Colorblind-safe; also legible in grayscale print.
-C_SILO = "#dbe7f3"
-C_SILO_EDGE = "#2b6cb0"
-C_COORD = "#fde8d7"
-C_COORD_EDGE = "#c05621"
-C_DP = "#c0392b"      # anything carrying a DP mechanism
-C_PLAIN = "#555555"   # unprotected channel
+# Grayscale + hatch only: the figure must survive a black-and-white print and
+# a colorblind reader, so components are distinguished by PATTERN, and channels
+# by line style, never by hue.
+FILL = "white"
+EDGE = "#222222"
+HATCH_SILO = "////"
+HATCH_COORD = "...."
+INK = "#222222"
 
 
-def _box(ax, x, y, w, h, label, sub, face, edge) -> None:
+def _box(ax, x, y, w, h, label, sub, hatch) -> None:
+    """Hatched frame with an opaque inner plate, so no pattern crosses text.
+
+    Text and plate are placed as FRACTIONS of the box height: the boxes differ
+    in height, and fixed offsets put the coordinator's sub-label below its own
+    plate, straight onto the hatch.
+    """
     ax.add_patch(
         FancyBboxPatch(
             (x, y), w, h,
-            boxstyle="round,pad=0.012,rounding_size=0.02",
-            facecolor=face, edgecolor=edge, linewidth=1.1, zorder=2,
+            boxstyle="round,pad=0.008,rounding_size=0.015",
+            facecolor=FILL, edgecolor=EDGE, linewidth=1.0,
+            hatch=hatch, zorder=2,
         )
     )
-    ax.text(x + w / 2, y + h - 0.052, label, ha="center", va="top",
-            fontsize=7.1, fontweight="bold", zorder=3)
-    ax.text(x + w / 2, y + h - 0.125, sub, ha="center", va="top",
-            fontsize=5.6, color="#333333", linespacing=1.3, zorder=3)
+    ax.add_patch(
+        Rectangle((x + 0.008, y + h * 0.12), w - 0.016, h * 0.76,
+                  facecolor="white", edgecolor="none", zorder=3)
+    )
+    ax.text(x + w / 2, y + h * 0.72, label, ha="center", va="center",
+            fontsize=6.2, fontweight="bold", zorder=4)
+    ax.text(x + w / 2, y + h * 0.34, sub, ha="center", va="center",
+            fontsize=4.8, color="#333333", linespacing=1.3, zorder=4)
 
 
-def _arrow(ax, p0, p1, color, style="-|>", rad=0.0, lw=1.0, dashed=False) -> None:
+def _arrow(ax, p0, p1, style="-|>", rad=0.0, lw=1.0, dashed=False) -> None:
     ax.add_patch(
         FancyArrowPatch(
-            p0, p1, arrowstyle=style, mutation_scale=7,
-            linewidth=lw, color=color, zorder=4,
-            linestyle=(0, (2.4, 1.8)) if dashed else "solid",
+            p0, p1, arrowstyle=style, mutation_scale=6.5,
+            linewidth=lw, color=INK, zorder=5,
+            linestyle=(0, (2.2, 1.8)) if dashed else "solid",
             connectionstyle=f"arc3,rad={rad}",
             shrinkA=1.5, shrinkB=1.5,
         )
@@ -60,61 +72,50 @@ def _arrow(ax, p0, p1, color, style="-|>", rad=0.0, lw=1.0, dashed=False) -> Non
 
 def build(out_path: Path) -> None:
     """Draw the architecture and write it to ``out_path``."""
-    fig, ax = plt.subplots(figsize=(3.45, 2.95))
-    ax.set_xlim(0, 1)
-    ax.set_ylim(0, 1)
+    fig, ax = plt.subplots(figsize=(3.45, 1.85))
+    # Limits exceed the content so rounded corners, hatch strokes and
+    # arrowheads are never clipped at the bounding box.
+    ax.set_xlim(-0.05, 1.05)
+    ax.set_ylim(-0.12, 1.06)
     ax.axis("off")
 
-    # ── parties ──────────────────────────────────────────────────────────
-    _box(ax, 0.000, 0.040, 0.345, 0.255, "Silo A  (registrar)",
-         "18 demographic feats.\nholds the TRUE labels", C_SILO, C_SILO_EDGE)
-    _box(ax, 0.655, 0.040, 0.345, 0.255, "Silo B  (LMS)",
-         "26 engagement feats.\nno labels", C_SILO, C_SILO_EDGE)
-    _box(ax, 0.235, 0.800, 0.530, 0.200, "Coordinator  (neutral)",
-         "top model + DP-SGD  $\\varepsilon_{\\rm srv}$\nnever sees a true label",
-         C_COORD, C_COORD_EDGE)
+    _box(ax, 0.000, 0.03, 0.335, 0.42, "Silo A (registrar)",
+         "18 demographic feats.\nholds true labels", HATCH_SILO)
+    _box(ax, 0.665, 0.03, 0.335, 0.42, "Silo B (LMS)",
+         "26 engagement feats.\nno labels", HATCH_SILO)
+    _box(ax, 0.255, 0.72, 0.490, 0.28, "Coordinator (neutral)",
+         "top model, DP-SGD $\\varepsilon_{\\rm srv}$\nnever sees a true label",
+         HATCH_COORD)
 
-    # ── uplink: embeddings (DP-protected) ────────────────────────────────
-    _arrow(ax, (0.185, 0.300), (0.330, 0.795), C_DP, rad=0.16, lw=1.25)
-    ax.text(0.012, 0.660, "emb$_A$ + RR labels\nclip+Gaussian $\\varepsilon_{\\rm cut}$\n"
-                          "resp. $\\varepsilon_{\\rm lab}$",
-            fontsize=5.3, color=C_DP, ha="left", va="center", linespacing=1.45)
+    # Uplink: DP-protected (solid, heavy). Labels sit outboard of the arcs.
+    _arrow(ax, (0.185, 0.455), (0.345, 0.715), rad=0.18, lw=1.35)
+    ax.text(0.010, 0.620, "emb$_A$ + RR labels\n$\\varepsilon_{\\rm cut}$, "
+                          "$\\varepsilon_{\\rm lab}$",
+            fontsize=4.9, ha="left", va="center", linespacing=1.25, color=INK)
+    _arrow(ax, (0.815, 0.455), (0.655, 0.715), rad=-0.18, lw=1.35)
+    ax.text(0.990, 0.620, "emb$_B$\n$\\varepsilon_{\\rm cut}$",
+            fontsize=4.9, ha="right", va="center", linespacing=1.25, color=INK)
 
-    _arrow(ax, (0.815, 0.300), (0.670, 0.795), C_DP, rad=-0.16, lw=1.25)
-    ax.text(0.988, 0.660, "emb$_B$\nclip+Gaussian\n$\\varepsilon_{\\rm cut}$",
-            fontsize=5.3, color=C_DP, ha="right", va="center", linespacing=1.45)
+    # Downlink: unprotected (dashed, light). One short centred label only;
+    # the evaluation round-trip is described in the caption instead.
+    _arrow(ax, (0.370, 0.713), (0.250, 0.455), rad=0.18, lw=0.85, dashed=True)
+    _arrow(ax, (0.630, 0.713), (0.750, 0.455), rad=-0.18, lw=0.85, dashed=True)
+    ax.text(0.500, 0.600, "$\\nabla$ down (no DP)", fontsize=5.0,
+            ha="center", va="center", color=INK)
 
-    # ── downlink: gradients (NOT protected — a stated limitation) ────────
-    _arrow(ax, (0.355, 0.793), (0.235, 0.300), C_PLAIN, rad=0.16)
-    ax.text(0.150, 0.430, "$\\nabla$ (no DP)", fontsize=5.2, color=C_PLAIN,
-            ha="left", va="center")
-    _arrow(ax, (0.645, 0.793), (0.765, 0.300), C_PLAIN, rad=-0.16)
-    ax.text(0.850, 0.430, "$\\nabla$ (no DP)", fontsize=5.2, color=C_PLAIN,
-            ha="right", va="center")
+    _arrow(ax, (0.342, 0.185), (0.658, 0.185), style="<|-|>", lw=0.85)
+    ax.text(0.500, 0.215, "PSI (ristretto255)", fontsize=4.9,
+            ha="center", va="bottom", color=INK)
 
-    # ── evaluation round-trip: only the holder can score ─────────────────
-    _arrow(ax, (0.470, 0.795), (0.470, 0.690), C_PLAIN, dashed=True)
-    _arrow(ax, (0.530, 0.690), (0.530, 0.795), C_PLAIN, dashed=True)
-    ax.text(0.500, 0.655, "scores $\\downarrow$   metrics $\\uparrow$",
-            fontsize=5.3, color=C_PLAIN, ha="center", va="top")
-    ax.text(0.500, 0.598, "labels never leave Silo A",
-            fontsize=5.0, color="#777777", ha="center", va="top", style="italic")
-
-    # ── one-time PSI alignment ───────────────────────────────────────────
-    _arrow(ax, (0.352, 0.150), (0.648, 0.150), C_PLAIN, style="<|-|>")
-    ax.text(0.500, 0.182, "one-time PSI", fontsize=5.4, ha="center",
-            va="bottom", color=C_PLAIN)
-    ax.text(0.500, 0.128, "(ristretto255)", fontsize=5.0, ha="center",
-            va="top", color="#777777")
-
-    # ── legend ───────────────────────────────────────────────────────────
-    ax.plot([0.055, 0.115], [0.003, 0.003], color=C_DP, lw=1.25)
-    ax.text(0.126, 0.003, "DP-protected", fontsize=5.2, va="center")
-    ax.plot([0.520, 0.580], [0.003, 0.003], color=C_PLAIN, lw=1.0)
-    ax.text(0.591, 0.003, "unprotected", fontsize=5.2, va="center")
+    # Legend: pattern and line style only, no hue.
+    ax.plot([0.045, 0.110], [-0.080, -0.080], color=INK, lw=1.35)
+    ax.text(0.122, -0.080, "DP-protected", fontsize=4.9, va="center")
+    ax.plot([0.530, 0.595], [-0.080, -0.080], color=INK, lw=0.85,
+            linestyle=(0, (2.2, 1.8)))
+    ax.text(0.607, -0.080, "unprotected", fontsize=4.9, va="center")
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, bbox_inches="tight", pad_inches=0.01)
+    fig.savefig(out_path, bbox_inches="tight", pad_inches=0.04)
     plt.close(fig)
     print(f"wrote {out_path}")
 
