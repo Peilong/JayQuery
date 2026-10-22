@@ -18,39 +18,29 @@ import argparse
 from pathlib import Path
 
 import matplotlib
-from matplotlib.patches import FancyArrowPatch, FancyBboxPatch, Rectangle
+from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-# Grayscale + hatch only: the figure must survive a black-and-white print and
-# a colorblind reader, so components are distinguished by PATTERN, and channels
-# by line style, never by hue.
-FILL = "white"
-EDGE = "#222222"
-HATCH_SILO = "////"
-HATCH_COORD = "...."
+# Boxes are distinguished by FILL COLOUR; channels by line style and routing.
+# The uplink and downlink are drawn on separate tracks rather than mirrored
+# arcs, because opposite-curvature arcs between the same two boxes cross near
+# their midpoints and the solid and dashed lines then sit on top of each other.
+C_SILO = "#dbe7f3"
+C_SILO_EDGE = "#2b6cb0"
+C_COORD = "#fde8d7"
+C_COORD_EDGE = "#c05621"
 INK = "#222222"
 
 
-def _box(ax, x, y, w, h, label, sub, hatch) -> None:
-    """Hatched frame with an opaque inner plate, so no pattern crosses text.
-
-    Text and plate are placed as FRACTIONS of the box height: the boxes differ
-    in height, and fixed offsets put the coordinator's sub-label below its own
-    plate, straight onto the hatch.
-    """
+def _box(ax, x, y, w, h, label, sub, face, edge) -> None:
     ax.add_patch(
         FancyBboxPatch(
             (x, y), w, h,
             boxstyle="round,pad=0.008,rounding_size=0.015",
-            facecolor=FILL, edgecolor=EDGE, linewidth=1.0,
-            hatch=hatch, zorder=2,
+            facecolor=face, edgecolor=edge, linewidth=1.1, zorder=2,
         )
-    )
-    ax.add_patch(
-        Rectangle((x + 0.008, y + h * 0.12), w - 0.016, h * 0.76,
-                  facecolor="white", edgecolor="none", zorder=3)
     )
     ax.text(x + w / 2, y + h * 0.72, label, ha="center", va="center",
             fontsize=6.2, fontweight="bold", zorder=4)
@@ -73,33 +63,32 @@ def _arrow(ax, p0, p1, style="-|>", rad=0.0, lw=1.0, dashed=False) -> None:
 def build(out_path: Path) -> None:
     """Draw the architecture and write it to ``out_path``."""
     fig, ax = plt.subplots(figsize=(3.45, 1.85))
-    # Limits exceed the content so rounded corners, hatch strokes and
-    # arrowheads are never clipped at the bounding box.
+    # Limits exceed the content so rounded corners and arrowheads never clip.
     ax.set_xlim(-0.05, 1.05)
     ax.set_ylim(-0.12, 1.06)
     ax.axis("off")
 
     _box(ax, 0.000, 0.03, 0.335, 0.42, "Silo A (registrar)",
-         "18 demographic feats.\nholds true labels", HATCH_SILO)
+         "18 demographic feats.\nholds true labels", C_SILO, C_SILO_EDGE)
     _box(ax, 0.665, 0.03, 0.335, 0.42, "Silo B (LMS)",
-         "26 engagement feats.\nno labels", HATCH_SILO)
+         "26 engagement feats.\nno labels", C_SILO, C_SILO_EDGE)
     _box(ax, 0.255, 0.72, 0.490, 0.28, "Coordinator (neutral)",
          "top model, DP-SGD $\\varepsilon_{\\rm srv}$\nnever sees a true label",
-         HATCH_COORD)
+         C_COORD, C_COORD_EDGE)
 
-    # Uplink: DP-protected (solid, heavy). Labels sit outboard of the arcs.
-    _arrow(ax, (0.185, 0.455), (0.345, 0.715), rad=0.18, lw=1.35)
-    ax.text(0.010, 0.620, "emb$_A$ + RR labels\n$\\varepsilon_{\\rm cut}$, "
+    # Uplink, DP-protected: straight, on the OUTER track.
+    _arrow(ax, (0.120, 0.455), (0.285, 0.715), lw=1.35)
+    ax.text(0.008, 0.625, "emb$_A$ + RR labels\n$\\varepsilon_{\\rm cut}$, "
                           "$\\varepsilon_{\\rm lab}$",
             fontsize=4.9, ha="left", va="center", linespacing=1.25, color=INK)
-    _arrow(ax, (0.815, 0.455), (0.655, 0.715), rad=-0.18, lw=1.35)
-    ax.text(0.990, 0.620, "emb$_B$\n$\\varepsilon_{\\rm cut}$",
+    _arrow(ax, (0.880, 0.455), (0.715, 0.715), lw=1.35)
+    ax.text(0.992, 0.625, "emb$_B$\n$\\varepsilon_{\\rm cut}$",
             fontsize=4.9, ha="right", va="center", linespacing=1.25, color=INK)
 
-    # Downlink: unprotected (dashed, light). One short centred label only;
-    # the evaluation round-trip is described in the caption instead.
-    _arrow(ax, (0.370, 0.713), (0.250, 0.455), rad=0.18, lw=0.85, dashed=True)
-    _arrow(ax, (0.630, 0.713), (0.750, 0.455), rad=-0.18, lw=0.85, dashed=True)
+    # Downlink, unprotected: straight, on the INNER track. Parallel to the
+    # uplink and clearly offset, so the two never overlap.
+    _arrow(ax, (0.395, 0.713), (0.250, 0.455), lw=0.85, dashed=True)
+    _arrow(ax, (0.605, 0.713), (0.750, 0.455), lw=0.85, dashed=True)
     ax.text(0.500, 0.600, "$\\nabla$ down (no DP)", fontsize=5.0,
             ha="center", va="center", color=INK)
 
@@ -107,7 +96,6 @@ def build(out_path: Path) -> None:
     ax.text(0.500, 0.215, "PSI (ristretto255)", fontsize=4.9,
             ha="center", va="bottom", color=INK)
 
-    # Legend: pattern and line style only, no hue.
     ax.plot([0.045, 0.110], [-0.080, -0.080], color=INK, lw=1.35)
     ax.text(0.122, -0.080, "DP-protected", fontsize=4.9, va="center")
     ax.plot([0.530, 0.595], [-0.080, -0.080], color=INK, lw=0.85,
