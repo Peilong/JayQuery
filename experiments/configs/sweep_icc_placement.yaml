@@ -29,11 +29,11 @@ parameters:
   epsilon:
     values: [0.5, 1, 2, 4, 8]
   seed:
-    values: [42, 43, 44, 45, 46]
+    values: [42, 43, 44]
   # Held fixed across the grid so placement and epsilon are the only moving
   # parts. These are the tuned values from the sweep_vfl search.
   num-server-rounds:
-    value: 150
+    value: 50
   embedding-dim:
     value: 32
   batch-sample-rate:

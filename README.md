@@ -84,7 +84,7 @@ python scripts/prepare_silos.py     # default module CCC_2014J
 # CLAUDE.md step 5 / docs/action_plan.md §E-a and §F.
 
 # 6. Train VFL (SuperLink + 2 SuperNodes, submits the run)
-python run_deployment.py --rounds 150
+python run_deployment.py --rounds 50
 
 # 7. Run all experiments (reproduces paper results)
 bash scripts/reproduce_all.sh

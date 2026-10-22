@@ -12,9 +12,9 @@ parameters:
   placement:
     value: none
   seed:
-    values: [42, 43, 44, 45, 46]
+    values: [42, 43, 44]
   num-server-rounds:
-    value: 150
+    value: 50
   embedding-dim:
     value: 32
   batch-sample-rate:
