@@ -30,23 +30,25 @@ def _isolate_psi_output(tmp_path, monkeypatch):
 
 @pytest.mark.psi
 def test_ecdh_basic() -> None:
-    """generate_keypair() returns valid (private, public) key pair.
-    Run after implementing generate_keypair() in Week 2.
-    Expected: PASSES after Week 2 Step 2.
+    """generate_keypair() returns a (secret scalar, public element) pair.
+
+    These were `cryptography` EC objects, but that keypair was never used for
+    the blinding -- it was decoration around integer arithmetic. The PSI now
+    runs on ristretto255, so a key is a raw scalar and the public value is a
+    real group element. See tests/test_psi_security.py.
     """
-    from psi.ecdh_utils import generate_keypair
+    from psi.ecdh_utils import (
+        GROUP_ELEMENT_BYTES,
+        SCALAR_BYTES,
+        generate_keypair,
+        is_valid_point,
+    )
+
     private_key, public_key = generate_keypair()
 
-    from cryptography.hazmat.primitives.asymmetric.ec import (
-        EllipticCurvePrivateKey,
-        EllipticCurvePublicKey,
-    )
-    assert isinstance(private_key, EllipticCurvePrivateKey), (
-        "private_key must be EllipticCurvePrivateKey"
-    )
-    assert isinstance(public_key, EllipticCurvePublicKey), (
-        "public_key must be EllipticCurvePublicKey"
-    )
+    assert isinstance(private_key, bytes) and len(private_key) == SCALAR_BYTES
+    assert isinstance(public_key, bytes) and len(public_key) == GROUP_ELEMENT_BYTES
+    assert is_valid_point(public_key), "public element is not on the group"
 
 
 @pytest.mark.psi

@@ -29,6 +29,12 @@ imbalanced-learn==0.12.4
 
 # ── Cryptography (PSI) ───────────────────────────────────────────
 cryptography==46.0.5
+# SYSTEM DEPENDENCY, not pip-installable: psi/ristretto.py binds libsodium's
+# ristretto255 (prime-order group + constant-time hash-to-group) via ctypes.
+# PyNaCl does not expose these bindings and its bundled libsodium does not
+# export the symbols, so the system library is required:
+#     macOS          brew install libsodium
+#     Debian/Ubuntu  apt-get install libsodium23
 
 # ── Networking ───────────────────────────────────────────────────
 grpcio==1.80.0         # flwr transport (transitive dep; pinned for reproducibility)

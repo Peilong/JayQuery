@@ -130,6 +130,8 @@ with markers `slow`, `psi`, `dp`, `model`, `integration`.
 git clone https://github.com/Peilong/JayQuery.git
 cd JayQuery
 conda create -n jayquery python=3.11 && conda activate jayquery   # conda optional
+brew install libsodium            # macOS; Debian/Ubuntu: apt-get install libsodium23
+                                  # system dep — PSI needs ristretto255 (psi/ristretto.py)
 pip install -r requirements.txt
 pip install -e .
 cp .env.example .env             # fill in WANDB_API_KEY
@@ -354,6 +356,11 @@ When Claude Code helps Wyatt:
 - **Never persist a `PrivacyEngine`:** persist accountant *primitives* (plain numbers) and recompute
   epsilon via autodp. `context.state` holds structured records, not live objects with hooks.
 - **autodp install:** use `0.2.3.1` (not `0.2.3`) and pin `scipy==1.13.1` alongside `numpy==1.26.4`.
+- **PSI needs libsodium.** `psi/` runs on ristretto255 via ctypes. If it is missing you get a
+  `SodiumUnavailableError` naming the install command. The pre-rewrite code multiplied integers
+  mod the group order — it commuted, so every functional test passed while providing no privacy
+  at all. `tests/test_psi_security.py` replays that attack; never "simplify" the blinding back
+  into scalar arithmetic.
 - **DataLoader alignment:** always load silos using `ordered_id_list.json` to guarantee matching rows.
 - **Deterministic client forward:** `generate_embeddings` snapshots RNG so `apply_gradients` can replay
   the same forward. Apply cut-layer noise to the *sent* embedding only — keep the stored clean embedding

@@ -27,6 +27,9 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
+      - name: Install libsodium (ristretto255 for the PSI protocol)
+        run: sudo apt-get update && sudo apt-get install -y libsodium23
+
       - name: Install CPU-only PyTorch (CI — no GPU)
         run: |
           pip install torch==2.2.2+cpu torchvision==0.17.2+cpu \
