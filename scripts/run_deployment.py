@@ -161,12 +161,18 @@ def register_superlink_connection(name: str, control_api_address: str) -> None:
     print(f"[deploy] Registered SuperLink connection '{name}' -> {control_api_address}")
 
 
-def start_superlink(host: str, fleet_port: int, control_port: int) -> subprocess.Popen:
+def start_superlink(
+    host: str, fleet_port: int, control_port: int, serverappio_port: int
+) -> subprocess.Popen:
     cmd = [
         "flower-superlink",
         "--insecure",
         "--fleet-api-address", f"{host}:{fleet_port}",
         "--control-api-address", f"{host}:{control_port}",
+        # Derived from --base-port like the others. Left at its default this
+        # binds 9091 regardless of --base-port, so a second federation on
+        # offset ports still collided here and died before any round ran.
+        "--serverappio-api-address", f"{host}:{serverappio_port}",
     ]
     print(f"[deploy] Starting SuperLink: {' '.join(cmd)}")
     return subprocess.Popen(cmd)
@@ -200,14 +206,18 @@ def main() -> None:
     fleet_port = args.base_port
     control_port = args.base_port + 1
     clientapp_ports = {"silo_a": args.base_port + 2, "silo_b": args.base_port + 3}
+    serverappio_port = args.base_port + 4
 
     if not args.skip_port_check:
         require_ports_free(
             args.host,
-            {"fleet_api": fleet_port, "control_api": control_port, **clientapp_ports},
+            {"fleet_api": fleet_port, "control_api": control_port,
+             "serverappio_api": serverappio_port, **clientapp_ports},
         )
 
-    superlink_proc = start_superlink(args.host, fleet_port, control_port)
+    superlink_proc = start_superlink(
+        args.host, fleet_port, control_port, serverappio_port
+    )
     procs = [superlink_proc]
 
     def cleanup(*_a) -> None:

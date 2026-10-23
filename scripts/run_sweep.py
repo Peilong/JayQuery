@@ -111,11 +111,16 @@ def main() -> None:
 
     fleet_port, control_port = args.base_port, args.base_port + 1
     clientapp_ports = {"silo_a": args.base_port + 2, "silo_b": args.base_port + 3}
+    serverappio_port = args.base_port + 4
     require_ports_free(
-        args.host, {"fleet_api": fleet_port, "control_api": control_port, **clientapp_ports}
+        args.host,
+        {"fleet_api": fleet_port, "control_api": control_port,
+         "serverappio_api": serverappio_port, **clientapp_ports},
     )
 
-    procs = [start_superlink(args.host, fleet_port, control_port)]
+    procs = [
+        start_superlink(args.host, fleet_port, control_port, serverappio_port)
+    ]
 
     def cleanup(*_a: object) -> None:
         print("\n[sweep] Shutting down deployment infra...")
