@@ -1,0 +1,38 @@
+cff-version: 1.2.0
+message: >-
+  If you use this software, please cite both the software (this file) and the
+  accompanying paper listed under preferred-citation.
+title: >-
+  JayQuery: per-channel differential privacy in cross-institution split
+  vertical federated learning
+abstract: >-
+  A two-silo split vertical federated learning system that carries three
+  differential privacy mechanisms at once, cut-layer Gaussian noise on each
+  silo's embeddings, DP-SGD on the coordinator's top model, and prior-based
+  randomized response on the labels, each with its own accountant and an
+  explicitly stated neighboring relation. Includes elliptic-curve private set
+  intersection over ristretto255, an embedding-inversion attack with a
+  noise-matched learned inverse, loss-threshold membership inference, and the
+  sweep and analysis tooling used to produce the reported results.
+type: software
+authors:
+  - family-names: Li
+    given-names: Peilong
+    affiliation: Elizabethtown College
+  - family-names: Pellet
+    given-names: Alexander
+    affiliation: Elizabethtown College
+  - family-names: Wilfong
+    given-names: Wyatt
+    affiliation: Elizabethtown College
+repository-code: https://github.com/Peilong/JayQuery
+license: MIT
+keywords:
+  - vertical federated learning
+  - split learning
+  - differential privacy
+  - privacy accounting
+  - membership inference
+  - model inversion
+  - private set intersection
+  - learning analytics
