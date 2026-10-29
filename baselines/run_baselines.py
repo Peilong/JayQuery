@@ -29,6 +29,7 @@ wandb run-passing methodology (IMPORTANT):
 
 import argparse
 import inspect
+import os
 from typing import Any
 
 import torch
@@ -149,11 +150,10 @@ def main() -> None:
 
     # Data Prep ------------------------
     try:
-        # Honor the config's dataset variant. These used to call the loaders
-        # with no arguments, so they silently read whatever sat at the default
-        # data/processed -- which is NOT where the cohort variants live, and
-        # made the config's data.processed_dir a dead key. Baselines compared
-        # against VFL must come from the same prepared cohort.
+        # Honor the config's dataset variant. The loaders default to
+        # data/processed, which is not where the cohort variants live, and a
+        # baseline compared against VFL must come from the same prepared
+        # cohort.
         data_cfg = exp.get("data", {})
         processed_dir = data_cfg.get("processed_dir", "data/processed")
         seed = int(data_cfg.get("seed", 42))
@@ -217,6 +217,9 @@ def main() -> None:
                 config={**cfg, "silo_label": data_key},
             ),
             project="baseline",
+            # init_run's default entity is not the account's team, and a
+            # literal default overrides WANDB_ENTITY, so pass it explicitly.
+            entity=os.environ.get("WANDB_ENTITY", "lip-etown-research"),
             name=f"{experiment['name']}-{model_name}",
             group=f"{experiment['name']}-{model_name}",
             tags=model_cfg["tags"] + [f"week{experiment['week']}"],

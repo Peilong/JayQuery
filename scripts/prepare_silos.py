@@ -690,9 +690,9 @@ def fit_and_scale(
         Tuple of (X_a_scaled, X_b_scaled, scaler_a, scaler_b).
     """
     # Silo A: studied_credits is at index 5 (after 5 encoded cols, before region one-hots).
-    # Fit on train rows, then transform every row EXACTLY ONCE. (Previously this
-    # wrote scaled values into the train rows and then transformed the whole array
-    # again, double-scaling train and leaving it ~50x narrower than val/test.)
+    # Fit on train rows, then transform every row EXACTLY ONCE: writing scaled
+    # values back before transforming the whole array would double-scale the
+    # train rows and leave them far narrower than val/test.
     scaler_a = StandardScaler()
     X_a = X_a.copy()
     scaler_a.fit(X_a[train_idx, 5:6])

@@ -1,0 +1,26 @@
+# Placement grid: cut-layer, eps=1, d=32, seeds 42 and 43.
+#
+# embedding-dim is pinned explicitly because the `cell` axis carries only
+# placement, epsilon and seed. The width sweep shares this placement and
+# epsilon at other widths, so the dimension must be stated to target the
+# placement grid's cell rather than a width-sweep cell.
+name: icc200-cutlayer-e1-fill
+method: grid
+metric:
+  name: val/auc_best
+  goal: maximize
+parameters:
+  cell:
+    values:
+      - "cut-layer|1|42"
+      - "cut-layer|1|43"
+  embedding-dim:
+    value: 32
+  processed-dir:
+    value: data/processed/dedup_first
+  num-server-rounds:
+    value: 200
+  batch-sample-rate:
+    value: 0.05
+  combined-target-epsilon:
+    value: 1000.0

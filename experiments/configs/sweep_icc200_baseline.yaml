@@ -1,0 +1,25 @@
+# ICC 2027 no-DP baseline: 3 seeds, no epsilon axis.
+#
+# Separate from the placement grid because epsilon is meaningless with every
+# channel off; crossing it with the epsilon axis would repeat one
+# configuration five times over.
+name: icc200-baseline
+method: grid
+metric:
+  name: val/auc_best
+  goal: maximize
+parameters:
+  placement:
+    value: none
+  seed:
+    values: [42, 43, 44]
+  # The prepared cohort these results are computed on. Named here so the
+  # sweep is self-describing: pyproject's bare data/processed has no silos.
+  processed-dir:
+    value: data/processed/dedup_first
+  num-server-rounds:
+    value: 200
+  embedding-dim:
+    value: 32
+  batch-sample-rate:
+    value: 0.05

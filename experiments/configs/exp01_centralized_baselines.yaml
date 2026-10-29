@@ -44,7 +44,11 @@ matched_baselines:            # identical training budget to VFL
 training:
   learning_rate: 5e-4
   optimizer: adam
-  gradient_steps: 55        # match the VFL run's actual step count
+  gradient_steps: 200       # match the VFL run's actual step count: the ICC
+                            # grid runs 200 rounds = 200 top-model steps
+                            # (meta.json privacy_primitives.server.steps).
+                            # Was 55, from the earlier 50-round horizon,
+                            # which left the matched control under-trained.
   batch_fraction: 0.05      # match batch-sample-rate
   warmup_steps: 25
   grad_clip_norm: 2

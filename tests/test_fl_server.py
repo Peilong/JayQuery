@@ -64,6 +64,97 @@ class TestWarmupFactor:
         )
 
 
+class TestRoundTimeout:
+    """Every send_and_receive must carry a timeout.
+
+    `grid.send_and_receive(messages)` defaults to blocking indefinitely, so a
+    silo whose clientapp dies mid-round leaves the ServerApp waiting on a
+    reply that never arrives. Both reply sites raise a clear RuntimeError when
+    a silo is missing from the reply list; the timeout is what lets that check
+    run, turning an unbounded wait into a fast failure.
+    """
+
+    def test_training_round_passes_a_timeout(self, run_server) -> None:
+        grid, _ = run_server(**{"num-server-rounds": 1})
+        assert grid.timeouts, "no send_and_receive recorded"
+        assert all(t is not None for t in grid.timeouts), (
+            f"blocking call with no timeout: {grid.timeouts}"
+        )
+
+    def test_timeout_is_positive_and_configurable(self, run_server) -> None:
+        grid, _ = run_server(**{"num-server-rounds": 1, "round-timeout-s": 42.0})
+        assert grid.timeouts
+        assert set(grid.timeouts) == {42.0}
+
+    def test_every_call_site_is_covered_including_eval(self, run_server) -> None:
+        """eval_every=1 exercises the embedding, eval and scoring sites, so a
+        site that still blocks forever cannot hide behind the training path."""
+        grid, _ = run_server(**{"num-server-rounds": 2, "eval-every": 1,
+                                "round-timeout-s": 7.5})
+        assert len(grid.timeouts) >= 3, (
+            f"expected training + eval + score calls, saw {len(grid.timeouts)}"
+        )
+        assert set(grid.timeouts) == {7.5}
+
+
+class TestWaitForSilos:
+    """The server must WAIT for both silos, not fail on its first look.
+
+    Two events make the node list briefly show fewer than two silos: a
+    SuperNode that has not finished registering at round 1, and a silo whose
+    clientapp dies and re-registers mid-run. Raising on the first look turns
+    either into a dead run.
+    """
+
+    def test_returns_immediately_when_both_silos_are_present(self) -> None:
+        from fl_server.server_app import wait_for_silos
+
+        grid = FakeGrid(node_ids=(11, 22))
+        slept: list[float] = []
+        assert sorted(wait_for_silos(grid, sleep=slept.append)) == [11, 22]
+        assert slept == [], "must not add latency to the healthy path"
+
+    def test_waits_for_a_silo_that_registers_late(self) -> None:
+        from fl_server.server_app import wait_for_silos
+
+        grid = FakeGrid(node_ids=(11,))
+        slept: list[float] = []
+
+        def sleep(seconds: float) -> None:
+            slept.append(seconds)
+            if len(slept) == 3:          # the second node turns up on poll 4
+                grid._node_ids = (11, 22)
+
+        assert sorted(wait_for_silos(grid, sleep=sleep)) == [11, 22]
+        assert len(slept) == 3
+
+    def test_raises_once_the_timeout_is_spent(self) -> None:
+        from fl_server.server_app import wait_for_silos
+
+        grid = FakeGrid(node_ids=(11,))
+        with pytest.raises(ValueError, match="got 1"):
+            wait_for_silos(grid, timeout_s=0.3, poll_s=0.1, sleep=lambda _s: None)
+
+    def test_does_not_wait_when_too_many_nodes_are_registered(self) -> None:
+        """Three SuperNodes is a misconfiguration, not a race: waiting cannot
+        fix it, so fail fast instead of burning the timeout."""
+        from fl_server.server_app import wait_for_silos
+
+        grid = FakeGrid(node_ids=(11, 22, 33))
+        slept: list[float] = []
+        with pytest.raises(ValueError, match="got 3"):
+            wait_for_silos(grid, sleep=slept.append)
+        assert slept == []
+
+    def test_error_names_the_fix(self) -> None:
+        from fl_server.server_app import wait_for_silos
+
+        grid = FakeGrid(node_ids=())
+        with pytest.raises(ValueError) as exc:
+            wait_for_silos(grid, timeout_s=0.1, poll_s=0.05, sleep=lambda _s: None)
+        assert "SuperNode" in str(exc.value)
+
+
 class TestPosName:
     """_pos_name maps partition-id -> silo label used in metric keys."""
 
@@ -648,7 +739,10 @@ def _fake_eval(auc_by_round, states=None):
     """
     calls = {"n": 0}
 
-    def _run_eval(grid, node_ids, top_model, split, extra_cfg=None, threshold=0.5):
+    def _run_eval(
+        grid, node_ids, top_model, split, extra_cfg=None, threshold=0.5,
+        timeout_s=None,   # mirrors the real signature; the fake never waits
+    ):
         calls["n"] += 1
         auc = auc_by_round[min(calls["n"], len(auc_by_round)) - 1]
         if states is not None:
@@ -670,13 +764,29 @@ def _fake_eval(auc_by_round, states=None):
 
 
 class TestNodeGuard:
-    """The loop requires exactly two SuperNodes — one per silo."""
+    """The loop requires exactly two SuperNodes — one per silo.
+
+    A short `silo-wait-timeout-s` keeps these fast: the loop now WAITS for a
+    late silo (see TestWaitForSilos), so a test that wants the failure must
+    say it is not willing to wait.
+    """
 
     @pytest.mark.parametrize("node_ids", [[], [11], [11, 22, 33]])
     def test_wrong_node_count_raises(self, run_server, node_ids) -> None:
         grid = FakeGrid(node_ids=node_ids)
         with pytest.raises(ValueError, match="exactly 2 SuperNodes"):
-            run_server(grid=grid)
+            run_server(grid=grid, **{"silo-wait-timeout-s": 0.0})
+
+    def test_the_wait_is_configurable_from_the_run_config(self, run_server) -> None:
+        """Operational escape hatch: the ceiling is reachable without editing
+        code, which is what a grid on a loaded machine needs."""
+        grid = FakeGrid(node_ids=[11])
+        import time as _time
+
+        start = _time.monotonic()
+        with pytest.raises(ValueError, match="exactly 2 SuperNodes"):
+            run_server(grid=grid, **{"silo-wait-timeout-s": 0.2})
+        assert _time.monotonic() - start < 30, "must honor the short timeout"
 
 
 class TestTrainingLoop:
@@ -1263,7 +1373,7 @@ class TestCollapseWarning:
     def test_warns_when_predictions_collapse(self, server_module, run_server,
                                              log_spy, monkeypatch) -> None:
         def collapsed_eval(grid, node_ids, top_model, split,
-                           extra_cfg=None, threshold=0.5):
+                           extra_cfg=None, threshold=0.5, timeout_s=None):
             return {
                 "auc_roc": 0.5, "pred_collapsed": 1.0, "pred_std": 0.0,
                 "pred_pos_rate": 0.0, "base_rate": 0.375,

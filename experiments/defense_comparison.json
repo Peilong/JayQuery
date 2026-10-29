@@ -1,0 +1,101 @@
+{
+ "attribute": "imd_band",
+ "rows": [
+  {
+   "run": "r200_none",
+   "defense": "none",
+   "accuracy": 0.255094051361084,
+   "lift": 0.12695925512283948
+  },
+  {
+   "run": "r200_none",
+   "defense": "random-projection",
+   "accuracy": 0.25117555260658264,
+   "lift": 0.12304075636833814
+  },
+  {
+   "run": "r200_none",
+   "defense": "top-k",
+   "accuracy": 0.2903605103492737,
+   "lift": 0.16222571411102918
+  },
+  {
+   "run": "r200_none",
+   "defense": "DP cut-layer (sigma=3.0747)",
+   "accuracy": 0.10658307373523712,
+   "lift": -0.02155172250300738
+  },
+  {
+   "run": "rixv8qtc",
+   "defense": "none",
+   "accuracy": 0.3785266578197479,
+   "lift": 0.2503918615815034
+  },
+  {
+   "run": "rixv8qtc",
+   "defense": "random-projection",
+   "accuracy": 0.32170847058296204,
+   "lift": 0.19357367434471753
+  },
+  {
+   "run": "rixv8qtc",
+   "defense": "top-k",
+   "accuracy": 0.33581504225730896,
+   "lift": 0.20768024601906446
+  },
+  {
+   "run": "rixv8qtc",
+   "defense": "DP cut-layer (sigma=3.0747)",
+   "accuracy": 0.10736677050590515,
+   "lift": -0.02076802573233935
+  },
+  {
+   "run": "xv27bhw0",
+   "defense": "none",
+   "accuracy": 0.24843260645866394,
+   "lift": 0.12029781022041944
+  },
+  {
+   "run": "xv27bhw0",
+   "defense": "random-projection",
+   "accuracy": 0.22766457498073578,
+   "lift": 0.09952977874249128
+  },
+  {
+   "run": "xv27bhw0",
+   "defense": "top-k",
+   "accuracy": 0.2394200563430786,
+   "lift": 0.11128526010483411
+  },
+  {
+   "run": "xv27bhw0",
+   "defense": "DP cut-layer (sigma=3.0747)",
+   "accuracy": 0.10815046727657318,
+   "lift": -0.01998432896167132
+  },
+  {
+   "run": "zntzeg0u",
+   "defense": "none",
+   "accuracy": 0.330720990896225,
+   "lift": 0.20258619465798047
+  },
+  {
+   "run": "zntzeg0u",
+   "defense": "random-projection",
+   "accuracy": 0.38949844241142273,
+   "lift": 0.2613636461731782
+  },
+  {
+   "run": "zntzeg0u",
+   "defense": "top-k",
+   "accuracy": 0.2821316719055176,
+   "lift": 0.15399687566727308
+  },
+  {
+   "run": "zntzeg0u",
+   "defense": "DP cut-layer (sigma=3.0747)",
+   "accuracy": 0.10971786826848984,
+   "lift": -0.018416927969754665
+  }
+ ]
+}

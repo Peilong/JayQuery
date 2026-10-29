@@ -1,0 +1,26 @@
+# Cut-layer width sweep (C3), d=16 at seed 44.
+#
+# Same settings as sweep_icc200_width.yaml, restricted to one cell so no
+# already-completed cell is re-run.
+name: icc200-width-backfill-d16
+method: grid
+metric:
+  name: val/auc_best
+  goal: maximize
+parameters:
+  embedding-dim:
+    values: [16]
+  seed:
+    values: [44]
+  placement:
+    value: cut-layer
+  epsilon:
+    value: 1
+  processed-dir:
+    value: data/processed/dedup_first
+  num-server-rounds:
+    value: 200
+  batch-sample-rate:
+    value: 0.05
+  combined-target-epsilon:
+    value: 1000.0

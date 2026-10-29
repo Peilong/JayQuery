@@ -629,6 +629,56 @@ _CHANNEL_KEYS: dict[str, tuple[str, str]] = {
 }
 
 
+def expand_cell(params: dict[str, Any]) -> None:
+    """Split a ``cell`` axis value into the placement/epsilon/seed axes, in place.
+
+    ``method: grid`` enumerates a cross-product, so a sweep covering a
+    scattered SET of cells cannot be written as one grid. Encoding each wanted
+    cell as a single value of one axis expresses that set as a single sweep.
+
+    The value is ``"<placement>|<epsilon>|<seed>"``, e.g. ``"cut-layer|0.5|43"``.
+    ``cell`` is POPPED: like ``placement`` and ``epsilon`` it is a sweep axis,
+    not a run-config key, and `flwr run` rejects keys it does not declare.
+
+    An integral epsilon stays an ``int`` so the emitted run-config string
+    matches the original cross-product sweep's for the same cell, which wrote
+    ``1`` rather than ``1.0``.
+
+    Args:
+        params: Sampled sweep parameters. Mutated in place. Without a ``cell``
+            key this is a no-op, so the hook is safe on every sweep.
+
+    Raises:
+        ValueError: If ``cell`` is not three ``|``-separated fields with a
+            numeric epsilon and an integer seed. A typo must fail the trial
+            rather than quietly run a mislabelled configuration.
+    """
+    if "cell" not in params:
+        return
+
+    raw = str(params.pop("cell"))
+    fields = raw.split("|")
+    if len(fields) != 3:
+        raise ValueError(
+            f"cell {raw!r} must be '<placement>|<epsilon>|<seed>', got "
+            f"{len(fields)} field(s)"
+        )
+    placement, eps_s, seed_s = (f.strip() for f in fields)
+    try:
+        epsilon: float | int = float(eps_s)
+        seed = int(seed_s)
+    except ValueError as exc:
+        raise ValueError(
+            f"cell {raw!r} needs a numeric epsilon and an integer seed: {exc}"
+        ) from exc
+    if float(epsilon).is_integer():
+        epsilon = int(epsilon)
+
+    params["placement"] = placement
+    params["epsilon"] = epsilon
+    params["seed"] = seed
+
+
 def expand_placement(params: dict[str, Any]) -> dict[str, Any]:
     """Turn the ICC grid's `placement` + `epsilon` axes into run-config keys.
 
@@ -675,6 +725,14 @@ def expand_placement(params: dict[str, Any]) -> dict[str, Any]:
         enable_key, eps_key = _CHANNEL_KEYS[channel]
         cfg[enable_key] = True
         cfg[eps_key] = epsilon
+
+    # Tie the label flip draw to the sweep seed. `label-dp-seed` has a default
+    # in pyproject's app config, so the `rc.get("seed", ...)` fallback in
+    # fl_client/common.py never fires and every trial would share one draw,
+    # leaving the label arms varying only in model init. Set only where labels
+    # are randomized and only when the sweep has a seed axis.
+    if "label" in channels and "seed" in params:
+        cfg["label-dp-seed"] = params["seed"]
     return cfg
 
 

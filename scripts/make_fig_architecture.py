@@ -62,7 +62,7 @@ def _arrow(ax, p0, p1, style="-|>", rad=0.0, lw=1.0, dashed=False) -> None:
 
 def build(out_path: Path) -> None:
     """Draw the architecture and write it to ``out_path``."""
-    fig, ax = plt.subplots(figsize=(3.45, 1.85))
+    fig, ax = plt.subplots(figsize=(3.45, 1.50))
     # Limits exceed the content so rounded corners and arrowheads never clip.
     ax.set_xlim(-0.05, 1.05)
     ax.set_ylim(-0.12, 1.06)

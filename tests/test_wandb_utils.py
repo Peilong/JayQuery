@@ -228,6 +228,84 @@ class TestSeedEverything:
 # ── placement expansion for the ICC grid ────────────────────────────────────
 
 
+class TestCellExpansion:
+    """A `cell` axis lets one sweep cover an arbitrary SET of grid cells.
+
+    `method: grid` expresses a cross-product, so covering a scattered set of
+    cells would otherwise need one single-cell sweep per cell. Encoding each
+    as one value of a single axis expresses the set as one sweep.
+    """
+
+    def _expand(self, **params):
+        from utils.wandb_utils import expand_cell
+
+        expand_cell(params)
+        return params
+
+    def test_splits_a_cell_into_the_three_grid_axes(self) -> None:
+        got = self._expand(cell="cut-layer|0.5|43")
+        assert got == {"placement": "cut-layer", "epsilon": 0.5, "seed": 43}
+
+    def test_integral_epsilon_stays_an_int(self) -> None:
+        """The first grid passed ints for 1/2/4/8 and a float only for 0.5.
+        Widening those to 1.0 would write a different run-config string for a
+        cell that is meant to match the earlier trials exactly."""
+        assert self._expand(cell="server|8|42")["epsilon"] == 8
+        assert isinstance(self._expand(cell="server|8|42")["epsilon"], int)
+        assert isinstance(self._expand(cell="server|0.5|42")["epsilon"], float)
+
+    def test_consumes_the_cell_key(self) -> None:
+        """`cell` is a sweep axis, not a run-config key: flwr rejects unknown
+        keys, so leaving it in would fail every backfill trial."""
+        params = {"cell": "all|2|44"}
+        from utils.wandb_utils import expand_cell
+
+        expand_cell(params)
+        assert "cell" not in params
+
+    def test_is_a_no_op_without_a_cell_axis(self) -> None:
+        params = {"placement": "server", "epsilon": 1, "seed": 42}
+        from utils.wandb_utils import expand_cell
+
+        expand_cell(params)
+        assert params == {"placement": "server", "epsilon": 1, "seed": 42}
+
+    def test_rejects_a_malformed_cell(self) -> None:
+        """A typo must fail loudly rather than run a mislabelled configuration."""
+        import pytest as _pytest
+
+        from utils.wandb_utils import expand_cell
+
+        for bad in ("server|1", "server|1|42|extra", "server-1-42", ""):
+            with _pytest.raises(ValueError, match="cell"):
+                expand_cell({"cell": bad})
+
+    def test_rejects_a_non_numeric_epsilon_or_seed(self) -> None:
+        import pytest as _pytest
+
+        from utils.wandb_utils import expand_cell
+
+        with _pytest.raises(ValueError, match="cell"):
+            expand_cell({"cell": "server|loose|42"})
+        with _pytest.raises(ValueError, match="cell"):
+            expand_cell({"cell": "server|1|fortytwo"})
+
+    def test_round_trips_through_placement_expansion(self) -> None:
+        """The point of the axis: a cell string must drive the same run-config
+        the original cross-product sweep produced."""
+        from utils.wandb_utils import expand_cell, expand_placement
+
+        params = {"cell": "all|4|44"}
+        expand_cell(params)
+        cfg = expand_placement(params)
+        assert cfg["server-dp-enabled"] is True
+        assert cfg["cut-noise-enabled"] is True
+        assert cfg["label-dp-enabled"] is True
+        assert cfg["label-dp-epsilon"] == 4
+        assert cfg["label-dp-seed"] == 44
+        assert params["seed"] == 44, "seed must survive as a run-config key"
+
+
 class TestPlacementExpansion:
     """`placement` + `epsilon` become the three channel switches.
 
@@ -278,6 +356,31 @@ class TestPlacementExpansion:
         assert cfg["server-dp-epsilon"] == 8
         assert cfg["cut-noise-target-epsilon"] == 8
         assert cfg["label-dp-epsilon"] == 8
+
+    def test_label_placement_ties_the_flip_draw_to_the_run_seed(self) -> None:
+        """The label channel's randomness must vary with the sweep seed.
+
+        `label-dp-seed` has a default in pyproject's app config, so the
+        `rc.get("seed", ...)` fallback in fl_client/common.py never fires and
+        every trial would share one flip draw. Two "seeds" would then differ
+        only in model init, not in which labels were flipped, understating the
+        spread for every arm that uses the label channel.
+        """
+        assert self._expand(placement="label", epsilon=1, seed=43)["label-dp-seed"] == 43
+        assert self._expand(placement="all", epsilon=1, seed=44)["label-dp-seed"] == 44
+
+    def test_placements_without_labels_do_not_pin_a_flip_seed(self) -> None:
+        """Only set the key where it means something, so a no-label run-config
+        stays a statement about which channels exist."""
+        for placement in ("none", "server", "cut-layer"):
+            cfg = self._expand(placement=placement, epsilon=1, seed=43)
+            assert "label-dp-seed" not in cfg
+
+    def test_label_seed_is_omitted_when_the_sweep_has_no_seed_axis(self) -> None:
+        """Without a seed axis the app-config default stands; inventing one
+        here would silently change the draw for single-seed sweeps."""
+        cfg = self._expand(placement="label", epsilon=1)
+        assert "label-dp-seed" not in cfg
 
     def test_consumes_its_own_keys(self) -> None:
         """`placement` and `epsilon` are sweep axes, not run-config keys.

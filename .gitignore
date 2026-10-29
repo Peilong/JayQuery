@@ -33,6 +33,8 @@ data/processed/
 
 # ── Model checkpoints ────────────────────────────────────────────
 experiments/checkpoints/
+# Superseded 100-round checkpoints; same class of artifact as the line above.
+experiments/archive_100round/
 *.pt
 *.pth
 *.ckpt

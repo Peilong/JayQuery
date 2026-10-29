@@ -12,6 +12,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
 from baselines.eval_utils import compute_metrics, print_metrics_table
+from baselines.training_plan import resolve_plan
 from utils.reproducibility import seed_everything
 
 
@@ -73,7 +74,18 @@ def train_and_evaluate(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = IsolatedMLP(input_dim=X_train.shape[1], dropout_rate=cfg["dropout_rate"]).to(device)
 
-    pos_weight = torch.tensor([(y_train == 0).sum() / max((y_train == 1).sum(), 1)]).to(device)
+    # Budget resolved centrally so this control matches the VFL run's
+    # optimization effort. See baselines/training_plan.py.
+    plan = resolve_plan(
+        cfg,
+        n_train=len(y_train),
+        n_pos=int((y_train == 1).sum()),
+        n_neg=int((y_train == 0).sum()),
+    )
+    pos_weight = (
+        None if plan.pos_weight is None
+        else torch.tensor([plan.pos_weight], device=device)
+    )
     loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg["lr"])
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, mode="max")
@@ -81,12 +93,26 @@ def train_and_evaluate(
     train_ds = TensorDataset(
         torch.tensor(X_train, dtype=torch.float32), torch.tensor(y_train, dtype=torch.float32)
     )
-    train_loader = DataLoader(train_ds, batch_size=cfg["batch_size"], shuffle=True)
+    # Sampled WITH replacement across steps, mirroring the VFL run's
+    # per-round Poisson draw rather than an epoch sweep.
+    train_loader = DataLoader(train_ds, batch_size=plan.batch_size, shuffle=True)
 
     best_val_auc, best_state = 0.0, None
-    for epoch in range(cfg["epochs"]):
+    # One "epoch" here is an EVAL INTERVAL, not a pass over the data: the
+    # budget is plan.steps optimizer steps, matching the VFL run's rounds.
+    # Evaluating every eval_every steps mirrors the grid's eval-every=5 so
+    # model selection gets a comparable number of candidate checkpoints.
+    eval_every = max(1, int(cfg.get("eval_every", 5)))
+    n_intervals = max(1, plan.steps // eval_every)
+    step_iter = iter(train_loader)
+    for epoch in range(n_intervals):
         model.train()
-        for X_b, y_b in train_loader:
+        for _ in range(eval_every):
+            try:
+                X_b, y_b = next(step_iter)
+            except StopIteration:            # reshuffle and keep going
+                step_iter = iter(train_loader)
+                X_b, y_b = next(step_iter)
             X_b, y_b = X_b.to(device), y_b.to(device)
             optimizer.zero_grad()
             loss = loss_fn(model(X_b).squeeze(1), y_b)

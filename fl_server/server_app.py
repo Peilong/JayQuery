@@ -32,16 +32,18 @@ Usage (deployment mode — three separate processes):
 """
 
 import json
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from logging import INFO, WARNING
 from pathlib import Path
 
 import torch
-import wandb
 from flwr.app import Array, ArrayRecord, ConfigRecord, Context, Message, RecordDict
 from flwr.common import log
 from flwr.serverapp import Grid, ServerApp
 
+import wandb
 from fl_server.top_model import TopModel
 from privacy.dp_wrapper import make_private_with_noise
 from privacy.privacy_accountant import (
@@ -55,6 +57,65 @@ app = ServerApp()
 
 _SILO_A_POS = 0
 _SILO_B_POS = 1
+
+
+#: How long to wait for both silos to register, and how often to look.
+#: Registration lag is ordinarily well under a second; the generous ceiling
+#: covers a loaded machine, where a 200-round run is too expensive to abandon
+#: over startup skew.
+#: Seconds to wait for both silos' replies in one round. Without a timeout,
+#: send_and_receive blocks indefinitely if a silo's clientapp dies; the reply
+#: sites raise on a missing silo, and this bound is what lets that check run.
+#: A healthy round answers in well under 20s at d=64.
+ROUND_TIMEOUT_S = 300.0
+
+SILO_WAIT_TIMEOUT_S = 90.0
+SILO_WAIT_POLL_S = 1.0
+
+
+def wait_for_silos(
+    grid: Grid,
+    timeout_s: float = SILO_WAIT_TIMEOUT_S,
+    poll_s: float = SILO_WAIT_POLL_S,
+    sleep: Callable[[float], None] = time.sleep,
+) -> list[int]:
+    """Return both silos' node ids, waiting for a late one to register.
+
+    Read at the top of every round, so it covers two events: a SuperNode that
+    has not finished registering at round 1, and a silo whose clientapp dies
+    and re-registers mid-run, briefly leaving one node visible.
+
+    Too MANY nodes is a misconfigured federation rather than a race, so it
+    fails immediately instead of spending the timeout on a condition that
+    cannot resolve itself.
+
+    Args:
+        grid: The federation handle.
+        timeout_s: Total time to wait for a second silo.
+        poll_s: Delay between looks.
+        sleep: Injected for tests, which must not really sleep.
+
+    Returns:
+        The two node ids, in whatever order the grid reports them.
+
+    Raises:
+        ValueError: If the federation still does not show exactly 2 SuperNodes
+            once the timeout is spent, or shows more than 2 at any point.
+    """
+    waited = 0.0
+    while True:
+        node_ids = list(grid.get_node_ids())
+        if len(node_ids) == 2:
+            return node_ids
+        if len(node_ids) > 2 or waited >= timeout_s:
+            raise ValueError(
+                f"Expected exactly 2 SuperNodes (Silo A + Silo B), got "
+                f"{len(node_ids)}"
+                + (f" after waiting {waited:.0f}s" if node_ids and waited else "")
+                + ". Run: flwr federation simulation-config --num-supernodes=2"
+            )
+        sleep(poll_s)
+        waited += poll_s
 
 
 @app.main()
@@ -146,6 +207,16 @@ def main(grid: Grid, context: Context) -> None:
     plateau_patience = int(context.run_config.get("lr-plateau-patience", 3))  # eval events
     lr_min = float(context.run_config.get("lr-min", 1e-6))
     grad_clip = float(context.run_config.get("grad-clip-norm", 0.0))  # 0 disables
+    # Seconds to wait for a late-registering silo (see wait_for_silos),
+    # exposed so tests need not wait and a loaded machine can raise it.
+    silo_wait_timeout = float(
+        context.run_config.get("silo-wait-timeout-s", SILO_WAIT_TIMEOUT_S)
+    )
+    # Per-round reply deadline (see ROUND_TIMEOUT_S), threaded explicitly so
+    # helpers driven directly by tests cannot fall back to blocking.
+    round_timeout = float(
+        context.run_config.get("round-timeout-s", ROUND_TIMEOUT_S)
+    )
     plateau_scale = 1.0
     current_lr = base_lr
     
@@ -156,16 +227,11 @@ def main(grid: Grid, context: Context) -> None:
         log(INFO, "")
         log(INFO, "--- ServerApp Round %d / %d ---", round_num, num_rounds)
 
-        node_ids = list(grid.get_node_ids())
-        if len(node_ids) != 2:
-            raise ValueError(
-                f"Expected exactly 2 SuperNodes (Silo A + Silo B), got {len(node_ids)}. "
-                "Run: flwr federation simulation-config --num-supernodes=2"
-            )
+        node_ids = wait_for_silos(grid, timeout_s=silo_wait_timeout)
 
         rd = _get_embeddings(
             grid=grid, node_ids=node_ids, round_num=round_num,
-            batch_seed=seed * 100_000 + round_num, sample_rate=sample_rate,
+            batch_seed=seed * 100_000 + round_num, sample_rate=sample_rate, timeout_s=round_timeout
         )
         for pos, prims in rd.client_privacy.items():
             client_trackers[pos] = PrivacyBudgetTracker.from_dict(prims)
@@ -314,7 +380,9 @@ def main(grid: Grid, context: Context) -> None:
             src = train_model._module if dp["enabled"] else top_model
             eval_model = TopModel(**top_kwargs)
             eval_model.load_state_dict(src.state_dict())
-            val_metrics = _run_eval(grid, node_ids, eval_model, split="val")
+            val_metrics = _run_eval(
+                grid, node_ids, eval_model, split="val", timeout_s=round_timeout
+            )
             val_auc = float(val_metrics["auc_roc"])
             if track:
                 # Full suite (recall/precision/f1/brier/confusion counts +
@@ -402,11 +470,12 @@ def main(grid: Grid, context: Context) -> None:
     # point. The 0.5 result is kept alongside for an honest before/after.
     thr_objective = str(context.run_config.get("threshold-objective", "f1"))
     val_probs, val_pos_map = _collect_eval_predictions(
-        grid, node_ids, final_eval, split="val"
+        grid, node_ids, final_eval, split="val", timeout_s=round_timeout
     )
     # The holder tunes on its own true labels and tells us which threshold it chose.
     _, tuned_threshold = _score_at_label_holder(
-        grid, val_pos_map, val_probs, "val", tune=True, objective=thr_objective
+        grid, val_pos_map, val_probs, "val", tune=True,
+        objective=thr_objective, timeout_s=round_timeout,
     )
     log(INFO, "Tuned decision threshold on val (%s): %.4f (default 0.5)",
         thr_objective, tuned_threshold)
@@ -414,17 +483,17 @@ def main(grid: Grid, context: Context) -> None:
     # restore-best rides on this final query so clients checkpoint their best bottoms.
     test_probs, test_pos_map = _collect_eval_predictions(
         grid, node_ids, final_eval, split="test",
-        extra_cfg={"restore-best": True, "eps-tag": eps_tag},
+        extra_cfg={"restore-best": True, "eps-tag": eps_tag}, timeout_s=round_timeout
     )
     # Two scorings of the SAME predictions: at the tuned operating point and at
     # the naive 0.5, so the tuned-vs-default gain stays visible. Operating
     # points (recall@precision) come back inside these metrics, since they
     # need ground truth too.
     test_metrics, _ = _score_at_label_holder(
-        grid, test_pos_map, test_probs, "test", threshold=tuned_threshold
+        grid, test_pos_map, test_probs, "test", threshold=tuned_threshold, timeout_s=round_timeout
     )
     test_metrics_at_half, _ = _score_at_label_holder(
-        grid, test_pos_map, test_probs, "test", threshold=0.5
+        grid, test_pos_map, test_probs, "test", threshold=0.5, timeout_s=round_timeout
     )
     op_points = {
         k: v for k, v in test_metrics.items() if k.startswith("recall_at_precision_")
@@ -641,6 +710,7 @@ def _get_embeddings(
     round_num: int,
     batch_seed: int,
     sample_rate: float,
+    timeout_s: float = ROUND_TIMEOUT_S,
 ) -> _RoundData:
     """Query both SuperNodes for this round's batch embeddings.
 
@@ -665,7 +735,7 @@ def _get_embeddings(
     ]
 
     log(INFO, "Requesting embeddings from %d nodes...", len(messages))
-    replies = grid.send_and_receive(messages)
+    replies = grid.send_and_receive(messages, timeout=timeout_s)
     log(INFO, "\tReceived %d/%d results", len(replies), len(messages))
 
     rd = _RoundData()
@@ -761,6 +831,7 @@ def _collect_eval_predictions(
     top_model: TopModel,
     split: str,
     extra_cfg: dict | None = None,
+    timeout_s: float = ROUND_TIMEOUT_S,
 ) -> tuple[torch.Tensor, dict[int, int]]:
     """Run one distributed eval round and return (probs, node_pos_map).
 
@@ -787,7 +858,7 @@ def _collect_eval_predictions(
     ]
 
     log(INFO, "Requesting embeddings from %d nodes...", len(messages))
-    replies = grid.send_and_receive(messages)
+    replies = grid.send_and_receive(messages, timeout=timeout_s)
     log(INFO, "\tReceived %d/%d results", len(replies), len(messages))
 
     emb_a = emb_b = None
@@ -827,13 +898,14 @@ def _run_eval(
     split: str,
     extra_cfg: dict | None = None,
     threshold: float = 0.5,
+    timeout_s: float = ROUND_TIMEOUT_S,
 ) -> dict:
     """Distributed eval round → metrics dict at the given decision `threshold`."""
     probs, node_pos_map = _collect_eval_predictions(
-        grid, node_ids, top_model, split, extra_cfg
+        grid, node_ids, top_model, split, extra_cfg, timeout_s=timeout_s
     )
     metrics, _ = _score_at_label_holder(
-        grid, node_pos_map, probs, split, threshold=threshold
+        grid, node_pos_map, probs, split, threshold=threshold, timeout_s=timeout_s
     )
     return metrics
 
@@ -846,6 +918,7 @@ def _score_at_label_holder(
     threshold: float = 0.5,
     tune: bool = False,
     objective: str = "f1",
+    timeout_s: float = ROUND_TIMEOUT_S,
 ) -> tuple[dict, float]:
     """Ship predictions to the label-holding silo and get metrics back.
 
@@ -890,7 +963,7 @@ def _score_at_label_holder(
             message_type="query.score_split",
             dst_node_id=holder[0],
         )
-    ])
+    ], timeout=timeout_s)
 
     for reply in replies:
         if not reply.has_content() or "metrics" not in reply.content:

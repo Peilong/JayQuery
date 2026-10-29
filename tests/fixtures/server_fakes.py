@@ -102,6 +102,7 @@ class FakeGrid:
         self.sent: list[list[Message]] = []
         self.received: list[list[Message]] = []
         self.send_and_receive_calls = 0
+        self.timeouts = []
         self.push_calls = 0
         # Per-node bottom-model stand-ins, so repeated rounds can return
         # embeddings that actually change in response to gradients.
@@ -122,8 +123,11 @@ class FakeGrid:
     def get_node_ids(self):
         return list(self._node_ids)
 
-    def send_and_receive(self, messages, timeout=None):
+    def send_and_receive(self, messages, *, timeout=None):
         self.send_and_receive_calls += 1
+        #: Every timeout the server asked for, in call order. A None here
+        #: means the server would block indefinitely on an unresponsive silo.
+        self.timeouts.append(timeout)
         msgs = list(messages)
         self.sent.append(msgs)
         replies = self.responder(msgs, self.send_and_receive_calls)

@@ -1,0 +1,26 @@
+# Cut-layer width sweep (C3), seed 44 at d=16 and d=64.
+#
+# embedding-dim is the sweep axis and seed is fixed, the mirror of
+# sweep_icc200_width.yaml, so no already-completed cell is re-run.
+name: icc200-width-fill-s44
+method: grid
+metric:
+  name: val/auc_best
+  goal: maximize
+parameters:
+  embedding-dim:
+    values: [16, 64]
+  seed:
+    values: [44]
+  placement:
+    value: cut-layer
+  epsilon:
+    value: 1
+  processed-dir:
+    value: data/processed/dedup_first
+  num-server-rounds:
+    value: 200
+  batch-sample-rate:
+    value: 0.05
+  combined-target-epsilon:
+    value: 1000.0

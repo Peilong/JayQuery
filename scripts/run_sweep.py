@@ -71,7 +71,11 @@ def make_pre_trial_fn(enable_cutoff_week: bool) -> Callable[[dict[str, Any]], di
     """Build the pre-trial hook: pop cutoff-week and resolve the trial's dataset."""
 
     def pre_trial(params: dict[str, Any]) -> dict[str, Any]:
-        from utils.wandb_utils import expand_placement
+        from utils.wandb_utils import expand_cell, expand_placement
+
+        # A backfill sweep names each wanted cell on one axis; split it back
+        # into placement/epsilon/seed before they are read. No-op otherwise.
+        expand_cell(params)
 
         # ICC grid: placement/epsilon are sweep axes, not run-config keys.
         # Pop them first so they never reach --run-config.
