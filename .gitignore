@@ -33,11 +33,16 @@ data/processed/
 
 # ── Model checkpoints ────────────────────────────────────────────
 experiments/checkpoints/
-# Superseded 100-round checkpoints; same class of artifact as the line above.
-experiments/archive_100round/
 *.pt
 *.pth
 *.ckpt
+
+# Exception: the archived 100-round runs are published as a release artifact
+# so the earlier horizon's results can be reproduced without re-training.
+# 2.3 MB over 20 runs; the live checkpoint directory stays ignored.
+!experiments/archive_100round/
+!experiments/archive_100round/**/*.pt
+!experiments/archive_100round/**/meta.json
 
 # ── Environment & secrets ─────────────────────────────────────────
 .env
