@@ -10,6 +10,15 @@ the noisy copy is reused for every training round. Returned gradients are
 post-processing of those noisy labels, so the guarantee covers both the
 coordinator and the peer silo.
 
+NOTE ON rr_with_prior: the prior-aware variant below is implemented and
+tested but is NOT wired into the system. LabelRRAccountant.randomize(), which
+fl_client/common.py calls, uses blind randomized_response(). Every reported
+result therefore comes from the blind mechanism, and the forward correction in
+corrected_positive_prob() is exact for it. Wiring rr_with_prior in would make
+that correction a misspecification for the argmax branch, where the released
+label does not depend on the true one, so the loss would need a per-example
+mixture before the variant could be used.
+
 Three properties make this channel different from the other two, and all three
 are load-bearing:
 

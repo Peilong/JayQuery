@@ -1,12 +1,21 @@
 {
   "title": "JayQuery: per-channel differential privacy in cross-institution split vertical federated learning",
-  "description": "<p>A two-silo split vertical federated learning system carrying three differential privacy mechanisms simultaneously: cut-layer Gaussian noise on each silo's embeddings, DP-SGD on the coordinator's top model, and prior-based randomized response on the labels. Each mechanism has its own accountant and an explicitly stated neighboring relation, and the label budget is reported beside the composed Gaussian total rather than inside it.</p><p>Includes Diffie-Hellman private set intersection over ristretto255, an embedding-inversion attack using a noise-matched learned inverse, loss-threshold membership inference, non-DP cut-layer defense baselines for comparison, and the sweep, backfill and analysis tooling used to produce the reported results.</p>",
+  "description": "<p>A two-silo split vertical federated learning system carrying three differential privacy mechanisms simultaneously: cut-layer Gaussian noise on each silo's embeddings, DP-SGD on the coordinator's top model, and randomized response on the labels. Each mechanism has its own accountant and an explicitly stated neighboring relation, and the label budget is reported beside the composed Gaussian total rather than inside it.</p><p>Includes Diffie-Hellman private set intersection over ristretto255, an embedding-inversion attack using a noise-matched learned inverse, loss-threshold membership inference, non-DP cut-layer defense baselines for comparison, and the sweep, backfill and analysis tooling used to produce the reported results.</p>",
   "upload_type": "software",
   "license": "mit",
   "creators": [
-    {"name": "Li, Peilong", "affiliation": "Elizabethtown College"},
-    {"name": "Pellet, Alexander", "affiliation": "Elizabethtown College"},
-    {"name": "Wilfong, Wyatt", "affiliation": "Elizabethtown College"}
+    {
+      "name": "Li, Peilong",
+      "affiliation": "Elizabethtown College"
+    },
+    {
+      "name": "Pellet, Alexander",
+      "affiliation": "Elizabethtown College"
+    },
+    {
+      "name": "Wilfong, Wyatt",
+      "affiliation": "Elizabethtown College"
+    }
   ],
   "keywords": [
     "vertical federated learning",

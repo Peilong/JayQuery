@@ -8,7 +8,7 @@ title: >-
 abstract: >-
   A two-silo split vertical federated learning system that carries three
   differential privacy mechanisms at once, cut-layer Gaussian noise on each
-  silo's embeddings, DP-SGD on the coordinator's top model, and prior-based
+  silo's embeddings, DP-SGD on the coordinator's top model, and
   randomized response on the labels, each with its own accountant and an
   explicitly stated neighboring relation. Includes elliptic-curve private set
   intersection over ristretto255, an embedding-inversion attack with a
